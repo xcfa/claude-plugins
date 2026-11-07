@@ -1358,7 +1358,13 @@ def cmd_enqueue(args, root: Path) -> int:
     store = Store(root)
     if not store.initialized:
         raise AiflowError("репозиторий не инициализирован: aiflow init")
-    raw = sys.stdin.read() if args.file in (None, "-") else Path(args.file).read_text(encoding="utf-8")
+    # Байты и явный UTF-8: на Windows sys.stdin декодирует в кодировке ANSI (cp1251),
+    # и кириллица из heredoc превращается в мусор или роняет запись.
+    blob = sys.stdin.buffer.read() if args.file in (None, "-") else Path(args.file).read_bytes()
+    try:
+        raw = blob.decode("utf-8-sig")
+    except UnicodeDecodeError as e:
+        raise AiflowError(f"задачи должны быть в UTF-8: {e}") from None
     data = json.loads(raw)
     items = data if isinstance(data, list) else [data]
     tasks = [normalize_task(x) for x in items]

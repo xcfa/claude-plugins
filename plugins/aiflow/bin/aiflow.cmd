@@ -1,5 +1,6 @@
 @echo off
 setlocal
+set "PYTHONUTF8=1"
 set "AIFLOW=%~dp0..\scripts\aiflow.py"
 where py >nul 2>nul && (py -3 "%AIFLOW%" %* & exit /b %ERRORLEVEL%)
 where python >nul 2>nul && (python "%AIFLOW%" %* & exit /b %ERRORLEVEL%)
