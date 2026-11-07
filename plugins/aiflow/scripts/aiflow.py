@@ -508,21 +508,17 @@ class GH:
 
 # ---------------------------------------------------------------- usage
 
+TOKEN_KINDS = ("input", "output", "cache_read", "cache_write")
 _usage_cache: dict[str, tuple[float, dict]] = {}
 
 
-def transcript_usage(session_id: str) -> dict | None:
-    base = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
-    files = glob.glob(str(base / "projects" / "*" / f"{session_id}.jsonl"))
-    if not files:
-        return None
-    path = files[0]
+def _file_usage(path: str) -> dict[str, dict]:
+    """{модель: {input, output, cache_read, cache_write}} одного транскрипта (с кэшем по mtime)."""
     mtime = os.path.getmtime(path)
     cached = _usage_cache.get(path)
     if cached and cached[0] == mtime:
         return cached[1]
-    per_msg: dict[str, dict] = {}
-    model = ""
+    per_msg: dict[str, tuple[str, dict]] = {}  # стриминг пишет одно сообщение несколько раз — берём последнюю запись
     with open(path, encoding="utf-8", errors="replace") as f:
         for i, line in enumerate(f):
             try:
@@ -532,21 +528,61 @@ def transcript_usage(session_id: str) -> dict | None:
             msg = obj.get("message") if isinstance(obj, dict) else None
             if not isinstance(msg, dict) or not isinstance(msg.get("usage"), dict):
                 continue
-            per_msg[msg.get("id") or f"line{i}"] = msg["usage"]
-            model = msg.get("model") or model
-    tot = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "model": model}
-    for u in per_msg.values():
-        tot["input"] += int(u.get("input_tokens") or 0)
-        tot["output"] += int(u.get("output_tokens") or 0)
-        tot["cache_read"] += int(u.get("cache_read_input_tokens") or 0)
-        tot["cache_write"] += int(u.get("cache_creation_input_tokens") or 0)
-    _usage_cache[path] = (mtime, tot)
-    return tot
+            model = msg.get("model") or "?"
+            if model == "<synthetic>":
+                continue
+            per_msg[msg.get("id") or f"line{i}"] = (model, msg["usage"])
+    out: dict[str, dict] = {}
+    for model, u in per_msg.values():
+        m = out.setdefault(model, dict.fromkeys(TOKEN_KINDS, 0))
+        m["input"] += int(u.get("input_tokens") or 0)
+        m["output"] += int(u.get("output_tokens") or 0)
+        m["cache_read"] += int(u.get("cache_read_input_tokens") or 0)
+        m["cache_write"] += int(u.get("cache_creation_input_tokens") or 0)
+    _usage_cache[path] = (mtime, out)
+    return out
+
+
+def add_usage(into: dict[str, dict], models: dict[str, dict]) -> dict[str, dict]:
+    for model, u in models.items():
+        m = into.setdefault(model, dict.fromkeys(TOKEN_KINDS, 0))
+        for k in TOKEN_KINDS:
+            m[k] += int(u.get(k) or 0)
+    return into
+
+
+def transcript_usage(session_id: str) -> dict | None:
+    """Расход сессии по моделям, вместе с её сабагентами (explorer, researcher и т. п.)."""
+    base = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    files = glob.glob(str(base / "projects" / "*" / f"{session_id}.jsonl"))
+    if not files:
+        return None
+    files += glob.glob(str(base / "projects" / "*" / session_id / "subagents" / "*.jsonl"))
+    models: dict[str, dict] = {}
+    main: dict[str, dict] = {}
+    for i, path in enumerate(files):
+        try:
+            fu = _file_usage(path)
+        except OSError:
+            continue
+        add_usage(models, fu)
+        if i == 0:
+            main = fu
+    tot = {k: sum(u[k] for u in models.values()) for k in TOKEN_KINDS}
+    model = max(main, key=lambda m: main[m]["output"], default="")
+    return {**tot, "model": model, "models": models}
+
+
+def task_usage(t: dict) -> dict[str, dict]:
+    """Расход задачи по моделям; старые записи без разбивки относятся к основной модели сессии."""
+    out: dict[str, dict] = {}
+    for u in (t.get("usage") or {}).values():
+        add_usage(out, u.get("models") or {u.get("model") or "?": u})
+    return out
 
 
 def task_tokens(t: dict) -> int:
-    return sum(int(u.get("input", 0)) + int(u.get("output", 0)) + int(u.get("cache_write", 0))
-               for u in (t.get("usage") or {}).values())
+    return sum(u["input"] + u["output"] + u["cache_write"] for u in task_usage(t).values())
 
 
 # ---------------------------------------------------------------- prompts
@@ -1151,7 +1187,7 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
             "complexity": t.get("complexity"), "pr": pr,
             "pr_url": f"{repo_url}/pull/{pr}" if pr and repo_url else None,
             "rounds": review.get("round"), "max_rounds": cfg["max_rounds"],
-            "tokens": task_tokens(t), "session": cur, "needs": needs,
+            "tokens": task_tokens(t), "usage": task_usage(t), "session": cur, "needs": needs,
             "depends_on": t.get("depends_on") or [], "state_at": t.get("state_at"),
             "launching": bool(t.get("launching")), "review_lock": q.get("review_lock") == t["id"],
         })

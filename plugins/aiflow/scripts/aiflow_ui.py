@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import secrets
+import shlex
 import shutil
+import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -51,6 +55,45 @@ class _Models:
             tail = ANSI_RE.sub("", (p.stderr or p.stdout or "").strip())[-300:]
             return [], f"opencode models завершился с ошибкой: {tail}"
         return items, ""
+
+
+def _task_session(t: dict) -> str | None:
+    """Последняя сессия задачи: исполнитель, если он уже был, иначе планировщик."""
+    for role in ("worker", "planner"):
+        lst = (t.get("sessions") or {}).get(role) or []
+        if lst and lst[-1].get("id"):
+            return str(lst[-1]["id"])
+    return None
+
+
+def open_terminal(root: Path, sid: str) -> str:
+    """Открыть `claude attach <sid>` в новом окне терминала. Возвращает, где открыли."""
+    if not re.fullmatch(r"[A-Za-z0-9][\w\-]{0,100}", sid):
+        raise aiflow.AiflowError("некорректный id сессии")
+    claude = shutil.which("claude") or "claude"
+    title = f"aiflow {sid}"
+    if os.name == "nt":
+        flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        wt = shutil.which("wt.exe") or shutil.which("wt")
+        if wt:
+            subprocess.Popen([wt, "-w", "new", "new-tab", "-d", str(root), "--title", title, claude, "attach", sid],
+                             cwd=root, creationflags=flags)
+            return "Windows Terminal"
+        subprocess.Popen(["cmd", "/c", "start", title, "/D", str(root), claude, "attach", sid],
+                         cwd=root, creationflags=flags)
+        return "cmd"
+    cmd = f"cd {shlex.quote(str(root))} && {shlex.quote(claude)} attach {sid}"
+    if sys.platform == "darwin":
+        esc = cmd.replace("\\", "\\\\").replace('"', '\\"')
+        subprocess.Popen(["osascript", "-e", f'tell application "Terminal" to do script "{esc}"',
+                          "-e", 'tell application "Terminal" to activate'], cwd=root)
+        return "Terminal"
+    for term, args in (("x-terminal-emulator", ["-e"]), ("gnome-terminal", ["--"]), ("konsole", ["-e"]), ("xterm", ["-e"])):
+        exe = shutil.which(term)
+        if exe:
+            subprocess.Popen([exe, *args, "sh", "-c", cmd], cwd=root, start_new_session=True)
+            return term
+    raise aiflow.AiflowError("не нашёл терминал; выполните вручную: claude attach " + sid)
 
 
 class _Cache:
@@ -139,6 +182,13 @@ def start_server(store: aiflow.Store, port: int, wake: threading.Event):
                     if not t or not t.get("pr"):
                         return self._json(400, {"error": "у задачи нет PR с планом"})
                     aiflow.GH(store.root).add_label(t["pr"], store.config()["labels"]["approved"])
+                elif action == "open_session" and tid:
+                    t = store.task(tid)
+                    sid = _task_session(t) if t else None
+                    if not sid:
+                        return self._json(400, {"error": "у задачи ещё нет сессии"})
+                    where = open_terminal(store.root, sid)
+                    return self._json(200, {"ok": True, "where": where, "command": f"claude attach {sid}"})
                 elif action == "set_reviewer_model":
                     value = body.get("value")
                     value = value.strip() if isinstance(value, str) else None
@@ -153,7 +203,7 @@ def start_server(store: aiflow.Store, port: int, wake: threading.Event):
                     return self._json(400, {"error": "неизвестное действие"})
                 wake.set()
                 return self._json(200, {"ok": True})
-            except (ValueError, aiflow.AiflowError) as e:
+            except (ValueError, OSError, aiflow.AiflowError) as e:
                 return self._json(400, {"error": str(e)})
 
     srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)

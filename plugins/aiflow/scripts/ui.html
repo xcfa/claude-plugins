@@ -41,7 +41,7 @@ header .sub b { font-weight: 600; color: var(--ink); }
 .queue .state.paused { color: var(--wait); font-weight: 600; }
 
 #waiting { margin-bottom: 32px; }
-#waiting h2, #board h2, #events h2 { font-size: 15px; font-weight: 650; margin: 0 0 10px; }
+#waiting h2, #board h2, #usage h2, #events h2 { font-size: 15px; font-weight: 650; margin: 0 0 10px; }
 .wait-item {
   display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 20px; align-items: center;
   background: var(--wait-bg); border-left: 4px solid var(--wait); padding: 12px 16px; margin-bottom: 8px; border-radius: 0 6px 6px 0;
@@ -51,7 +51,7 @@ header .sub b { font-weight: 600; color: var(--ink); }
 .wait-item .acts { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 .wait-item.fail { border-left-color: var(--fail); }
 
-#board { margin-bottom: 36px; }
+#board, #usage { margin-bottom: 36px; }
 .grid { display: grid; grid-template-columns: minmax(200px, 280px) repeat(7, minmax(64px, 1fr)) minmax(150px, 190px); }
 .grid > div { min-width: 0; }
 .head { color: var(--muted); font-size: 12.5px; padding: 0 4px 8px; text-align: center; border-bottom: 1px solid var(--rule); }
@@ -86,6 +86,16 @@ header .sub b { font-weight: 600; color: var(--ink); }
 .empty code { color: var(--ink); }
 .hidden-note { margin-top: 10px; color: var(--muted); font-size: 13px; }
 .hidden-note button { margin-left: 8px; }
+
+#usage .wrap { overflow-x: auto; max-width: 980px; }
+#usage table { border-collapse: collapse; width: 100%; font-size: 13.5px; font-variant-numeric: tabular-nums; }
+#usage th, #usage td { padding: 6px 10px; border-bottom: 1px solid var(--rule); text-align: right; white-space: nowrap; }
+#usage th { color: var(--muted); font-weight: 500; }
+#usage th:first-child, #usage td:first-child, #usage th:nth-child(2), #usage td:nth-child(2) { text-align: left; }
+#usage td:first-child { font-weight: 600; }
+#usage tr.sum td { font-weight: 650; }
+#usage tr.sum td:first-child { color: var(--muted); }
+#usage .note { color: var(--muted); font-size: 13px; margin-top: 8px; max-width: 760px; }
 
 #events ol { list-style: none; margin: 0; padding: 0; max-width: 760px; }
 #events li { padding: 5px 0; display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 10px; font-size: 13.5px; }
@@ -148,6 +158,15 @@ header .sub b { font-weight: 600; color: var(--ink); }
   <div class="hidden-note" id="cancelnote" hidden></div>
 </section>
 
+<section id="usage" hidden>
+  <h2>Расход токенов</h2>
+  <div class="wrap"><table>
+    <thead><tr><th>Задача</th><th>Модель</th><th>Вход</th><th>Выход</th><th>Кэш: чтение</th><th>Кэш: запись</th></tr></thead>
+    <tbody id="usagebody"></tbody>
+  </table></div>
+  <div class="note">Учитываются сессии задачи и их сабагенты. «Токены» на доске — вход + выход + запись в кэш; чтение из кэша стоит намного дешевле и в эту сумму не входит.</div>
+</section>
+
 <section id="events">
   <h2>События</h2>
   <ol id="evlist"></ol>
@@ -190,9 +209,17 @@ async function act(action, id) {
     const r = await fetch("/api/action", { method: "POST", headers: { "Content-Type": "application/json", "X-Aiflow-Token": TOKEN }, body: JSON.stringify({ action, id }) });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || r.statusText);
+    if (action === "open_session") return toast(`Сессия открыта в новом окне (${d.where})`);
     toast({ approve: "План одобрен", retry: "Повтор поставлен", pause: "Очередь на паузе", resume: "Очередь продолжает" }[action] || "Готово");
     setTimeout(load, 600);
-  } catch (e) { toast("Не получилось: " + e.message); }
+  } catch (e) {
+    const t = action === "open_session" && last && last.tasks.find(x => x.id === id);
+    if (t && t.session && t.session.id) {
+      navigator.clipboard?.writeText("claude attach " + t.session.id);
+      return toast(`Не открылось (${e.message}). Команда скопирована: claude attach ${t.session.id}`);
+    }
+    toast("Не получилось: " + e.message);
+  }
 }
 
 function copy(text) {
@@ -205,6 +232,30 @@ function time(iso) {
 }
 
 function tokens(n) { return n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? Math.round(n / 1e3) + "k" : String(n || 0); }
+
+function num(n) { return (n || 0).toLocaleString("ru-RU"); }
+
+function shortModel(m) { return String(m || "?").replace(/^claude-/, ""); }
+
+function usageRow(first, m, u, cls) {
+  return `<tr class="${cls}"><td>${first}</td><td>${esc(shortModel(m))}</td><td>${num(u.input)}</td><td>${num(u.output)}</td><td>${num(u.cache_read)}</td><td>${num(u.cache_write)}</td></tr>`;
+}
+
+function renderUsage(tasks) {
+  const rows = [], total = {};
+  for (const t of tasks) {
+    Object.entries(t.usage || {}).sort((a, b) => b[1].output - a[1].output).forEach(([m, u], i) => {
+      rows.push(usageRow(i === 0 ? esc(t.id) : "", m, u, ""));
+      const s = total[m] ||= { input: 0, output: 0, cache_read: 0, cache_write: 0 };
+      for (const k in s) s[k] += u[k] || 0;
+    });
+  }
+  const many = tasks.filter(t => Object.keys(t.usage || {}).length).length > 1;
+  if (many) Object.entries(total).sort((a, b) => b[1].output - a[1].output)
+    .forEach(([m, u], i) => rows.push(usageRow(i === 0 ? "Всего" : "", m, u, "sum")));
+  $("usage").hidden = rows.length === 0;
+  $("usagebody").innerHTML = rows.join("");
+}
 
 function tone(t) {
   if (t.state === "merged") return "done";
@@ -234,7 +285,7 @@ function render(s) {
     if (t.state === "plan_review") acts.push(`<button class="primary" data-act="approve" data-id="${esc(t.id)}">Одобрить план</button>`);
     if (t.state === "needs_human") acts.push(`<button class="primary" data-act="retry" data-id="${esc(t.id)}">Повторить</button>`);
     if (t.pr_url) acts.push(`<a href="${esc(t.pr_url)}" target="_blank" rel="noopener">PR #${t.pr}</a>`);
-    if (t.session && t.session.id) acts.push(`<button data-copy="claude attach ${esc(t.session.id)}">Открыть сессию</button>`);
+    if (t.session && t.session.id) acts.push(`<button data-act="open_session" data-id="${esc(t.id)}">Открыть сессию</button>`);
     return `<div class="wait-item ${t.state === "needs_human" ? "fail" : ""}">
       <div><div class="what">${esc(t.id)} <span class="why">— ${esc(t.title)}</span></div><div class="why">${esc(t.needs)}</div></div>
       <div class="acts">${acts.join("")}</div></div>`;
@@ -270,6 +321,7 @@ function render(s) {
     html += `<div class="meta"><div class="num">${pr}${rounds ? ", " + rounds : ""}</div><div class="line2 num">${t.tokens ? tokens(t.tokens) + " токенов" : "—"}</div></div>`;
   }
   g.innerHTML = html;
+  renderUsage(s.tasks);
 
   $("evlist").innerHTML = s.events.length
     ? s.events.map(e => `<li class="${esc(e.kind)}"><time class="num">${time(e.at)}</time><span>${esc(e.text)}</span></li>`).join("")
