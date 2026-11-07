@@ -84,6 +84,8 @@ header .sub b { font-weight: 600; color: var(--ink); }
 .state-label { display: none; }
 .empty { padding: 28px 0; color: var(--muted); border-bottom: 1px solid var(--rule); }
 .empty code { color: var(--ink); }
+.hidden-note { margin-top: 10px; color: var(--muted); font-size: 13px; }
+.hidden-note button { margin-left: 8px; }
 
 #events ol { list-style: none; margin: 0; padding: 0; max-width: 760px; }
 #events li { padding: 5px 0; display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 10px; font-size: 13.5px; }
@@ -143,6 +145,7 @@ header .sub b { font-weight: 600; color: var(--ink); }
 <section id="board">
   <h2>Задачи</h2>
   <div class="grid" id="grid"></div>
+  <div class="hidden-note" id="cancelnote" hidden></div>
 </section>
 
 <section id="events">
@@ -175,6 +178,7 @@ const STATIONS = ["В очереди", "План", "Обсуждение", "Ре
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 let last = null;
+let showCancelled = false;
 
 function toast(text) {
   const t = $("toast"); t.textContent = text; t.classList.add("on");
@@ -238,10 +242,16 @@ function render(s) {
 
   const g = $("grid");
   let html = `<div class="head left">Задача</div>` + STATIONS.map(n => `<div class="head">${n}</div>`).join("") + `<div class="head right">PR, раунды, токены</div>`;
-  if (!s.tasks.length) {
+  const cancelled = s.tasks.filter(t => t.state === "cancelled").length;
+  const shown = showCancelled ? s.tasks : s.tasks.filter(t => t.state !== "cancelled");
+  const note = $("cancelnote");
+  note.hidden = cancelled === 0;
+  note.innerHTML = cancelled
+    ? `Снятых задач: ${cancelled}<button data-toggle-cancelled>${showCancelled ? "Скрыть" : "Показать"}</button>` : "";
+  if (!shown.length) {
     html += `<div class="empty" style="grid-column: 1 / -1">Задач нет. Напишите их в сессии оркестратора: <code>/aiflow:intake …</code></div>`;
   }
-  for (const t of s.tasks) {
+  for (const t of shown) {
     const k = tone(t);
     const stage = t.stage ?? 0;
     html += `<div class="task"><div class="id">${esc(t.id)}</div><div class="title" title="${esc(t.title)}">${esc(t.title)}</div><div class="state-label here ${k}">${esc(t.label)}${t.needs ? " — " + esc(t.needs) : ""}</div></div>`;
@@ -267,6 +277,7 @@ function render(s) {
 }
 
 document.addEventListener("click", (e) => {
+  if (e.target.closest("[data-toggle-cancelled]")) { showCancelled = !showCancelled; return last && render(last); }
   const b = e.target.closest("[data-act],[data-copy]");
   if (!b) return;
   if (b.dataset.copy) return copy(b.dataset.copy);
