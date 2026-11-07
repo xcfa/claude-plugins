@@ -44,6 +44,16 @@ def by_complexity(value, cx: str):
         return value.get(cx) or value.get("simple") or None
     return value or None
 
+
+def worker_choice(cfg: dict, t: dict) -> tuple:
+    """Модель и effort worker'а: настройки задачи, затем Opus-effort, затем по сложности."""
+    cx = t.get("complexity", "simple")
+    model = t.get("worker_model") or by_complexity(cfg["worker_model"], cx)
+    effort = t.get("worker_effort")
+    if not effort and "opus" in str(model or "").lower():
+        effort = cfg.get("worker_opus_effort") or None
+    return model, effort or by_complexity(cfg["worker_effort"], cx)
+
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 DEFAULT_CONFIG = {
@@ -53,9 +63,10 @@ DEFAULT_CONFIG = {
     "ui_port": 8765,
     "permission_mode": "acceptEdits",
     "planner_model": {"complex": "opus", "simple": "sonnet"},
-    "planner_effort": {"complex": "high", "simple": "medium"},
+    "planner_effort": {"complex": "medium", "simple": "medium"},
     "worker_model": "sonnet",
     "worker_effort": {"complex": "high", "simple": "medium"},  # или одна строка на все задачи
+    "worker_opus_effort": "medium",  # effort worker'а на Opus (worker_model: opus), без учёта сложности
     "reviewer_model": "",
     "review_identity": "self",  # self — ревью и мерж от вашего gh; bot — от бота с токеном REVIEW_BOT_TOKEN
     "max_rounds": 5,
@@ -1010,10 +1021,9 @@ class Dispatcher:
                 self.store.save_task(t)
             elif st == "plan_review" and t.get("plan_approved"):
                 retry = bool(t.pop("retry_pending", False))
-                cx = t.get("complexity", "simple")
+                model, effort = worker_choice(self.cfg, t)
                 ok = self.launch(t, "worker", worker_prompt(self.store, t, self.cfg, retry=retry),
-                                 model=t.get("worker_model") or by_complexity(self.cfg["worker_model"], cx),
-                                 effort=t.get("worker_effort") or by_complexity(self.cfg["worker_effort"], cx))
+                                 model=model, effort=effort)
                 if ok:
                     self.set_state(t, "in_progress")
                     active += 1
@@ -1028,13 +1038,11 @@ class Dispatcher:
             return
         ready = sorted((t for t in tasks if t.get("state") == "ready"), key=lambda t: t.get("ready_at") or "")
         for t in ready:
-            cx = t.get("complexity", "simple")
             woke = self.wake(t, "worker", review_prompt(t, self.cfg))
             if not woke:
+                model, effort = worker_choice(self.cfg, t)
                 woke = self.launch(t, "worker", review_prompt(t, self.cfg) + "\n\nКонтекст задачи: "
-                                   + worker_prompt(self.store, t, self.cfg),
-                                   model=t.get("worker_model") or by_complexity(self.cfg["worker_model"], cx),
-                                   effort=t.get("worker_effort") or by_complexity(self.cfg["worker_effort"], cx))
+                                   + worker_prompt(self.store, t, self.cfg), model=model, effort=effort)
             if woke:
                 self.q["review_lock"] = t["id"]
                 self.set_state(t, "in_review")

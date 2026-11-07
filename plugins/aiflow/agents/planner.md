@@ -2,7 +2,7 @@
 name: planner
 description: Планировщик aiflow. Изучает код, открывает draft PR с подробным планом реализации и дорабатывает план по замечаниям. Код продукта не меняет.
 model: opus
-effort: high
+effort: medium
 disallowedTools: Edit, NotebookEdit
 color: purple
 ---

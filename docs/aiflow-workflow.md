@@ -39,14 +39,14 @@ flowchart TD
 | Оркестратор | `agents/orchestrator.md` | закреплённая фоновая сессия | Sonnet | Принимает задачи через `/aiflow:intake`, отвечает о состоянии, реагирует на события монитора | Не держит состояние, не читает код, не запускает агентов в обход `aiflow`, не одобряет планы |
 | aiflow | `bin/aiflow` + монитор плагина | стартует при первом `/aiflow:intake` | — | Очередь, `depends_on`, concurrency, lock ревью, пауза по лимиту, запуск и пробуждение сессий, учёт токенов, панель | Не принимает содержательных решений |
 | Planner | `agents/planner.md` | `claude --bg --agent aiflow:planner` | Opus (complex) / Sonnet (simple) | Вопросы к коду и документации, draft PR с планом, макет UI, доработка плана | Не меняет код продукта, не ставит метки |
-| Worker | `agents/worker.md` | `claude --bg --agent aiflow:worker` | Sonnet 5.5, effort medium / high по сложности (Opus по флагу задачи) | Реализация по плану, тесты, PR ready, цикл ревью в свою очередь | Не мержит, не одобряет, не трогает защищённые пути |
+| Worker | `agents/worker.md` | `claude --bg --agent aiflow:worker` | Sonnet 5.5, effort medium / high по сложности (Opus на medium по флагу задачи) | Реализация по плану, тесты, PR ready, цикл ревью в свою очередь | Не мержит, не одобряет, не трогает защищённые пути |
 | Explorer | `agents/explorer.md` | сабагент | Haiku | Ответы на конкретные вопросы к коду | — |
 | Researcher | `agents/researcher.md` | сабагент planner'а | Haiku | Выжимки из документации внешних библиотек и API | Не пишет файлы |
 | review.py | `scripts/review.py` | `aiflow review --pr N` из worker'а | — | Один раунд: CI-гейт, path-guard, счётчик, ревьюер, inline-ревью, автомерж | Не принимает аргументов, меняющих лимиты |
 | Reviewer | `.opencode/agent/reviewer.md` | `opencode run` | DeepSeek | Ревью диффа по плану, JSON | Не сверяет UI с макетом, только чтение |
 | Вы | — | сессия оркестратора, agent view, PR, панель | — | Задачи, обсуждение и одобрение планов, разбор `needs-human`, проверка `master` | — |
 
-**Выбор моделей.** Sonnet 5.5 — исполнитель по умолчанию: подробный план снимает архитектурные решения, остаётся исполнение, где разница с Opus небольшая, а Sonnet вдвое дешевле. Effort worker'а зависит от сложности: `medium` для `simple`, `high` для `complex` (`worker_effort` в `runs/config.json` — словарь по сложности или одна строка на все задачи). Основное «думание» уже сделано в плане, а промахи ловят CI и ревью; `max` не нужен — на нём Sonnet генерирует столько, что может выйти дороже Opus. `worker_model: opus` ставится вручную для задач, где план неполный по природе: размытые требования, исследовательский рефакторинг, новый визуальный язык. Правило пересматривается по `rounds` и `usage` в `task.json`: если `complex` на Sonnet регулярно уходит в 3+ раунда или `needs_human` из-за кода, этот класс переводится на Opus.
+**Выбор моделей.** Sonnet 5.5 — исполнитель по умолчанию: подробный план снимает архитектурные решения, остаётся исполнение, где разница с Opus небольшая, а Sonnet вдвое дешевле. Effort worker'а на Sonnet зависит от сложности: `medium` для `simple`, `high` для `complex` (`worker_effort` в `runs/config.json` — словарь по сложности или одна строка на все задачи). Opus — и planner, и worker с `worker_model: opus` — работает на `medium` (`planner_effort`, `worker_opus_effort`): ему этого хватает, а сложность и так поднимает модель. Основное «думание» уже сделано в плане, а промахи ловят CI и ревью; `max` не нужен — на нём Sonnet генерирует столько, что может выйти дороже Opus. `worker_model: opus` ставится вручную для задач, где план неполный по природе: размытые требования, исследовательский рефакторинг, новый визуальный язык. Правило пересматривается по `rounds` и `usage` в `task.json`: если `complex` на Sonnet регулярно уходит в 3+ раунда или `needs_human` из-за кода, этот класс переводится на Opus.
 
 ## 4. Жизненный цикл задачи
 
@@ -238,7 +238,7 @@ claude plugin install aiflow@aiflow-local
 7. Один раз открыть `claude` в репозитории интерактивно и принять доверие к папке.
 8. `! aiflow doctor`.
 
-**Основные настройки `runs/config.json`:** `concurrency` (2), `tick_seconds` (45), `base_branch`, `ui_port` (8765, `0` — без панели), `permission_mode` (`acceptEdits`), `planner_model` и `planner_effort` по сложности, `worker_model` и `worker_effort` (строкой или по сложности), `reviewer_model`, `max_rounds` (5), `max_diff_chars`, `ci_timeout_minutes`, `rate_limit_pause_minutes`, `watch_integration` (следить за CI базовой ветки после мержа), `protected_paths`.
+**Основные настройки `runs/config.json`:** `concurrency` (2), `tick_seconds` (45), `base_branch`, `ui_port` (8765, `0` — без панели), `permission_mode` (`acceptEdits`), `planner_model` и `planner_effort` по сложности, `worker_model` и `worker_effort` (строкой или по сложности), `worker_opus_effort` (`medium`), `reviewer_model`, `max_rounds` (5), `max_diff_chars`, `ci_timeout_minutes`, `rate_limit_pause_minutes`, `watch_integration` (следить за CI базовой ветки после мержа), `protected_paths`.
 
 ## 12. Ваша работа день за днём
 
