@@ -91,6 +91,21 @@ header .sub b { font-weight: 600; color: var(--ink); }
 #events li.needs_human, #events li.error { color: var(--fail); }
 #events li.plan_ready, #events li.needs_input { color: var(--wait); }
 
+#settings { margin-top: 36px; max-width: 760px; }
+#settings summary { font-size: 15px; font-weight: 650; cursor: pointer; padding: 2px 0; }
+#settings summary:focus-visible { outline: 2px solid var(--move); outline-offset: 2px; }
+.setting { margin-top: 14px; }
+.setting label { display: block; font-weight: 600; margin-bottom: 6px; }
+.setting .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.setting input {
+  font: inherit; font-size: 14px; color: var(--ink); background: var(--surface); border: 1px solid var(--rule);
+  border-radius: 6px; padding: 5px 10px; flex: 1 1 280px; min-width: 0;
+}
+.setting input:focus-visible { outline: 2px solid var(--move); outline-offset: 1px; border-color: var(--move); }
+.setting .hint { color: var(--muted); font-size: 13.5px; margin-top: 6px; }
+.setting .hint code { color: var(--ink); }
+.setting .hint.err { color: var(--fail); }
+
 .foot { margin-top: 36px; padding-top: 14px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 13.5px; max-width: 760px; }
 .foot code { color: var(--ink); }
 .toast { position: fixed; right: 20px; bottom: 20px; background: var(--ink); color: var(--bg); padding: 10px 14px; border-radius: 6px; font-size: 14px; opacity: 0; transition: opacity .2s; pointer-events: none; }
@@ -134,6 +149,21 @@ header .sub b { font-weight: 600; color: var(--ink); }
   <h2>События</h2>
   <ol id="evlist"></ol>
 </section>
+
+<details id="settings">
+  <summary>Настройки</summary>
+  <form class="setting" id="rmform" autocomplete="off">
+    <label for="rmodel">Модель ревьюера (opencode)</label>
+    <div class="row">
+      <input id="rmodel" list="rmodels" placeholder="по умолчанию из конфига opencode" spellcheck="false">
+      <datalist id="rmodels"></datalist>
+      <button type="submit" class="primary" id="rmsave">Сохранить</button>
+      <button type="button" id="rmrefresh">Обновить список</button>
+    </div>
+    <div class="hint" id="rmhint">Формат <code>provider/model</code>. Применяется со следующего раунда ревью; пустое поле — модель по умолчанию opencode.</div>
+    <div class="hint" id="rmstatus"></div>
+  </form>
+</details>
 
 <footer class="foot">Пауза — кнопка вверху справа: работающие сессии доделают ход, новые не стартуют. Остановить монитор и эту панель — <code>aiflow stop</code>; фоновые сессии Claude продолжат работать, остановить их — <code>Ctrl+X</code> в <code>claude agents</code>.</footer>
 
@@ -241,6 +271,43 @@ document.addEventListener("click", (e) => {
   if (!b) return;
   if (b.dataset.copy) return copy(b.dataset.copy);
   act(b.dataset.act, b.dataset.id);
+});
+
+let settingsLoaded = false;
+async function loadSettings(refresh) {
+  const st = $("rmstatus");
+  st.className = "hint"; st.textContent = refresh ? "Запрашиваю opencode models…" : "Загрузка…";
+  try {
+    const r = await fetch("/api/settings" + (refresh ? "?refresh=1" : ""), { cache: "no-store" });
+    const d = await r.json();
+    const input = $("rmodel");
+    if (!settingsLoaded || !refresh) input.value = d.reviewer_model;
+    input.dataset.saved = d.reviewer_model;
+    $("rmodels").innerHTML = d.models.map(m => `<option value="${esc(m)}"></option>`).join("");
+    settingsLoaded = true;
+    if (d.models_error) { st.className = "hint err"; st.textContent = "Список моделей недоступен: " + d.models_error + ". Модель можно вписать вручную."; }
+    else st.textContent = `Сейчас: ${d.reviewer_model || "по умолчанию opencode"}. Доступно моделей: ${d.models.length}.`;
+  } catch (e) { st.className = "hint err"; st.textContent = "Не удалось загрузить настройки: " + e.message; }
+}
+
+$("settings").addEventListener("toggle", () => { if ($("settings").open && !settingsLoaded) loadSettings(false); });
+$("rmrefresh").addEventListener("click", () => loadSettings(true));
+$("rmform").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const value = $("rmodel").value.trim();
+  const known = [...$("rmodels").options].map(o => o.value);
+  if (value && known.length && !known.includes(value) && !confirm(`Модели «${value}» нет в списке opencode models. Сохранить всё равно?`)) return;
+  const btn = $("rmsave"); btn.disabled = true;
+  try {
+    const r = await fetch("/api/action", { method: "POST", headers: { "Content-Type": "application/json", "X-Aiflow-Token": TOKEN }, body: JSON.stringify({ action: "set_reviewer_model", value }) });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || r.statusText);
+    $("rmodel").value = d.reviewer_model; $("rmodel").dataset.saved = d.reviewer_model;
+    $("rmstatus").className = "hint"; $("rmstatus").textContent = `Сейчас: ${d.reviewer_model || "по умолчанию opencode"}.`;
+    toast("Модель ревьюера сохранена");
+    setTimeout(load, 300);
+  } catch (err) { toast("Не получилось: " + err.message); }
+  finally { btn.disabled = false; }
 });
 
 async function load() {

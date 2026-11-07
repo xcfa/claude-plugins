@@ -233,6 +233,15 @@ class Store:
                 cfg[k] = v
         return cfg
 
+    def set_config(self, key: str, value) -> None:
+        """Меняет один ключ в runs/config.json, остальное содержимое файла сохраняет как есть."""
+        path = self.runs / "config.json"
+        user = read_json(path, None)
+        if not isinstance(user, dict):
+            raise AiflowError("runs/config.json не найден или повреждён — выполните aiflow init")
+        user[key] = value
+        write_json(path, user)
+
     def queue(self) -> dict:
         q = read_json(self.runs / "queue.json", {}) or {}
         q.setdefault("paused", None)

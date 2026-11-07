@@ -53,7 +53,8 @@ claude plugin install aiflow@aiflow-local
    создаст `runs/config.json`, шаблоны `.opencode/agent/reviewer.md`, `.github/workflows/ci.yml`,
    `docs/ARCHITECTURE.md`, добавит права для фоновых сессий в `.claude/settings.json`
    и метки `plan-approved`, `needs-human`, `retry`.
-4. **Настройка.** Впишите `reviewer_model` в `runs/config.json` (`opencode models deepseek`),
+4. **Настройка.** Выберите модель ревьюера в панели («Настройки» внизу страницы) или впишите
+   `reviewer_model` в `runs/config.json` (`opencode models deepseek`),
    заполните `ci.yml`, добавьте в `.claude/settings.json` allow-правила для сборки и тестов
    проекта (иначе фоновые сессии будут ждать вашего разрешения). Закоммитьте всё, кроме `runs/`.
 5. **Доверие к папке.** Хотя бы раз откройте `claude` в репозитории интерактивно и примите
@@ -89,7 +90,9 @@ claude plugin install aiflow@aiflow-local
 Монитор поднимает её сам: `http://127.0.0.1:8765/` (порт — `ui_port` в `runs/config.json`,
 `0` — выключить). Без монитора: `aiflow ui --open`. Панель слушает только loopback,
 действия защищены токеном страницы. Сверху — что ждёт вас (одобрить план, повторить,
-открыть сессию), ниже — доска задач по стадиям и лента событий.
+открыть сессию), ниже — доска задач по стадиям и лента событий. В разделе «Настройки» выбирается
+модель ревьюера opencode из списка `opencode models` (или вписывается вручную как `provider/model`).
+Значение пишется в `reviewer_model` в `runs/config.json` и действует со следующего раунда ревью.
 
 ### В Claude Desktop
 

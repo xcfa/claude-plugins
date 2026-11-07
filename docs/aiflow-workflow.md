@@ -211,7 +211,7 @@ stateDiagram-v2
 | `aiflow tick` | Один проход вручную |
 | `aiflow enqueue`, `report`, `review`, `reply` | Команды для агентов |
 
-**Панель** поднимается вместе с монитором на `http://127.0.0.1:8765/`: вверху то, что ждёт вас (кнопки «Одобрить план», «Повторить», «Открыть сессию»), ниже доска задач по стадиям и лента событий. Слушает только loopback, действия защищены токеном страницы. В Claude Desktop её можно открыть в Browser pane вкладки Code через конфигурацию `aiflow` в `.claude/launch.json` (её добавляет `aiflow init`) и вынести в отдельное окно. Добавить пункт в боковое меню Desktop плагин не может. Для строки состояния есть `aiflow statusline`.
+**Панель** поднимается вместе с монитором на `http://127.0.0.1:8765/`: вверху то, что ждёт вас (кнопки «Одобрить план», «Повторить», «Открыть сессию»), ниже доска задач по стадиям и лента событий, в разделе «Настройки» — выбор модели ревьюера opencode (пишется в `reviewer_model` в `runs/config.json`). Слушает только loopback, действия защищены токеном страницы. В Claude Desktop её можно открыть в Browser pane вкладки Code через конфигурацию `aiflow` в `.claude/launch.json` (её добавляет `aiflow init`) и вынести в отдельное окно. Добавить пункт в боковое меню Desktop плагин не может. Для строки состояния есть `aiflow statusline`.
 
 **Как остановить:** пауза очереди — кнопка или `aiflow pause`; монитор и панель — `aiflow stop`; сами фоновые сессии — `Ctrl+X` в `claude agents` или `claude stop <id>`.
 
@@ -231,7 +231,7 @@ claude plugin install aiflow@aiflow-local
 1. Бот-аккаунт с правами Write; fine-grained token на репозиторий (Contents, Pull requests, Issues — read/write) в `~/.config/ai-review/token` или `REVIEW_BOT_TOKEN`.
 2. Settings → General: Allow auto-merge, Allow squash merging. Защита `master` — как в разделе 8.
 3. `! aiflow init` в сессии Claude Code в корне репозитория: `runs/config.json`, шаблоны ревьюера, `ci.yml`, `ARCHITECTURE.md`, права для фоновых сессий, конфигурация панели для Desktop, метки.
-4. В `runs/config.json`: `"base_branch": "master"` (значение по умолчанию), `reviewer_model` из `opencode models deepseek`.
+4. В `runs/config.json`: `"base_branch": "master"` (значение по умолчанию), `reviewer_model` из `opencode models deepseek` (или выбрать в панели, раздел «Настройки»).
 5. Заполнить `ci.yml` реальной сборкой и тестами, в том числе на `push` в `master`; сделать job обязательной проверкой.
 6. Добавить в `.claude/settings.json` allow-правила для сборки и тестов проекта, иначе фоновые сессии будут ждать разрешения.
 7. Один раз открыть `claude` в репозитории интерактивно и принять доверие к папке.
