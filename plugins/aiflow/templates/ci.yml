@@ -1,0 +1,18 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [integration, main]
+  push:
+    branches: [integration]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # TODO: установка зависимостей
+      # TODO: сборка, линтер, проверка типов
+      # TODO: тесты
+      - name: Build and test
+        run: echo "замените на реальные команды сборки и тестов"

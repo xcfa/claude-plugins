@@ -1,0 +1,14 @@
+{
+  "name": "aiflow-local",
+  "description": "Локальный маркетплейс с плагином aiflow",
+  "owner": {
+    "name": "aiflow"
+  },
+  "plugins": [
+    {
+      "name": "aiflow",
+      "source": "./plugins/aiflow",
+      "description": "Очередь задач для фоновых сессий Claude Code: план → реализация → AI-ревью DeepSeek → мерж в integration"
+    }
+  ]
+}

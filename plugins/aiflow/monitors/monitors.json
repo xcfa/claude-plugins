@@ -1,0 +1,14 @@
+[
+  {
+    "name": "aiflow",
+    "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/aiflow\" run --events",
+    "description": "Очередь aiflow: события, требующие реакции",
+    "when": "on-skill-invoke:intake"
+  },
+  {
+    "name": "aiflow-resume",
+    "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/aiflow\" run --events",
+    "description": "Очередь aiflow (перезапуск монитора)",
+    "when": "on-skill-invoke:resume"
+  }
+]

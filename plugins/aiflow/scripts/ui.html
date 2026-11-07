@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="aiflow-token" content="__AIFLOW_TOKEN__">
+<title>aiflow</title>
+<style>
+:root {
+  color-scheme: light;
+  --bg: #EDF0EC; --surface: #F7F8F5; --ink: #18211C; --muted: #5B675F; --rule: #CDD5CE;
+  --track: #B3BDB5; --move: #2A62B8; --wait: #B97300; --wait-bg: #FBF1DC; --done: #2D7D4F; --fail: #B93A2E;
+  --font: "Segoe UI Variable Text", "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg: #111613; --surface: #18201B; --ink: #E2E9E4; --muted: #94A299; --rule: #2B352F;
+    --track: #3E4B43; --move: #7AA4EE; --wait: #E3A23A; --wait-bg: #2A2414; --done: #62B686; --fail: #E3705F;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--font); font-size: 15px; line-height: 1.45; }
+body { padding: 28px clamp(16px, 4vw, 48px) 48px; max-width: 1360px; margin: 0 auto; }
+a { color: inherit; text-underline-offset: 3px; }
+button {
+  font: inherit; font-size: 14px; color: var(--ink); background: var(--surface); border: 1px solid var(--rule);
+  border-radius: 6px; padding: 5px 12px; cursor: pointer;
+}
+button:hover { border-color: var(--muted); }
+button:focus-visible, a:focus-visible { outline: 2px solid var(--move); outline-offset: 2px; }
+button.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.num { font-variant-numeric: tabular-nums; }
+
+header { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; flex-wrap: wrap; margin-bottom: 28px; }
+header h1 { font-size: 26px; font-weight: 650; letter-spacing: -0.01em; margin: 0; }
+header .sub { color: var(--muted); margin-top: 2px; }
+header .sub b { font-weight: 600; color: var(--ink); }
+.queue { display: flex; align-items: center; gap: 12px; }
+.queue .state { color: var(--muted); }
+.queue .state.paused { color: var(--wait); font-weight: 600; }
+
+#waiting { margin-bottom: 32px; }
+#waiting h2, #board h2, #events h2 { font-size: 15px; font-weight: 650; margin: 0 0 10px; }
+.wait-item {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 20px; align-items: center;
+  background: var(--wait-bg); border-left: 4px solid var(--wait); padding: 12px 16px; margin-bottom: 8px; border-radius: 0 6px 6px 0;
+}
+.wait-item .what { font-weight: 600; }
+.wait-item .why { color: var(--muted); }
+.wait-item .acts { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.wait-item.fail { border-left-color: var(--fail); }
+
+#board { margin-bottom: 36px; }
+.grid { display: grid; grid-template-columns: minmax(200px, 280px) repeat(7, minmax(64px, 1fr)) minmax(150px, 190px); }
+.grid > div { min-width: 0; }
+.head { color: var(--muted); font-size: 12.5px; padding: 0 4px 8px; text-align: center; border-bottom: 1px solid var(--rule); }
+.head.left { text-align: left; padding-left: 0; }
+.head.right { text-align: right; }
+.cell { position: relative; height: 58px; border-bottom: 1px solid var(--rule); }
+.cell::before { content: ""; position: absolute; left: 0; right: 0; top: 50%; height: 2px; background: var(--track); transform: translateY(-50%); }
+.cell.first::before { left: 50%; }
+.cell.last::before { right: 50%; }
+.cell.passed::before { background: var(--ink); opacity: .55; }
+.cell.half::before { background: linear-gradient(to right, color-mix(in srgb, var(--ink) 55%, transparent) 50%, var(--track) 50%); opacity: 1; }
+.cell.first.half::before { background: var(--track); }
+.dot { position: absolute; left: 50%; top: 50%; width: 9px; height: 9px; border-radius: 50%; transform: translate(-50%, -50%); background: var(--track); }
+.dot.passed { background: var(--ink); opacity: .55; }
+.dot.here { width: 18px; height: 18px; border: 3px solid var(--surface); box-shadow: 0 0 0 2px currentColor; background: currentColor; opacity: 1; }
+.here.moving { color: var(--move); }
+.here.waiting { color: var(--wait); }
+.here.done { color: var(--done); }
+.here.idle { color: var(--muted); }
+.here.fail { color: var(--fail); background: var(--surface); }
+@media (prefers-reduced-motion: no-preference) {
+  .here.moving.live { animation: pulse 2.4s ease-in-out infinite; }
+  @keyframes pulse { 50% { box-shadow: 0 0 0 6px color-mix(in srgb, currentColor 25%, transparent); } }
+}
+.task { padding: 9px 12px 9px 0; border-bottom: 1px solid var(--rule); height: 58px; display: flex; flex-direction: column; justify-content: center; }
+.task .id { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.task .title { color: var(--muted); font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.meta { border-bottom: 1px solid var(--rule); height: 58px; display: flex; flex-direction: column; justify-content: center; align-items: flex-end; font-size: 13.5px; padding-left: 12px; }
+.meta .line2 { color: var(--muted); }
+.state-label { display: none; }
+.empty { padding: 28px 0; color: var(--muted); border-bottom: 1px solid var(--rule); }
+.empty code { color: var(--ink); }
+
+#events ol { list-style: none; margin: 0; padding: 0; max-width: 760px; }
+#events li { padding: 5px 0; display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 10px; font-size: 13.5px; }
+#events time { color: var(--muted); }
+#events li.needs_human, #events li.error { color: var(--fail); }
+#events li.plan_ready, #events li.needs_input { color: var(--wait); }
+
+.foot { margin-top: 36px; padding-top: 14px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 13.5px; max-width: 760px; }
+.foot code { color: var(--ink); }
+.toast { position: fixed; right: 20px; bottom: 20px; background: var(--ink); color: var(--bg); padding: 10px 14px; border-radius: 6px; font-size: 14px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+.toast.on { opacity: 1; }
+.offline { color: var(--fail); }
+
+@media (max-width: 860px) {
+  .grid { grid-template-columns: minmax(0, 1fr) auto; }
+  .head:not(.left):not(.right), .cell { display: none; }
+  .state-label { display: block; font-size: 13.5px; background: none; }
+  .task, .meta { height: auto; min-height: 58px; }
+  .task .title { white-space: normal; }
+  .wait-item { grid-template-columns: 1fr; }
+  .wait-item .acts { justify-content: flex-start; }
+}
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1 id="repo">aiflow</h1>
+    <div class="sub" id="sub">загрузка…</div>
+  </div>
+  <div class="queue">
+    <span class="state" id="qstate"></span>
+    <button id="qbtn" hidden></button>
+  </div>
+</header>
+
+<section id="waiting" hidden>
+  <h2>Ждут вас</h2>
+  <div id="waitlist"></div>
+</section>
+
+<section id="board">
+  <h2>Задачи</h2>
+  <div class="grid" id="grid"></div>
+</section>
+
+<section id="events">
+  <h2>События</h2>
+  <ol id="evlist"></ol>
+</section>
+
+<footer class="foot">Пауза — кнопка вверху справа: работающие сессии доделают ход, новые не стартуют. Остановить монитор и эту панель — <code>aiflow stop</code>; фоновые сессии Claude продолжат работать, остановить их — <code>Ctrl+X</code> в <code>claude agents</code>.</footer>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+const TOKEN = document.querySelector('meta[name="aiflow-token"]').content;
+const STATIONS = ["В очереди", "План", "Обсуждение", "Реализация", "Ждёт ревью", "Ревью", "Смержено"];
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+let last = null;
+
+function toast(text) {
+  const t = $("toast"); t.textContent = text; t.classList.add("on");
+  clearTimeout(toast.h); toast.h = setTimeout(() => t.classList.remove("on"), 2200);
+}
+
+async function act(action, id) {
+  try {
+    const r = await fetch("/api/action", { method: "POST", headers: { "Content-Type": "application/json", "X-Aiflow-Token": TOKEN }, body: JSON.stringify({ action, id }) });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || r.statusText);
+    toast({ approve: "План одобрен", retry: "Повтор поставлен", pause: "Очередь на паузе", resume: "Очередь продолжает" }[action] || "Готово");
+    setTimeout(load, 600);
+  } catch (e) { toast("Не получилось: " + e.message); }
+}
+
+function copy(text) {
+  navigator.clipboard?.writeText(text).then(() => toast("Скопировано: " + text), () => toast(text));
+}
+
+function time(iso) {
+  const d = new Date(iso);
+  return isNaN(d) ? "" : d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+}
+
+function tokens(n) { return n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? Math.round(n / 1e3) + "k" : String(n || 0); }
+
+function tone(t) {
+  if (t.state === "merged") return "done";
+  if (t.state === "needs_human") return "fail";
+  if (t.needs) return "waiting";
+  if (t.state === "new" || t.state === "ready" || t.state === "cancelled") return "idle";
+  return "moving";
+}
+
+function render(s) {
+  last = s;
+  $("repo").textContent = s.repo;
+  const mon = s.monitor_pid ? "монитор работает" : "монитор не запущен — в сессии оркестратора выполните /aiflow:resume";
+  $("sub").innerHTML = `база <b>${esc(s.base)}</b>, до ${s.concurrency} сессий параллельно, <span class="${s.monitor_pid ? "" : "offline"}">${esc(mon)}</span>`;
+  const p = s.paused;
+  const reasons = { manual: "вручную", rate_limit: "лимит использования", integration_red: s.base + " красная", trust: "нет доверия к папке" };
+  $("qstate").textContent = p ? `Пауза: ${reasons[p.reason] || p.reason}${p.until ? ", до " + time(p.until) : ""}` : "Очередь идёт";
+  $("qstate").className = "state" + (p ? " paused" : "");
+  const qb = $("qbtn"); qb.hidden = false;
+  qb.textContent = p ? "Продолжить очередь" : "Поставить на паузу";
+  qb.onclick = () => act(p ? "resume" : "pause");
+
+  const waiting = s.tasks.filter(t => t.needs);
+  $("waiting").hidden = waiting.length === 0;
+  $("waitlist").innerHTML = waiting.map(t => {
+    const acts = [];
+    if (t.state === "plan_review") acts.push(`<button class="primary" data-act="approve" data-id="${esc(t.id)}">Одобрить план</button>`);
+    if (t.state === "needs_human") acts.push(`<button class="primary" data-act="retry" data-id="${esc(t.id)}">Повторить</button>`);
+    if (t.pr_url) acts.push(`<a href="${esc(t.pr_url)}" target="_blank" rel="noopener">PR #${t.pr}</a>`);
+    if (t.session && t.session.id) acts.push(`<button data-copy="claude attach ${esc(t.session.id)}">Открыть сессию</button>`);
+    return `<div class="wait-item ${t.state === "needs_human" ? "fail" : ""}">
+      <div><div class="what">${esc(t.id)} <span class="why">— ${esc(t.title)}</span></div><div class="why">${esc(t.needs)}</div></div>
+      <div class="acts">${acts.join("")}</div></div>`;
+  }).join("");
+
+  const g = $("grid");
+  let html = `<div class="head left">Задача</div>` + STATIONS.map(n => `<div class="head">${n}</div>`).join("") + `<div class="head right">PR, раунды, токены</div>`;
+  if (!s.tasks.length) {
+    html += `<div class="empty" style="grid-column: 1 / -1">Задач нет. Напишите их в сессии оркестратора: <code>/aiflow:intake …</code></div>`;
+  }
+  for (const t of s.tasks) {
+    const k = tone(t);
+    const stage = t.stage ?? 0;
+    html += `<div class="task"><div class="id">${esc(t.id)}</div><div class="title" title="${esc(t.title)}">${esc(t.title)}</div><div class="state-label here ${k}">${esc(t.label)}${t.needs ? " — " + esc(t.needs) : ""}</div></div>`;
+    STATIONS.forEach((_, i) => {
+      const pos = i < stage ? "passed" : i === stage ? "half" : "";
+      const edge = i === 0 ? "first" : i === STATIONS.length - 1 ? "last" : "";
+      let dot = `<span class="dot ${i < stage ? "passed" : ""}"></span>`;
+      if (i === stage && t.state !== "cancelled") {
+        const live = t.session && t.session.state === "working" ? "live" : "";
+        dot = `<span class="dot here ${k} ${live}" title="${esc(t.label)}${t.needs ? ": " + esc(t.needs) : ""}"></span>`;
+      }
+      html += `<div class="cell ${edge} ${pos}">${dot}</div>`;
+    });
+    const pr = t.pr ? (t.pr_url ? `<a href="${esc(t.pr_url)}" target="_blank" rel="noopener">#${t.pr}</a>` : "#" + t.pr) : "—";
+    const rounds = t.rounds ? `раунд ${t.rounds}/${t.max_rounds}` : (t.review_lock ? "на ревью" : "");
+    html += `<div class="meta"><div class="num">${pr}${rounds ? ", " + rounds : ""}</div><div class="line2 num">${t.tokens ? tokens(t.tokens) + " токенов" : "—"}</div></div>`;
+  }
+  g.innerHTML = html;
+
+  $("evlist").innerHTML = s.events.length
+    ? s.events.map(e => `<li class="${esc(e.kind)}"><time class="num">${time(e.at)}</time><span>${esc(e.text)}</span></li>`).join("")
+    : `<li><time></time><span>Событий пока нет.</span></li>`;
+}
+
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-act],[data-copy]");
+  if (!b) return;
+  if (b.dataset.copy) return copy(b.dataset.copy);
+  act(b.dataset.act, b.dataset.id);
+});
+
+async function load() {
+  try {
+    const r = await fetch("/api/state", { cache: "no-store" });
+    render(await r.json());
+  } catch (e) {
+    $("sub").innerHTML = `<span class="offline">Панель не отвечает: монитор остановлен или порт занят.</span>`;
+  }
+}
+load();
+setInterval(() => { if (!document.hidden) load(); }, 5000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
+</script>
+</body>
+</html>

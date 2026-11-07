@@ -1,0 +1,423 @@
+#!/usr/bin/env python3
+"""
+Один раунд AI-ревью pull request'а (вызывается как `aiflow review --pr N`).
+
+Порядок: PR открыт → лимит раундов → комментарии человека → CI → защищённые пути →
+ревьюер DeepSeek через opencode → inline-ревью от имени бота → автомерж.
+Печатает JSON для worker'а. Итоговые статусы записываются в runs/<task>/report.json сами.
+Неизвестное и непроверенное считается блокирующим (fail-closed).
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import aiflow  # noqa: E402
+
+REVIEW_MARKER = "<!-- ai-review -->"
+REPLY_MARKER = "<!-- ai-review-reply -->"
+HUMAN_MARKER = "<!-- human -->"
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+PARSE_ATTEMPTS = 2
+OPENCODE_TIMEOUT = 15 * 60
+TERMINAL = {"approved", "limit_reached", "already_closed", "error"}
+
+CTX: dict = {"root": None, "task": None, "pr": None, "round": None}
+
+
+def finish(status: str, code: int = 0, **data) -> None:
+    out = {"status": status, **data}
+    root, task = CTX["root"], CTX["task"]
+    if root and task:
+        try:
+            aiflow.write_json(root / "runs" / task["id"] / "review.json",
+                              {"at": aiflow.iso(), "pr": CTX["pr"], "round": CTX["round"], **out})
+            if status in TERMINAL:
+                aiflow.write_report(root, task["id"], "worker", status, CTX["pr"],
+                                    data.get("message") or data.get("summary") or status)
+        except Exception as e:  # отчёт не должен ломать вывод для worker'а
+            out["report_error"] = str(e)
+    sys.stdout.write(json.dumps(out, ensure_ascii=False, indent=2) + "\n")
+    sys.exit(code)
+
+
+def load_token() -> str:
+    token = os.environ.get("REVIEW_BOT_TOKEN", "").strip()
+    if not token:
+        f = Path.home() / ".config" / "ai-review" / "token"
+        if f.is_file():
+            token = f.read_text(encoding="utf-8").strip()
+    if not token:
+        finish("error", 1, message="нет токена бота: REVIEW_BOT_TOKEN или ~/.config/ai-review/token")
+    return token
+
+
+class Runner:
+    def __init__(self, gh: str, opencode: str, token: str, cwd: Path):
+        self.gh, self.opencode, self.cwd = gh, opencode, cwd
+        base = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN", "REVIEW_BOT_TOKEN")}
+        self.gh_env = {**base, "GH_TOKEN": token}
+        self.plain_env = base
+
+    def run(self, cmd, *, env, check=True, timeout=180):
+        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                              env=env, timeout=timeout, cwd=self.cwd, **aiflow.NO_WINDOW)
+        if check and proc.returncode != 0:
+            raise RuntimeError(f"{Path(cmd[0]).stem} {' '.join(cmd[1:3])}: {(proc.stderr or proc.stdout).strip()[:500]}")
+        return proc
+
+    def gh_run(self, *args, check=True, timeout=180):
+        return self.run([self.gh, *args], env=self.gh_env, check=check, timeout=timeout)
+
+    def gh_json(self, *args):
+        return json.loads(self.gh_run(*args).stdout or "null")
+
+
+# ------------------------------------------------------------------ helpers
+
+def find_task(root: Path, pr: int) -> dict | None:
+    for t in aiflow.Store(root).tasks():
+        if t.get("pr") == pr:
+            return t
+    return None
+
+
+def bot_reviews(r: Runner, pr: int, login: str) -> list[dict]:
+    out = r.gh_run("api", f"repos/{{owner}}/{{repo}}/pulls/{pr}/reviews", "--paginate",
+                   "--jq", f'.[] | select(.user.login == "{login}") | {{id, state, body, submitted_at}}').stdout
+    items = [json.loads(x) for x in out.splitlines() if x.strip()]
+    return [i for i in items if REVIEW_MARKER in (i.get("body") or "")]
+
+
+def review_comments(r: Runner, pr: int) -> list[dict]:
+    out = r.gh_run("api", f"repos/{{owner}}/{{repo}}/pulls/{pr}/comments", "--paginate",
+                   "--jq", ".[] | {id, in_reply_to_id, path, line, body, created_at, user: .user.login}").stdout
+    return [json.loads(x) for x in out.splitlines() if x.strip()]
+
+
+def strip_markers(text: str) -> str:
+    for m in (REVIEW_MARKER, REPLY_MARKER, HUMAN_MARKER):
+        text = text.replace(m, "")
+    return text.strip()
+
+
+def build_history(reviews: list[dict], threads: list[dict], comments: list[dict], limit: int = 30000) -> str:
+    items = [(rv.get("submitted_at") or "", "Ревьюер (итог раунда)", rv.get("body") or "") for rv in reviews]
+    roots = {c["id"]: c for c in threads if not c.get("in_reply_to_id")}
+    for root_id, c in roots.items():
+        replies = [x for x in threads if x.get("in_reply_to_id") == root_id]
+        lines = [f"`{c.get('path')}:{c.get('line')}` {c.get('user')}: {strip_markers(c.get('body') or '')}"]
+        lines += [f"  ↳ {x.get('user')}: {strip_markers(x.get('body') or '')}" for x in replies]
+        items.append((c.get("created_at") or "", "Тред", "\n".join(lines)))
+    for c in comments:
+        body = c.get("body") or ""
+        if REPLY_MARKER in body:
+            items.append((c.get("createdAt") or "", "Исполнитель", body))
+        elif body.lstrip().startswith(HUMAN_MARKER):
+            items.append((c.get("createdAt") or "", "Человек", body))
+    if not items:
+        return "Это первый раунд, истории нет."
+    items.sort(key=lambda x: x[0])
+    text = "\n\n".join(f"### {who} ({ts})\n\n{strip_markers(body)}" for ts, who, body in items)
+    return text if len(text) <= limit else "[… начало истории обрезано]\n" + text[-limit:]
+
+
+def diff_lines(diff: str) -> dict[str, set[int]]:
+    """Номера строк новой версии, на которые GitHub принимает inline-комментарии."""
+    out: dict[str, set[int]] = {}
+    cur, new_ln = None, 0
+    for line in diff.splitlines():
+        if line.startswith("+++ "):
+            path = line[4:].strip()
+            cur = None if path == "/dev/null" else (path[2:] if path.startswith("b/") else path)
+            if cur is not None:
+                out.setdefault(cur, set())
+        elif line.startswith("@@"):
+            m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
+            new_ln = int(m.group(1)) if m else 0
+        elif cur is None or line.startswith(("--- ", "diff --git", "index ")):
+            continue
+        elif line.startswith("+"):
+            out[cur].add(new_ln)
+            new_ln += 1
+        elif line.startswith(" "):
+            out[cur].add(new_ln)
+            new_ln += 1
+        elif line.startswith("-") or line.startswith("\\"):
+            continue
+    return out
+
+
+def build_context(plan: str, pr: dict, history: str, diff: str, max_chars: int) -> tuple[str, bool]:
+    truncated = len(diff) > max_chars
+    if truncated:
+        diff = diff[:max_chars] + "\n\n[... дифф обрезан. Дочитай остаток через git diff и верни \"diff_fully_read\": true]\n"
+    ctx = (f"# План задачи и описание PR: {pr.get('title', '')}\n\n{plan or '(описания нет)'}\n\n"
+           f"# История ревью\n\n{history}\n\n# Дифф\n\n```diff\n{diff}\n```\n")
+    return ctx, truncated
+
+
+def extract_json(text: str) -> dict | None:
+    candidates = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S)[::-1]
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end > start:
+        candidates.append(text[start:end + 1])
+    for chunk in candidates:
+        try:
+            data = json.loads(chunk)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
+
+
+def call_reviewer(r: Runner, pr: int, rnd: int, max_rounds: int, model: str, ctx_path: Path) -> dict:
+    message = (f"Review pull request #{pr}, round {rnd} of {max_rounds}. All materials are in the attached file. "
+               "Reply with exactly one JSON object following your instructions.")
+    cmd = [r.opencode, "run", message, "--agent", "reviewer"]
+    if model:
+        cmd += ["--model", model]
+    cmd += ["--file", str(ctx_path)]
+    last = ""
+    for _ in range(PARSE_ATTEMPTS):
+        proc = r.run(cmd, env=r.plain_env, check=False, timeout=OPENCODE_TIMEOUT)
+        last = ANSI_RE.sub("", proc.stdout or "")
+        data = extract_json(last)
+        if data is not None and "comments" in data:
+            return data
+    raise RuntimeError("ревьюер не вернул валидный JSON. Конец вывода:\n" + last[-2000:])
+
+
+def normalize(data: dict, truncated: bool) -> tuple[str, list[dict], str]:
+    comments = []
+    for c in data.get("comments") or []:
+        if not isinstance(c, dict):
+            continue
+        sev = c.get("severity")
+        sev = sev if sev in ("blocking", "minor") else "blocking"  # fail-closed
+        try:
+            line = int(c["line"]) if c.get("line") is not None else None
+        except (TypeError, ValueError):
+            line = None
+        text = str(c.get("text", "")).strip()
+        if text:
+            comments.append({"severity": sev, "file": str(c.get("file") or ""), "line": line, "text": text})
+    if truncated and data.get("diff_fully_read") is not True:
+        comments.append({"severity": "blocking", "file": "", "line": None,
+                         "text": "Дифф был обрезан, а ревьюер не подтвердил, что прочитал остаток. "
+                                 "Разбейте изменения или повторите раунд."})
+    verdict = "changes" if any(c["severity"] == "blocking" for c in comments) else "approve"
+    return verdict, comments, str(data.get("summary", "")).strip()
+
+
+def format_body(rnd: int, max_rounds: int, verdict: str, summary: str, off_diff: list[dict], inline_count: int) -> str:
+    head = "✅ блокирующих замечаний нет" if verdict == "approve" else "❌ требуются исправления"
+    parts = [REVIEW_MARKER, f"**AI-ревью, раунд {rnd}/{max_rounds}**: {head}", ""]
+    if summary:
+        parts += [summary, ""]
+    if inline_count:
+        parts += [f"Замечаний в строках диффа: {inline_count}.", ""]
+    for title, sev in (("Блокирующие", "blocking"), ("Необязательные", "minor")):
+        group = [c for c in off_diff if c["severity"] == sev]
+        if group:
+            parts.append(f"### {title} (вне диффа)")
+            for i, c in enumerate(group, 1):
+                where = f"`{c['file']}:{c['line']}` " if c["file"] and c["line"] else f"`{c['file']}` " if c["file"] else ""
+                parts.append(f"{i}. {where}{c['text']}")
+            parts.append("")
+    return "\n".join(parts)
+
+
+def publish(r: Runner, pr: int, head_sha: str, verdict: str, rnd: int, max_rounds: int,
+            summary: str, comments: list[dict], lines: dict[str, set[int]], tmp: Path) -> list[dict]:
+    inline, off = [], []
+    for c in comments:
+        if c["file"] in lines and c["line"] in lines[c["file"]]:
+            inline.append(c)
+        else:
+            off.append(c)
+    payload = {
+        "commit_id": head_sha,
+        "event": "APPROVE" if verdict == "approve" else "REQUEST_CHANGES",
+        "body": format_body(rnd, max_rounds, verdict, summary, off, len(inline)),
+        "comments": [{"path": c["file"], "line": c["line"], "side": "RIGHT",
+                      "body": f"**{'блокирующее' if c['severity'] == 'blocking' else 'необязательное'}**: {c['text']}"}
+                     for c in inline],
+    }
+    p = tmp / "review.json"
+    p.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    res = json.loads(r.gh_run("api", "--method", "POST", f"repos/{{owner}}/{{repo}}/pulls/{pr}/reviews",
+                              "--input", str(p)).stdout or "{}")
+    ids = []
+    if inline and res.get("id"):
+        posted = json.loads(r.gh_run("api", f"repos/{{owner}}/{{repo}}/pulls/{pr}/reviews/{res['id']}/comments").stdout or "[]")
+        for c, pc in zip(inline, sorted(posted, key=lambda x: x.get("id", 0))):
+            ids.append({**c, "comment_id": pc.get("id")})
+    return ids + [{**c, "comment_id": None} for c in off]
+
+
+def wait_checks(r: Runner, pr: int, timeout_min: int) -> tuple[str, list[dict]]:
+    r.gh_run("pr", "checks", str(pr), "--watch", "--interval", "30", check=False, timeout=timeout_min * 60 + 60)
+    proc = r.gh_run("pr", "checks", str(pr), "--json", "name,state,bucket,link,workflow", check=False)
+    text = (proc.stdout or "").strip()
+    if not text.startswith("["):
+        if "no checks" in (proc.stderr + proc.stdout).lower():
+            return "none", []
+        raise RuntimeError("gh pr checks: " + (proc.stderr or proc.stdout).strip()[:300])
+    checks = json.loads(text)
+    if not checks:
+        return "none", []
+    if any(c.get("bucket") == "pending" for c in checks):
+        return "pending", checks
+    failed = [c for c in checks if c.get("bucket") in ("fail", "cancel")]
+    return ("fail" if failed else "pass"), failed
+
+
+def failed_logs(r: Runner, failed: list[dict], budget: int = 3000) -> str:
+    out = []
+    seen = set()
+    for c in failed:
+        m = re.search(r"/actions/runs/(\d+)", c.get("link") or "")
+        if not m or m.group(1) in seen:
+            continue
+        seen.add(m.group(1))
+        p = r.gh_run("run", "view", m.group(1), "--log-failed", check=False, timeout=120)
+        out.append(f"## {c.get('workflow') or ''} / {c.get('name')}\n" + (p.stdout or p.stderr or "")[-budget:])
+    text = "\n\n".join(out)
+    return text[-budget:]
+
+
+def try_merge(r: Runner, pr: int) -> str:
+    if r.gh_json("pr", "view", str(pr), "--json", "mergeable").get("mergeable") == "CONFLICTING":
+        return "conflict"
+    if r.gh_run("pr", "merge", str(pr), "--auto", "--squash", check=False).returncode == 0:
+        return "auto_merge_enabled"
+    direct = r.gh_run("pr", "merge", str(pr), "--squash", check=False)
+    if direct.returncode == 0:
+        return "merged"
+    if r.gh_json("pr", "view", str(pr), "--json", "mergeable").get("mergeable") == "CONFLICTING":
+        return "conflict"
+    raise RuntimeError("не удалось смержить: " + (direct.stderr or "").strip()[:300])
+
+
+# ------------------------------------------------------------------ main
+
+def main(argv: list[str] | None = None) -> int:
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    ap = argparse.ArgumentParser(description="Один раунд AI-ревью pull request'а")
+    ap.add_argument("--pr", type=int, required=True)
+    args = ap.parse_args(argv)
+    CTX["pr"] = args.pr
+
+    try:
+        root = aiflow.repo_root()
+    except aiflow.AiflowError as e:
+        finish("error", 1, message=str(e))
+    CTX["root"] = root
+    store = aiflow.Store(root)
+    cfg = store.config()
+    CTX["task"] = task = find_task(root, args.pr)
+    max_rounds = int(cfg["max_rounds"])
+
+    gh, oc = shutil.which("gh"), shutil.which("opencode")
+    if not gh or not oc:
+        finish("error", 1, message="нужны gh и opencode в PATH")
+    r = Runner(gh, oc, load_token(), Path.cwd())
+    tmp = Path(tempfile.mkdtemp(prefix="aiflow-review-"))
+    try:
+        login = r.gh_run("api", "user", "--jq", ".login").stdout.strip()
+        pr = r.gh_json("pr", "view", str(args.pr), "--json", "state,title,body,comments,headRefOid,author")
+        if pr.get("state") != "OPEN":
+            finish("already_closed", state=pr.get("state"))
+        if (pr.get("author") or {}).get("login") == login:
+            finish("error", 1, message="PR создан ботом — бот не может его одобрить")
+
+        reviews = bot_reviews(r, args.pr, login)
+        done = len(reviews)
+        if done >= max_rounds:
+            label = cfg["labels"]["needs_human"]
+            r.gh_run("label", "create", label, "--color", "D93F0B", "--force", check=False)
+            r.gh_run("pr", "edit", str(args.pr), "--add-label", label, check=False)
+            finish("limit_reached", rounds_done=done, max_rounds=max_rounds,
+                   message="лимит раундов исчерпан, PR помечен needs-human")
+        rnd = CTX["round"] = done + 1
+
+        # комментарии человека с маркером <!-- human -->, на которые worker ещё не ответил
+        comments = pr.get("comments") or []
+        marks = [rv.get("submitted_at") or "" for rv in reviews]
+        marks += [c.get("createdAt") or "" for c in comments if REPLY_MARKER in (c.get("body") or "")]
+        watermark = max(marks) if marks else ""
+        human = [{"author": (c.get("author") or {}).get("login"), "text": strip_markers(c.get("body") or ""),
+                  "at": c.get("createdAt")}
+                 for c in comments if (c.get("body") or "").lstrip().startswith(HUMAN_MARKER)
+                 and (c.get("createdAt") or "") > watermark]
+        if human:
+            CTX["round"] = done
+            finish("human_input", comments=human,
+                   message="учти комментарии человека, ответь комментарием с <!-- ai-review-reply --> и снова запусти ревью")
+
+        # CI до ревью: раунд не расходуется
+        state, failed = wait_checks(r, args.pr, int(cfg["ci_timeout_minutes"]))
+        if state == "pending":
+            CTX["round"] = done
+            finish("error", 1, message=f"CI не завершился за {cfg['ci_timeout_minutes']} мин")
+        if state == "fail":
+            CTX["round"] = done
+            finish("ci_failed", failed=[c.get("name") for c in failed], logs=failed_logs(r, failed))
+
+        head = pr.get("headRefOid")
+        diff = r.gh_run("pr", "diff", str(args.pr)).stdout
+        lines = diff_lines(diff)
+
+        # защищённые пути — без вызова модели
+        files = [f for f in r.gh_run("pr", "diff", str(args.pr), "--name-only").stdout.splitlines() if f.strip()]
+        allowed = (task or {}).get("allowed_protected_paths") or []
+        viol = [f for f in files if aiflow.path_matches(f, cfg["protected_paths"]) and not aiflow.path_matches(f, allowed)]
+        if viol:
+            cs = [{"severity": "blocking", "file": f, "line": None,
+                   "text": "Изменение защищённого пути без явного разрешения в задаче. Откатите или попросите человека "
+                           "добавить путь в allowed_protected_paths."} for f in viol]
+            posted = publish(r, args.pr, head, "changes", rnd, max_rounds, "Нарушены защищённые пути.", cs, {}, tmp)
+            finish("changes_requested", round=rnd, max_rounds=max_rounds, summary="защищённые пути", comments=posted)
+
+        history = build_history(reviews, review_comments(r, args.pr), comments)
+        ctx, truncated = build_context(pr.get("body") or "", pr, history, diff, int(cfg["max_diff_chars"]))
+        ctx_path = tmp / "review-context.md"
+        ctx_path.write_text(ctx, encoding="utf-8")
+
+        verdict, cs, summary = normalize(
+            call_reviewer(r, args.pr, rnd, max_rounds, cfg.get("reviewer_model") or "", ctx_path), truncated)
+        posted = publish(r, args.pr, head, verdict, rnd, max_rounds, summary, cs, lines, tmp)
+        result = {"round": rnd, "max_rounds": max_rounds, "summary": summary, "comments": posted}
+        if verdict != "approve":
+            finish("changes_requested", **result)
+
+        merge = try_merge(r, args.pr)
+        if merge == "conflict":
+            finish("merge_conflict", **result, message="одобрено, но конфликт с базовой веткой: нужен rebase")
+        finish("approved", merge=merge, **result)
+
+    except subprocess.TimeoutExpired:
+        finish("error", 1, message="внешняя команда не уложилась в таймаут")
+    except (RuntimeError, json.JSONDecodeError, KeyError, OSError) as e:
+        finish("error", 1, message=str(e))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return 0
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,10 @@
+#!/usr/bin/env sh
+# aiflow launcher: находит Python 3.9+ и запускает scripts/aiflow.py
+DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+for p in python3 python py; do
+  if command -v "$p" >/dev/null 2>&1 && "$p" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; then
+    exec "$p" "$DIR/../scripts/aiflow.py" "$@"
+  fi
+done
+echo "aiflow: нужен Python 3.9+ в PATH" >&2
+exit 127
