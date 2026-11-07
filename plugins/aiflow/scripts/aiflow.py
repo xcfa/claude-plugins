@@ -41,7 +41,7 @@ LIMIT_RE = re.compile(
 DEFAULT_CONFIG = {
     "concurrency": 2,
     "tick_seconds": 45,
-    "base_branch": "integration",
+    "base_branch": "master",
     "ui_port": 8765,
     "permission_mode": "acceptEdits",
     "planner_model": {"complex": "opus", "simple": "sonnet"},
@@ -778,9 +778,9 @@ class Dispatcher:
         red = r.get("conclusion") in ("failure", "timed_out", "startup_failure")
         paused = self.q.get("paused") or {}
         if red and paused.get("reason") != "integration_red":
-            self.pause("integration_red", None, f"{self.cfg['base_branch']} покраснела после мержа: {r.get('url', '')}")
+            self.pause("integration_red", None, f"ветка {self.cfg['base_branch']} покраснела после мержа: {r.get('url', '')}")
         elif not red and paused.get("reason") == "integration_red":
-            self.unpause(f"{self.cfg['base_branch']} снова зелёная")
+            self.unpause(f"ветка {self.cfg['base_branch']} снова зелёная")
 
     def advance(self, t: dict) -> None:
         st = t.get("state", "new")
@@ -1201,7 +1201,7 @@ def cmd_init(args, root: Path) -> int:
     print("Готово:\n  " + "\n  ".join(created))
     print("\nДальше:\n"
           "  1. Впишите модель ревьюера в runs/config.json → reviewer_model (opencode models deepseek).\n"
-          "  2. Заполните .github/workflows/ci.yml и сделайте job обязательной проверкой для integration.\n"
+          f"  2. Заполните .github/workflows/ci.yml и сделайте job обязательной проверкой для {store.config()['base_branch']}.\n"
           "  3. Добавьте в .claude/settings.json allow-правила для сборки и тестов проекта.\n"
           "  4. Закоммитьте .claude/settings.json, .opencode/, .github/, docs/.\n"
           "  5. aiflow doctor")
@@ -1266,7 +1266,7 @@ def doctor_checks(root: Path | None, quick: bool) -> list[tuple[bool, str]]:
         base = store.config()["base_branch"]
         p = run(["git", "ls-remote", "--heads", "origin", base], cwd=root, timeout=30)
         res.append(check(f"ветка {base} на origin", p.returncode == 0 and bool(p.stdout.strip()),
-                         f"git push origin main:{base}"))
+                         f"git push origin {base} или поправьте base_branch в runs/config.json"))
     return res
 
 

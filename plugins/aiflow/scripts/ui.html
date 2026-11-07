@@ -186,7 +186,7 @@ function render(s) {
   const mon = s.monitor_pid ? "монитор работает" : "монитор не запущен — в сессии оркестратора выполните /aiflow:resume";
   $("sub").innerHTML = `база <b>${esc(s.base)}</b>, до ${s.concurrency} сессий параллельно, <span class="${s.monitor_pid ? "" : "offline"}">${esc(mon)}</span>`;
   const p = s.paused;
-  const reasons = { manual: "вручную", rate_limit: "лимит использования", integration_red: s.base + " красная", trust: "нет доверия к папке" };
+  const reasons = { manual: "вручную", rate_limit: "лимит использования", integration_red: "ветка " + s.base + " красная", trust: "нет доверия к папке" };
   $("qstate").textContent = p ? `Пауза: ${reasons[p.reason] || p.reason}${p.until ? ", до " + time(p.until) : ""}` : "Очередь идёт";
   $("qstate").className = "state" + (p ? " paused" : "");
   const qb = $("qbtn"); qb.hidden = false;

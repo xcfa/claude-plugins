@@ -1,7 +1,7 @@
 # aiflow
 
 Плагин Claude Code, который ведёт пачку задач через конвейер «план → реализация →
-AI-ревью DeepSeek → мерж в `integration`» в фоновых сессиях Claude Code. Вы пишете
+AI-ревью DeepSeek → мерж в `master`» в фоновых сессиях Claude Code. Вы пишете
 задачи одним сообщением оркестратору, обсуждаете планы в PR или в сессии
 планировщика, одобряете их — дальше всё идёт само. Очередь, лимиты, порядок ревью
 и перезапуски ведёт программа `aiflow`, а не модель: она работает монитором в сессии
@@ -44,10 +44,11 @@ claude plugin install aiflow@aiflow-local
 
 1. **Бот и токен.** Fine-grained token бота на этот репозиторий: Contents, Pull requests,
    Issues — read/write. Положите в `~/.config/ai-review/token` или в `REVIEW_BOT_TOKEN`.
-2. **GitHub.** Ветка `integration` от `main`. Settings → General: Allow auto-merge,
-   Allow squash merging. Защита `integration`: PR, 1 approval, обязательные проверки из
+2. **GitHub.** Промежуточной ветки нет: одобренные PR мержатся сразу в `master`
+   (`base_branch` в `runs/config.json`). Settings → General: Allow auto-merge,
+   Allow squash merging. Защита `master`: PR, 1 approval, обязательные проверки из
    `ci.yml`, «Require branches to be up to date». Не включайте CODEOWNERS и «Require approval
-   of the most recent push» для `integration`.
+   of the most recent push» для `master`: одобрение бота их не удовлетворит.
 3. **Инициализация.** В сессии Claude Code в корне репозитория: `! aiflow init`. Команда
    создаст `runs/config.json`, шаблоны `.opencode/agent/reviewer.md`, `.github/workflows/ci.yml`,
    `docs/ARCHITECTURE.md`, добавит права для фоновых сессий в `.claude/settings.json`
@@ -75,11 +76,11 @@ claude plugin install aiflow@aiflow-local
    `/aiflow:discuss <PR>`. Одобрение — метка `plan-approved`, кнопка в панели
    или `! aiflow approve <id>`.
 4. Реализация и ревью идут без вас. PR ревьюятся строго по одному: следующий встаёт
-   на ревью только после мержа предыдущего, с rebase на свежую `integration`.
+   на ревью только после мержа предыдущего, с rebase на свежий `master`.
 5. При «нужен человек» оркестратор объяснит причину. Повтор — `aiflow retry <id>`,
    метка `retry` или кнопка в панели.
-6. Когда пачка смержена и CI на `integration` зелёный — проверьте `integration` руками
-   и смержите её в `main` своим PR.
+6. Одобренные PR с зелёным CI сами уходят squash-мержем в `master`. Проверьте `master`
+   после мержей; найденное — новой пачкой через `/aiflow:intake` или `git revert`.
 
 После перезагрузки машины: подключитесь к сессии оркестратора и выполните `/aiflow:resume`.
 
@@ -134,7 +135,7 @@ claude plugin install aiflow@aiflow-local
 (`aiflow report`), метка PR, состояние сессии из `claude agents --json`, статус PR.
 `concurrency` ограничивает сессии планирования и реализации; ревью идёт поверх лимита,
 но строго по одному PR (`review_lock`). Rate limit ставит очередь на паузу на
-`rate_limit_pause_minutes`, красная `integration` после мержа — до починки.
+`rate_limit_pause_minutes`, красный `master` после мержа — до починки.
 
 Ревью fail-closed: неизвестная серьёзность замечания считается блокирующей, обрезанный дифф
 без подтверждения ревьюера блокирует, изменения защищённых путей блокируются без вызова

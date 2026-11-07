@@ -8,7 +8,7 @@
     {
       "name": "aiflow",
       "source": "./plugins/aiflow",
-      "description": "Очередь задач для фоновых сессий Claude Code: план → реализация → AI-ревью DeepSeek → мерж в integration"
+      "description": "Очередь задач для фоновых сессий Claude Code: план → реализация → AI-ревью DeepSeek → мерж в master"
     }
   ]
 }
