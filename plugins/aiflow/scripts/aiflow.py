@@ -26,7 +26,16 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 PLUGIN_ROOT = HERE.parent
 TEMPLATES = PLUGIN_ROOT / "templates"
-VERSION = "0.1.3"
+
+
+def _plugin_version() -> str:
+    try:
+        return json.loads((PLUGIN_ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))["version"]
+    except (OSError, ValueError, KeyError):
+        return "unknown"
+
+
+VERSION = _plugin_version()
 
 STAGES = ["new", "planning", "plan_review", "in_progress", "ready", "in_review", "merged"]
 SIDE_STATES = ["needs_human", "cancelled"]
