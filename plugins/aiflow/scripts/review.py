@@ -3,7 +3,9 @@
 Один раунд AI-ревью pull request'а (вызывается как `aiflow review --pr N`).
 
 Порядок: PR открыт → лимит раундов → комментарии человека → CI → защищённые пути →
-ревьюер DeepSeek через opencode → inline-ревью от имени бота → автомерж.
+ревьюер DeepSeek через opencode → inline-ревью → автомерж.
+Ревью публикуется от вашего аккаунта gh (review_identity: self, событие COMMENT — GitHub не даёт
+одобрить свой PR) или от бота с отдельным токеном (review_identity: bot, APPROVE/REQUEST_CHANGES).
 Печатает JSON для worker'а. Итоговые статусы записываются в runs/<task>/report.json сами.
 Неизвестное и непроверенное считается блокирующим (fail-closed).
 """
@@ -61,11 +63,18 @@ def load_token() -> str:
     return token
 
 
+IDENTITIES = ("self", "bot")
+
+
 class Runner:
-    def __init__(self, gh: str, opencode: str, token: str, cwd: Path):
+    def __init__(self, gh: str, opencode: str, token: str | None, cwd: Path):
+        """token=None — gh работает от текущей авторизации пользователя (review_identity: self)."""
         self.gh, self.opencode, self.cwd = gh, opencode, cwd
         base = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN", "REVIEW_BOT_TOKEN")}
-        self.gh_env = {**base, "GH_TOKEN": token}
+        if token:
+            self.gh_env = {**base, "GH_TOKEN": token}
+        else:
+            self.gh_env = {k: v for k, v in os.environ.items() if k != "REVIEW_BOT_TOKEN"}
         self.plain_env = base
 
     def run(self, cmd, *, env, check=True, timeout=180):
@@ -238,8 +247,17 @@ def format_body(rnd: int, max_rounds: int, verdict: str, summary: str, off_diff:
     return "\n".join(parts)
 
 
+def review_event(identity: str, verdict: str) -> str:
+    # От своего аккаунта GitHub не принимает ни APPROVE, ни REQUEST_CHANGES на собственный PR;
+    # вердикт тогда несёт текст ревью, а мерж включает сам review.py.
+    if identity == "self":
+        return "COMMENT"
+    return "APPROVE" if verdict == "approve" else "REQUEST_CHANGES"
+
+
 def publish(r: Runner, pr: int, head_sha: str, verdict: str, rnd: int, max_rounds: int,
-            summary: str, comments: list[dict], lines: dict[str, set[int]], tmp: Path) -> list[dict]:
+            summary: str, comments: list[dict], lines: dict[str, set[int]], tmp: Path,
+            identity: str = "bot") -> list[dict]:
     inline, off = [], []
     for c in comments:
         if c["file"] in lines and c["line"] in lines[c["file"]]:
@@ -248,7 +266,7 @@ def publish(r: Runner, pr: int, head_sha: str, verdict: str, rnd: int, max_round
             off.append(c)
     payload = {
         "commit_id": head_sha,
-        "event": "APPROVE" if verdict == "approve" else "REQUEST_CHANGES",
+        "event": review_event(identity, verdict),
         "body": format_body(rnd, max_rounds, verdict, summary, off, len(inline)),
         "comments": [{"path": c["file"], "line": c["line"], "side": "RIGHT",
                       "body": f"**{'блокирующее' if c['severity'] == 'blocking' else 'необязательное'}**: {c['text']}"}
@@ -335,15 +353,19 @@ def main(argv: list[str] | None = None) -> int:
     gh, oc = shutil.which("gh"), shutil.which("opencode")
     if not gh or not oc:
         finish("error", 1, message="нужны gh и opencode в PATH")
-    r = Runner(gh, oc, load_token(), Path.cwd())
+    identity = cfg.get("review_identity") or "self"
+    if identity not in IDENTITIES:
+        finish("error", 1, message=f"review_identity в runs/config.json: {identity!r}, ожидается self или bot")
+    r = Runner(gh, oc, load_token() if identity == "bot" else None, Path.cwd())
     tmp = Path(tempfile.mkdtemp(prefix="aiflow-review-"))
     try:
         login = r.gh_run("api", "user", "--jq", ".login").stdout.strip()
         pr = r.gh_json("pr", "view", str(args.pr), "--json", "state,title,body,comments,headRefOid,author")
         if pr.get("state") != "OPEN":
             finish("already_closed", state=pr.get("state"))
-        if (pr.get("author") or {}).get("login") == login:
-            finish("error", 1, message="PR создан ботом — бот не может его одобрить")
+        if identity == "bot" and (pr.get("author") or {}).get("login") == login:
+            finish("error", 1, message="PR создан ботом — бот не может его одобрить. "
+                                       "Создавайте PR своим аккаунтом или переключите review_identity на self")
 
         reviews = bot_reviews(r, args.pr, login)
         done = len(reviews)
@@ -390,7 +412,8 @@ def main(argv: list[str] | None = None) -> int:
             cs = [{"severity": "blocking", "file": f, "line": None,
                    "text": "Изменение защищённого пути без явного разрешения в задаче. Откатите или попросите человека "
                            "добавить путь в allowed_protected_paths."} for f in viol]
-            posted = publish(r, args.pr, head, "changes", rnd, max_rounds, "Нарушены защищённые пути.", cs, {}, tmp)
+            posted = publish(r, args.pr, head, "changes", rnd, max_rounds, "Нарушены защищённые пути.", cs, {}, tmp,
+                             identity)
             finish("changes_requested", round=rnd, max_rounds=max_rounds, summary="защищённые пути", comments=posted)
 
         history = build_history(reviews, review_comments(r, args.pr), comments)
@@ -400,7 +423,7 @@ def main(argv: list[str] | None = None) -> int:
 
         verdict, cs, summary = normalize(
             call_reviewer(r, args.pr, rnd, max_rounds, cfg.get("reviewer_model") or "", ctx_path), truncated)
-        posted = publish(r, args.pr, head, verdict, rnd, max_rounds, summary, cs, lines, tmp)
+        posted = publish(r, args.pr, head, verdict, rnd, max_rounds, summary, cs, lines, tmp, identity)
         result = {"round": rnd, "max_rounds": max_rounds, "summary": summary, "comments": posted}
         if verdict != "approve":
             finish("changes_requested", **result)

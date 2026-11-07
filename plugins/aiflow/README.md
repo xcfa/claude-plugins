@@ -28,8 +28,8 @@ AI-ревью DeepSeek → мерж в `master`» в фоновых сессия
 ## Требования
 
 Claude Code с agent view (`claude agents` открывает полноэкранный список), Python 3.9+,
-`git`, `gh` (авторизован), `opencode` с подключённым DeepSeek, отдельный бот-аккаунт
-GitHub с правами Write на репозиторий.
+`git`, `gh` (авторизован), `opencode` с подключённым DeepSeek. Отдельный бот-аккаунт GitHub
+нужен только в режиме `review_identity: bot` (см. ниже).
 
 ## Установка
 
@@ -42,13 +42,18 @@ claude plugin install aiflow@aiflow-local
 
 ## Подготовка репозитория (один раз)
 
-1. **Бот и токен.** Fine-grained token бота на этот репозиторий: Contents, Pull requests,
-   Issues — read/write. Положите в `~/.config/ai-review/token` или в `REVIEW_BOT_TOKEN`.
+1. **Чей аккаунт.** По умолчанию (`review_identity: self`) ревью и мерж идут от вашего `gh`:
+   ревью публикуется комментарием (одобрить свой PR GitHub не даёт), мержит `review.py`
+   после вердикта approve и зелёного CI. Если нужна жёсткая граница — GitHub сам требует
+   одобрение, — поставьте `review_identity: bot` и заведите бота: fine-grained token на
+   репозиторий (Contents, Pull requests, Issues — read/write) в `~/.config/ai-review/token`
+   или в `REVIEW_BOT_TOKEN`.
 2. **GitHub.** Промежуточной ветки нет: одобренные PR мержатся сразу в `master`
-   (`base_branch` в `runs/config.json`). Settings → General: Allow auto-merge,
-   Allow squash merging. Защита `master`: PR, 1 approval, обязательные проверки из
-   `ci.yml`, «Require branches to be up to date». Не включайте CODEOWNERS и «Require approval
-   of the most recent push» для `master`: одобрение бота их не удовлетворит.
+   (`base_branch` в `runs/config.json`). Settings → General: Allow squash merging.
+   Защита `master` — по желанию (в приватных репозиториях на бесплатном плане её нет):
+   PR, обязательные проверки из `ci.yml`, «Require branches to be up to date», Allow auto-merge;
+   обязательное одобрение — только в режиме `bot`. CODEOWNERS и «Require approval of the most
+   recent push» не включайте.
 3. **Инициализация.** В сессии Claude Code в корне репозитория: `! aiflow init`. Команда
    создаст `runs/config.json`, шаблоны `.opencode/agent/reviewer.md`, `.github/workflows/ci.yml`,
    `docs/ARCHITECTURE.md`, добавит права для фоновых сессий в `.claude/settings.json`
@@ -151,12 +156,14 @@ claude plugin install aiflow@aiflow-local
   в интерактивных сессиях; фоновая сессия интерактивная, но это главное, что надо увидеть
   своими глазами.
 - Тестовая задача проходит путь до `ready` без зависаний на запросах разрешений.
-- Бот одобряет PR, автомерж включается.
+- AI-ревью появляется в PR, после approve PR мержится в `master`.
 
 ## Ограничения
 
 - Agent view в research preview; при смене флагов CLI правки нужны в классе `Claude` в `scripts/aiflow.py`.
 - Фоновые сессии локальные: выключение машины их останавливает (`/aiflow:resume`, затем `aiflow retry`).
-- Deny-правила защищают от случайностей, а не от злого умысла; реальная граница — права токена бота.
+- Deny-правила защищают от случайностей, а не от злого умысла. В режиме `self` агенты работают
+  с вашим `gh`, и смержить в обход ревью им мешают только deny-правила (`gh pr merge`, `gh api`)
+  и инструкции; жёсткая граница — режим `bot` с обязательным одобрением в защите ветки.
 - На Windows монитор запускает `bin/aiflow` через ту же оболочку, что и Claude Code (Git Bash);
   из PowerShell используйте `bin/aiflow.cmd`.

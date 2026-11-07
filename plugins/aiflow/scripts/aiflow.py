@@ -49,6 +49,7 @@ DEFAULT_CONFIG = {
     "worker_model": "sonnet",
     "worker_effort": "high",
     "reviewer_model": "",
+    "review_identity": "self",  # self — ревью и мерж от вашего gh; bot — от бота с токеном REVIEW_BOT_TOKEN
     "max_rounds": 5,
     "max_diff_chars": 150000,
     "ci_timeout_minutes": 45,
@@ -1256,8 +1257,12 @@ def doctor_checks(root: Path | None, quick: bool) -> list[tuple[bool, str]]:
         return res
     store = Store(root)
     res.append(check("runs/config.json", store.initialized, "выполните aiflow init"))
-    token = os.environ.get("REVIEW_BOT_TOKEN") or (Path.home() / ".config" / "ai-review" / "token").is_file()
-    res.append(check("токен бота", bool(token), "REVIEW_BOT_TOKEN или ~/.config/ai-review/token"))
+    identity = store.config().get("review_identity") or "self"
+    if identity == "bot":
+        token = os.environ.get("REVIEW_BOT_TOKEN") or (Path.home() / ".config" / "ai-review" / "token").is_file()
+        res.append(check("токен бота", bool(token), "REVIEW_BOT_TOKEN или ~/.config/ai-review/token"))
+    else:
+        res.append(check(f"review_identity: {identity}", identity == "self", "ожидается self или bot"))
     if store.initialized:
         cfg = store.config()
         res.append(check("reviewer_model в runs/config.json", bool(cfg.get("reviewer_model")),

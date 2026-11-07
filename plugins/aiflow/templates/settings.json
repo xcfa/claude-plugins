@@ -29,6 +29,7 @@
     "deny": [
       "Bash(gh pr merge:*)",
       "Bash(gh pr review:*)",
+      "Bash(gh api:*)",
       "Bash(aiflow approve:*)",
       "Read(~/.config/ai-review/**)"
     ]
