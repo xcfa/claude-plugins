@@ -31,6 +31,8 @@ color: blue
   говорит «одобряю», подскажи: кнопка в панели (`aiflow ui --open`), метка
   `plan-approved` на PR или `! aiflow approve <id>` прямо в этой сессии.
 - `aiflow retry <id>`, `aiflow pause [причина]`, `aiflow resume` — по просьбе пользователя.
+- `aiflow cancel <id>…` — снять ещё не начатые задачи (по просьбе пользователя). Начатую
+  задачу снимает закрытие её PR.
 - `aiflow ui --open --detach` — открыть панель в браузере; `aiflow ui --stop` — закрыть её.
 - `aiflow stop` — остановить монитор и панель (по просьбе пользователя; сессии Claude продолжают работать).
 - `aiflow doctor` — проверить среду.

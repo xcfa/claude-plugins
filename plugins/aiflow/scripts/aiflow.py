@@ -1465,6 +1465,41 @@ def cmd_retry(args, root: Path) -> int:
     return 0
 
 
+def cmd_cancel(args, root: Path) -> int:
+    """Снять задачи, которые ещё не начались (state new). Начатые снимаются закрытием PR."""
+    store = Store(root)
+    if not store.initialized:
+        raise AiflowError("репозиторий не инициализирован: aiflow init")
+    ids = list(dict.fromkeys(args.ids))
+    lock = FileLock(store.runs / "tick.lock", stale_minutes=15)
+    if not lock.acquire(wait_seconds=120):
+        raise AiflowError("очередь занята дольше 2 минут, повторите позже")
+    try:
+        tasks = {t["id"]: t for t in store.tasks()}
+        for tid in ids:
+            t = tasks.get(tid)
+            if not t:
+                raise AiflowError(f"нет задачи {tid}")
+            if t.get("state") != "new" or t.get("launching") or t.get("pr"):
+                raise AiflowError(f"{tid} уже в работе ({t.get('state')}): закройте её PR, aiflow снимет задачу сам")
+        for t in tasks.values():
+            if t["id"] in ids or t.get("state") in TERMINAL:
+                continue
+            blocked = [d for d in t.get("depends_on") or [] if d in ids]
+            if blocked:
+                raise AiflowError(f"от {', '.join(blocked)} зависит {t['id']}: снимите её тоже или поставьте заново без зависимости")
+        for tid in ids:
+            t = tasks[tid]
+            t.setdefault("history", []).append({"at": iso(), "from": t["state"], "to": "cancelled", "note": "aiflow cancel"})
+            t["state"], t["state_at"], t["cleaned"] = "cancelled", iso(), True
+            store.save_task(t)
+            store.event("cancelled", tid, f"{tid}: снята")
+    finally:
+        lock.release()
+    print("Сняты: " + ", ".join(ids))
+    return 0
+
+
 def cmd_approve(args, root: Path) -> int:
     store = Store(root)
     t = store.task(args.id)
@@ -1704,6 +1739,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("resume")
     rt = sub.add_parser("retry")
     rt.add_argument("id")
+    cn = sub.add_parser("cancel", help="снять задачи, которые ещё не начались")
+    cn.add_argument("ids", nargs="+")
     apv = sub.add_parser("approve", help="одобрить план (метка plan-approved)")
     apv.add_argument("id")
     rp = sub.add_parser("reply", help="ответить в тред ревью")
@@ -1733,7 +1770,7 @@ def main(argv: list[str] | None = None) -> int:
         handlers = {
             "init": cmd_init, "enqueue": cmd_enqueue, "report": cmd_report, "status": cmd_status,
             "tick": cmd_tick, "run": cmd_run, "pause": cmd_pause, "resume": cmd_resume,
-            "retry": cmd_retry, "approve": cmd_approve, "reply": cmd_reply, "review": cmd_review,
+            "retry": cmd_retry, "cancel": cmd_cancel, "approve": cmd_approve, "reply": cmd_reply, "review": cmd_review,
             "ui": cmd_ui, "stop": cmd_stop,
         }
         return handlers[args.cmd](args, root)
