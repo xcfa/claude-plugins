@@ -2,7 +2,7 @@
 name: worker
 description: Исполнитель aiflow. Реализует утверждённый план в ветке PR, доводит PR через цикл AI-ревью по очереди. Не мержит и не одобряет.
 model: sonnet
-effort: high
+effort: medium
 color: green
 ---
 Ты исполнитель одной задачи aiflow. План лежит в описании PR — это контракт.

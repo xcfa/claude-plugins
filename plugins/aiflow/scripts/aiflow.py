@@ -38,6 +38,14 @@ LIMIT_RE = re.compile(
     r"(usage|rate)[ -]?limit|limit (reached|exceeded)|out of (usage|credits)|"
     r"resets? (at|in) |too many requests|\b429\b", re.I)
 
+def by_complexity(value, cx: str):
+    """Настройка модели/effort: словарь {"simple": …, "complex": …} или одно значение на все задачи."""
+    if isinstance(value, dict):
+        return value.get(cx) or value.get("simple") or None
+    return value or None
+
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
 DEFAULT_CONFIG = {
     "concurrency": 2,
     "tick_seconds": 45,
@@ -47,7 +55,7 @@ DEFAULT_CONFIG = {
     "planner_model": {"complex": "opus", "simple": "sonnet"},
     "planner_effort": {"complex": "high", "simple": "medium"},
     "worker_model": "sonnet",
-    "worker_effort": "high",
+    "worker_effort": {"complex": "high", "simple": "medium"},  # или одна строка на все задачи
     "reviewer_model": "",
     "review_identity": "self",  # self — ревью и мерж от вашего gh; bot — от бота с токеном REVIEW_BOT_TOKEN
     "max_rounds": 5,
@@ -994,17 +1002,18 @@ class Dispatcher:
             if st == "new" and self.deps_ok(t, by_id):
                 cx = t.get("complexity", "simple")
                 ok = self.launch(t, "planner", planner_prompt(self.store, t, self.cfg),
-                                 model=t.get("planner_model") or self.cfg["planner_model"].get(cx),
-                                 effort=self.cfg["planner_effort"].get(cx))
+                                 model=t.get("planner_model") or by_complexity(self.cfg["planner_model"], cx),
+                                 effort=by_complexity(self.cfg["planner_effort"], cx))
                 if ok:
                     self.set_state(t, "planning")
                     active += 1
                 self.store.save_task(t)
             elif st == "plan_review" and t.get("plan_approved"):
                 retry = bool(t.pop("retry_pending", False))
+                cx = t.get("complexity", "simple")
                 ok = self.launch(t, "worker", worker_prompt(self.store, t, self.cfg, retry=retry),
-                                 model=t.get("worker_model") or self.cfg["worker_model"],
-                                 effort=t.get("worker_effort") or self.cfg["worker_effort"])
+                                 model=t.get("worker_model") or by_complexity(self.cfg["worker_model"], cx),
+                                 effort=t.get("worker_effort") or by_complexity(self.cfg["worker_effort"], cx))
                 if ok:
                     self.set_state(t, "in_progress")
                     active += 1
@@ -1019,11 +1028,13 @@ class Dispatcher:
             return
         ready = sorted((t for t in tasks if t.get("state") == "ready"), key=lambda t: t.get("ready_at") or "")
         for t in ready:
+            cx = t.get("complexity", "simple")
             woke = self.wake(t, "worker", review_prompt(t, self.cfg))
             if not woke:
                 woke = self.launch(t, "worker", review_prompt(t, self.cfg) + "\n\nКонтекст задачи: "
                                    + worker_prompt(self.store, t, self.cfg),
-                                   model=self.cfg["worker_model"], effort=self.cfg["worker_effort"])
+                                   model=t.get("worker_model") or by_complexity(self.cfg["worker_model"], cx),
+                                   effort=t.get("worker_effort") or by_complexity(self.cfg["worker_effort"], cx))
             if woke:
                 self.q["review_lock"] = t["id"]
                 self.set_state(t, "in_review")
@@ -1308,6 +1319,9 @@ def normalize_task(raw: dict) -> dict:
     text = str(raw.get("text") or "").strip()
     if not text:
         raise AiflowError(f"{tid}: пустой text")
+    effort = raw.get("worker_effort") or None
+    if effort is not None and effort not in EFFORTS:
+        raise AiflowError(f"{tid}: worker_effort должен быть одним из {', '.join(EFFORTS)}")
     return {
         "id": tid, "title": str(raw.get("title") or tid).strip(), "text": text, "complexity": cx,
         "depends_on": [str(d) for d in raw.get("depends_on") or []],
@@ -1315,6 +1329,7 @@ def normalize_task(raw: dict) -> dict:
         "ui": raw.get("ui") or None,
         "planner_model": raw.get("planner_model") or None,
         "worker_model": raw.get("worker_model") or None,
+        "worker_effort": effort,
         "allowed_protected_paths": [],
         "state": "new", "pr": None, "sessions": {"planner": [], "worker": []},
         "usage": {}, "created_at": iso(), "state_at": iso(),
