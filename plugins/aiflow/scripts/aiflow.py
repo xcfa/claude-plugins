@@ -1912,10 +1912,19 @@ def cmd_approve(args, root: Path) -> int:
     return 0
 
 
+def gh_repo(cwd, env=None) -> str:
+    """owner/name репозитория по версии GitHub. После переименования или переноса remote ещё
+    указывает на старый адрес: gh подставляет его в {owner}/{repo}, а запросы с методом
+    (POST/PATCH) редирект 307 не проходят. gh repo view редирект проходит и даёт новый адрес."""
+    p = run([need("gh"), "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], cwd=cwd, env=env, timeout=60)
+    name = (p.stdout or "").strip()
+    return name if p.returncode == 0 and re.fullmatch(r"[\w.-]+/[\w.-]+", name) else "{owner}/{repo}"
+
+
 def cmd_reply(args, root: Path) -> int:
     body = Path(args.body_file).read_text(encoding="utf-8")
     p = run([need("gh"), "api", "--method", "POST",
-             f"repos/{{owner}}/{{repo}}/pulls/{args.pr}/comments/{args.comment_id}/replies",
+             f"repos/{gh_repo(Path.cwd())}/pulls/{args.pr}/comments/{args.comment_id}/replies",
              "-f", f"body={body}"], cwd=Path.cwd(), timeout=60)
     if p.returncode != 0:
         raise AiflowError("ответ в тред не отправлен: " + (p.stderr or p.stdout).strip()[:300])

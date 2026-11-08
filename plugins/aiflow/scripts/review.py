@@ -84,6 +84,12 @@ class Runner:
             raise RuntimeError(f"{Path(cmd[0]).stem} {' '.join(cmd[1:3])}: {(proc.stderr or proc.stdout).strip()[:500]}")
         return proc
 
+    @property
+    def repo(self) -> str:
+        if not getattr(self, "_repo", None):
+            self._repo = aiflow.gh_repo(self.cwd, self.gh_env)
+        return self._repo
+
     def gh_run(self, *args, check=True, timeout=180):
         return self.run([self.gh, *args], env=self.gh_env, check=check, timeout=timeout)
 
@@ -101,14 +107,14 @@ def find_task(root: Path, pr: int) -> dict | None:
 
 
 def bot_reviews(r: Runner, pr: int, login: str) -> list[dict]:
-    out = r.gh_run("api", f"repos/{{owner}}/{{repo}}/pulls/{pr}/reviews", "--paginate",
+    out = r.gh_run("api", f"repos/{r.repo}/pulls/{pr}/reviews", "--paginate",
                    "--jq", f'.[] | select(.user.login == "{login}") | {{id, state, body, submitted_at}}').stdout
     items = [json.loads(x) for x in out.splitlines() if x.strip()]
     return [i for i in items if REVIEW_MARKER in (i.get("body") or "")]
 
 
 def review_comments(r: Runner, pr: int) -> list[dict]:
-    out = r.gh_run("api", f"repos/{{owner}}/{{repo}}/pulls/{pr}/comments", "--paginate",
+    out = r.gh_run("api", f"repos/{r.repo}/pulls/{pr}/comments", "--paginate",
                    "--jq", ".[] | {id, in_reply_to_id, path, line, body, created_at, user: .user.login}").stdout
     return [json.loads(x) for x in out.splitlines() if x.strip()]
 
@@ -322,11 +328,11 @@ def publish(r: Runner, pr: int, head_sha: str, verdict: str, rnd: int, max_round
     }
     p = tmp / "review.json"
     p.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-    res = json.loads(r.gh_run("api", "--method", "POST", f"repos/{{owner}}/{{repo}}/pulls/{pr}/reviews",
+    res = json.loads(r.gh_run("api", "--method", "POST", f"repos/{r.repo}/pulls/{pr}/reviews",
                               "--input", str(p)).stdout or "{}")
     ids = []
     if inline and res.get("id"):
-        posted = json.loads(r.gh_run("api", f"repos/{{owner}}/{{repo}}/pulls/{pr}/reviews/{res['id']}/comments").stdout or "[]")
+        posted = json.loads(r.gh_run("api", f"repos/{r.repo}/pulls/{pr}/reviews/{res['id']}/comments").stdout or "[]")
         for c, pc in zip(inline, sorted(posted, key=lambda x: x.get("id", 0))):
             ids.append({**c, "comment_id": pc.get("id")})
     return ids + [{**c, "comment_id": None} for c in off]
