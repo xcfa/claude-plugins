@@ -41,7 +41,7 @@ color: green
 | status | что делать |
 | --- | --- |
 | `ci_failed` | Разбери `failed` и `logs`, исправь, тесты, запушь, снова `aiflow review`. Раунд не расходуется |
-| `changes_requested` | Исправь все `blocking`, `minor` — на своё усмотрение. Тесты, коммит, пуш. Ответь на каждое замечание: для замечаний с `comment_id` — `aiflow reply --pr <номер> --comment-id <id> --body-file <файл>`; остальные — одним комментарием `gh pr comment <номер> --body-file <файл>`, первая строка `<!-- ai-review-reply -->`. Формат: «исправлено: как» или «не согласен: почему». Снова `aiflow review` |
+| `changes_requested` | Исправь все замечания — и `blocking`, и `nit`, а также треды из `open_threads` (ревьюер не принял прошлый ответ: см. `reason`). Не согласен — не исправляй, а объясни почему. Тесты, коммит, пуш. Ответь на каждое замечание: для замечаний с `comment_id` — `aiflow reply --pr <номер> --comment-id <id> --body-file <файл>`; остальные — одним комментарием `gh pr comment <номер> --body-file <файл>`, первая строка `<!-- ai-review-reply -->`. Формат: «исправлено: как» или «не согласен: почему». Снова `aiflow review`: ревьюер ответит в каждом треде «Accepted» (и закроет его) или «Not accepted» |
 | `merge_conflict` | `git fetch origin`, `git rebase origin/<базовая ветка>`, разреши, тесты, `git push --force-with-lease`, снова `aiflow review` |
 | `human_input` | Учти комментарии человека, ответь комментарием с первой строкой `<!-- ai-review-reply -->`, снова `aiflow review` |
 | `approved` | Готово. Закончи ход одной строкой |

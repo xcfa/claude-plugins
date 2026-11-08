@@ -119,6 +119,95 @@ def review_comments(r: Runner, pr: int) -> list[dict]:
     return [json.loads(x) for x in out.splitlines() if x.strip()]
 
 
+THREADS_QUERY = """
+query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes { id isResolved comments(first: 1) { nodes { databaseId author { login } } } }
+      }
+    }
+  }
+}"""
+RESOLVE_MUTATION = "mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { id } } }"
+SEVERITY_TAG = re.compile(r"\*\*(blocking|nit|блокирующее|необязательное)\*\*")
+
+
+def review_threads(r: Runner, pr: int) -> dict[int, dict]:
+    """{id первого комментария треда: {"thread": node id, "resolved": bool}}."""
+    owner, _, name = r.repo.partition("/")
+    out: dict[int, dict] = {}
+    after = None
+    for _ in range(20):
+        args = ["api", "graphql", "-f", f"query={THREADS_QUERY}", "-F", f"owner={owner}", "-F", f"name={name}",
+                "-F", f"number={pr}"]
+        if after:
+            args += ["-F", f"after={after}"]
+        data = json.loads(r.gh_run(*args).stdout or "{}")
+        rt = (((data.get("data") or {}).get("repository") or {}).get("pullRequest") or {}).get("reviewThreads") or {}
+        for n in rt.get("nodes") or []:
+            first = ((n.get("comments") or {}).get("nodes") or [{}])[0]
+            if first.get("databaseId"):
+                out[int(first["databaseId"])] = {"thread": n["id"], "resolved": bool(n.get("isResolved"))}
+        info = rt.get("pageInfo") or {}
+        if not info.get("hasNextPage"):
+            break
+        after = info.get("endCursor")
+    return out
+
+
+def open_threads(threads: list[dict], states: dict[int, dict], login: str) -> list[dict]:
+    """Нерешённые треды замечаний ревьюера из прошлых раундов вместе с ответами в них."""
+    res = []
+    for c in threads:
+        if c.get("in_reply_to_id") or c.get("user") != login or not SEVERITY_TAG.match(c.get("body") or ""):
+            continue
+        st = states.get(int(c["id"]))
+        if not st or st["resolved"]:
+            continue
+        replies = [x for x in threads if x.get("in_reply_to_id") == c["id"]]
+        res.append({"comment_id": c["id"], "thread": st["thread"], "path": c.get("path"), "line": c.get("line"),
+                    "body": strip_markers(c.get("body") or ""),
+                    "replies": [f"{x.get('user')}: {strip_markers(x.get('body') or '')}" for x in replies]})
+    return res
+
+
+def format_open_threads(items: list[dict]) -> str:
+    if not items:
+        return ""
+    parts = ["# Открытые треды прошлых раундов", "",
+             "Для каждого треда верни вердикт в поле threads (comment_id — число в квадратных скобках).", ""]
+    for t in items:
+        parts.append(f"[{t['comment_id']}] `{t['path']}:{t['line']}` {t['body']}")
+        parts += [f"  ↳ {x}" for x in t["replies"]] or ["  ↳ (ответа исполнителя нет)"]
+        parts.append("")
+    return "\n".join(parts)
+
+
+def answer_threads(r: Runner, pr: int, items: list[dict], verdicts: list[dict], tmp: Path) -> list[dict]:
+    """Ответить в каждом открытом треде: «Accepted: …» и закрыть тред либо «Not accepted: …»
+    и оставить открытым. Возвращает треды, которые остаются открытыми: они блокируют одобрение."""
+    by_id = {v["comment_id"]: v for v in verdicts}
+    still_open = []
+    for t in items:
+        v = by_id.get(int(t["comment_id"]))
+        if v is None:
+            still_open.append({**t, "reason": "ревьюер не дал вердикт по треду"})
+            continue
+        accepted = v["accepted"]
+        text = v["text"] or ("исправлено" if accepted else "замечание остаётся в силе")
+        p = tmp / f"reply-{t['comment_id']}.md"
+        p.write_text(("Accepted: " if accepted else "Not accepted: ") + text, encoding="utf-8")
+        r.gh_run("api", "--method", "POST", f"repos/{r.repo}/pulls/{pr}/comments/{t['comment_id']}/replies",
+                 "-F", f"body=@{p}", check=False)
+        if accepted:
+            r.gh_run("api", "graphql", "-f", f"query={RESOLVE_MUTATION}", "-F", f"id={t['thread']}", check=False)
+        else:
+            still_open.append({**t, "reason": text})
+    return still_open
+
+
 def strip_markers(text: str) -> str:
     for m in (REVIEW_MARKER, REPLY_MARKER, HUMAN_MARKER):
         text = text.replace(m, "")
@@ -204,16 +293,14 @@ REVIEWER_PERMISSION = {
 
 
 def reviewer_prompt(root: Path) -> str:
-    """Инструкции ревьюера: своя версия проекта (.opencode/aiflow-reviewer.md или старая
-    .opencode/agent/reviewer.md от aiflow init), иначе шаблон плагина. Frontmatter отбрасывается."""
-    old = root / ".opencode" / "agent" / "reviewer.md"
-    for p in (root / ".opencode" / "aiflow-reviewer.md", old, aiflow.TEMPLATES / "reviewer.md"):
+    """Инструкции ревьюера: своя версия проекта (.opencode/aiflow-reviewer.md), иначе шаблон
+    плагина. Старая копия .opencode/agent/reviewer.md от aiflow init не используется: в ней
+    устаревший формат ответа. Frontmatter отбрасывается."""
+    for p in (root / ".opencode" / "aiflow-reviewer.md", aiflow.TEMPLATES / "reviewer.md"):
         try:
             text = p.read_text(encoding="utf-8")
         except OSError:
             continue
-        if p == old and "aiflow" not in text.split("---", 2)[1 if text.startswith("---") else 0][:400]:
-            continue  # это собственный reviewer проекта, а не версия шаблона aiflow
         if text.startswith("---"):
             text = text.split("---", 2)[2] if text.count("---") >= 2 else text
         return text.strip() + "\n"
@@ -268,13 +355,28 @@ def call_reviewer(r: Runner, pr: int, rnd: int, max_rounds: int, model: str, ctx
                        + (f"\nstderr opencode: {err[-800:]}" if err else ""))
 
 
+SEVERITY = {"blocking": "blocking", "nit": "nit", "minor": "nit"}
+
+
+def thread_verdicts(data: dict) -> list[dict]:
+    out = []
+    for v in data.get("threads") or []:
+        if not isinstance(v, dict):
+            continue
+        try:
+            cid = int(v.get("comment_id"))
+        except (TypeError, ValueError):
+            continue
+        out.append({"comment_id": cid, "accepted": v.get("accepted") is True, "text": str(v.get("text") or "").strip()})
+    return out
+
+
 def normalize(data: dict, truncated: bool) -> tuple[str, list[dict], str]:
     comments = []
     for c in data.get("comments") or []:
         if not isinstance(c, dict):
             continue
-        sev = c.get("severity")
-        sev = sev if sev in ("blocking", "minor") else "blocking"  # fail-closed
+        sev = SEVERITY.get(str(c.get("severity") or "").lower(), "blocking")  # fail-closed
         try:
             line = int(c["line"]) if c.get("line") is not None else None
         except (TypeError, ValueError):
@@ -286,18 +388,19 @@ def normalize(data: dict, truncated: bool) -> tuple[str, list[dict], str]:
         comments.append({"severity": "blocking", "file": "", "line": None,
                          "text": "Дифф был обрезан, а ревьюер не подтвердил, что прочитал остаток. "
                                  "Разбейте изменения или повторите раунд."})
-    verdict = "changes" if any(c["severity"] == "blocking" for c in comments) else "approve"
+    # nit тоже исправляется: одобрение — только когда замечаний нет совсем
+    verdict = "changes" if comments else "approve"
     return verdict, comments, str(data.get("summary", "")).strip()
 
 
 def format_body(rnd: int, max_rounds: int, verdict: str, summary: str, off_diff: list[dict], inline_count: int) -> str:
-    head = "✅ блокирующих замечаний нет" if verdict == "approve" else "❌ требуются исправления"
+    head = "✅ замечаний нет" if verdict == "approve" else "❌ требуются исправления"
     parts = [REVIEW_MARKER, f"**AI-ревью, раунд {rnd}/{max_rounds}**: {head}", ""]
     if summary:
         parts += [summary, ""]
     if inline_count:
         parts += [f"Замечаний в строках диффа: {inline_count}.", ""]
-    for title, sev in (("Блокирующие", "blocking"), ("Необязательные", "minor")):
+    for title, sev in (("Blocking", "blocking"), ("Nit", "nit")):
         group = [c for c in off_diff if c["severity"] == sev]
         if group:
             parts.append(f"### {title} (вне диффа)")
@@ -330,7 +433,7 @@ def publish(r: Runner, pr: int, head_sha: str, verdict: str, rnd: int, max_round
         "event": review_event(identity, verdict),
         "body": format_body(rnd, max_rounds, verdict, summary, off, len(inline)),
         "comments": [{"path": c["file"], "line": c["line"], "side": "RIGHT",
-                      "body": f"**{'блокирующее' if c['severity'] == 'blocking' else 'необязательное'}**: {c['text']}"}
+                      "body": f"**{c['severity']}**: {c['text']}"}
                      for c in inline],
     }
     p = tmp / "review.json"
@@ -477,15 +580,25 @@ def main(argv: list[str] | None = None) -> int:
                              identity)
             finish("changes_requested", round=rnd, max_rounds=max_rounds, summary="защищённые пути", comments=posted)
 
-        history = build_history(reviews, review_comments(r, args.pr), comments)
+        thread_comments = review_comments(r, args.pr)
+        history = build_history(reviews, thread_comments, comments)
+        pending = open_threads(thread_comments, review_threads(r, args.pr), login) if reviews else []
         ctx, truncated = build_context(pr.get("body") or "", pr, history, diff, int(cfg["max_diff_chars"]))
+        ctx += "\n" + format_open_threads(pending)
         ctx_path = tmp / "review-context.md"
         ctx_path.write_text(ctx, encoding="utf-8")
 
-        verdict, cs, summary = normalize(
-            call_reviewer(r, args.pr, rnd, max_rounds, cfg.get("reviewer_model") or "", ctx_path), truncated)
+        data = call_reviewer(r, args.pr, rnd, max_rounds, cfg.get("reviewer_model") or "", ctx_path)
+        verdict, cs, summary = normalize(data, truncated)
+        still_open = answer_threads(r, args.pr, pending, thread_verdicts(data), tmp) if pending else []
+        if still_open:
+            verdict = "changes"
+        elif verdict == "changes" and rnd >= max_rounds and not any(c["severity"] == "blocking" for c in cs):
+            verdict = "approve"  # последний раунд: оставшиеся nit не повод для needs-human, они видны в PR
         posted = publish(r, args.pr, head, verdict, rnd, max_rounds, summary, cs, lines, tmp, identity)
-        result = {"round": rnd, "max_rounds": max_rounds, "summary": summary, "comments": posted}
+        result = {"round": rnd, "max_rounds": max_rounds, "summary": summary, "comments": posted,
+                  "open_threads": [{"comment_id": t["comment_id"], "file": t["path"], "line": t["line"],
+                                    "reason": t["reason"]} for t in still_open]}
         if verdict != "approve":
             finish("changes_requested", **result)
 
