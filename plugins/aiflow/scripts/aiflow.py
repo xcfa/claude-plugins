@@ -79,7 +79,8 @@ DEFAULT_CONFIG = {
     "reviewer_model": "",
     "review_identity": "self",  # self — ревью и мерж от вашего gh; bot — от бота с токеном REVIEW_BOT_TOKEN
     "max_rounds": 5,
-    "notify": "important",  # что монитор пишет оркестратору: important — только то, что ждёт вас; all — всё; none — ничего
+    "notify": "important",
+    "desktop_notify": True,  # системные уведомления о том, что ждёт вас (те же события, что notify: important)  # что монитор пишет оркестратору: important — только то, что ждёт вас; all — всё; none — ничего
     "auto_resume": 1,  # сколько раз подряд монитор сам возобновляет остановленную/пропавшую сессию; 0 — никогда
     "max_diff_chars": 150000,
     "ci_timeout_minutes": 45,
@@ -1735,11 +1736,132 @@ def cmd_tick(args, root: Path) -> int:
     return 0
 
 
+def _toast(title: str, text: str) -> None:
+    """Системное уведомление; молча ничего не делает, если показать нечем."""
+    env = dict(os.environ, AIFLOW_TOAST_TITLE=title, AIFLOW_TOAST_TEXT=text)
+    flags = 0
+    if os.name == "nt":
+        exe = shutil.which("powershell.exe") or shutil.which("powershell")  # WinRT есть только в Windows PowerShell 5.1
+        if not exe:
+            return
+        script = (
+            "$ErrorActionPreference='Stop';"
+            "[void][Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime];"
+            "$x=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent("
+            "[Windows.UI.Notifications.ToastTemplateType]::ToastText02);"
+            "$t=$x.GetElementsByTagName('text');"
+            "[void]$t.Item(0).AppendChild($x.CreateTextNode($env:AIFLOW_TOAST_TITLE));"
+            "[void]$t.Item(1).AppendChild($x.CreateTextNode($env:AIFLOW_TOAST_TEXT));"
+            "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("
+            "'{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe')"
+            ".Show([Windows.UI.Notifications.ToastNotification]::new($x))"
+        )
+        cmd = [exe, "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script]
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    elif sys.platform == "darwin":
+        cmd = ["osascript", "-e", 'display notification (system attribute "AIFLOW_TOAST_TEXT") '
+                                  'with title (system attribute "AIFLOW_TOAST_TITLE")']
+    else:
+        exe = shutil.which("notify-send")
+        if not exe:
+            return
+        cmd = [exe, title, text]
+    try:
+        subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, creationflags=flags)
+    except OSError:
+        pass
+
+
+def desktop_notify(cfg: dict, events: list[dict]) -> None:
+    """Системные уведомления о событиях, которые ждут пользователя (desktop_notify в конфиге)."""
+    if not cfg.get("desktop_notify", True):
+        return
+    important = [ev for ev in events if ev.get("kind") in NOTIFY_KINDS]
+    if len(important) > 3:
+        _toast("aiflow", f"{len(important)} событий, подробности в панели")
+        return
+    for ev in important:
+        _toast("aiflow", ev.get("text", ""))
+
+
+def _spawn_monitor(store: Store, owner: int, via_helper: bool = True) -> None:
+    """Запустить монитор отдельным фоновым процессом, не связанным с процессом-родителем.
+
+    Через промежуточный процесс, который сразу выходит: у монитора не остаётся живого
+    родителя, и завершение дерева процессов (`taskkill /T`) его не заденет."""
+    cmd = [sys.executable, "-X", "utf8", str(Path(__file__).resolve()), "run"]
+    if owner:
+        cmd += ["--owner", str(owner)]
+    if via_helper:
+        cmd.append("--spawn")
+    log = (store.runs / "monitor.log").open("ab")
+    kw: dict = {"cwd": store.root, "stdin": subprocess.DEVNULL, "stdout": log, "stderr": log, "close_fds": True}
+    if os.name == "nt":
+        base = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        try:  # выйти из job-объекта родителя, если он это позволяет
+            subprocess.Popen(cmd, creationflags=base | subprocess.CREATE_BREAKAWAY_FROM_JOB, **kw)
+        except OSError:
+            subprocess.Popen(cmd, creationflags=base, **kw)
+        return
+    subprocess.Popen(cmd, start_new_session=True, **kw)
+
+
+def run_detached(store: Store) -> int:
+    """`aiflow run --events --detach`: монитор живёт отдельным процессом (его не остановит
+    лимит инструмента Monitor), а этот процесс только пересказывает события в stdout."""
+    lock = FileLock(store.runs / "monitor.lock")
+    events = store.runs / "events.jsonl"
+    pos = events.stat().st_size if events.is_file() else 0
+    owner = int(os.environ.get("CLAUDE_PID") or 0)
+    if not lock.owner():
+        _spawn_monitor(store, owner)
+        for _ in range(100):
+            if lock.owner():
+                break
+            time.sleep(0.2)
+        else:
+            print("[aiflow] монитор не запустился, см. runs/monitor.log", flush=True)
+            return 1
+    cfg = store.config()
+    if notify_level(cfg) != "none":
+        url = f"http://127.0.0.1:{cfg['ui_port']}/" if cfg.get("ui_port") else ""
+        print(f"[aiflow] монитор запущен{'; панель: ' + url if url else ''}", flush=True)
+    while True:
+        time.sleep(2)
+        if not lock.owner():
+            if notify_level(store.config()) != "none":
+                print("[aiflow] монитор остановился", flush=True)
+            return 0
+        if owner and not pid_alive(owner):
+            return 0
+        if not events.is_file() or events.stat().st_size <= pos:
+            continue
+        with events.open("rb") as f:
+            f.seek(pos)
+            chunk = f.read()
+        end = chunk.rfind(b"\n") + 1
+        pos += end
+        cfg = store.config()
+        for line in chunk[:end].decode("utf-8", "replace").splitlines():
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if should_notify(cfg, ev.get("kind", "")):
+                print(f"[aiflow] {ev.get('text', '')}", flush=True)
+
+
 def cmd_run(args, root: Path) -> int:
     store = Store(root)
     if not store.initialized:
         print("[aiflow] репозиторий не инициализирован: выполните aiflow init", flush=True)
         return 1
+    if args.spawn:
+        _spawn_monitor(store, args.owner, via_helper=False)
+        return 0
+    if args.detach:
+        return run_detached(store)
     mon = FileLock(store.runs / "monitor.lock", stale_minutes=0)
     if not mon.acquire():
         return 0  # уже работает другой монитор — молча выходим
@@ -1747,7 +1869,7 @@ def cmd_run(args, root: Path) -> int:
     srv = None
     # На Windows дочерние процессы переживают родителя: монитор сессии сам выходит,
     # когда завершается процесс Claude, который его запустил.
-    owner = int(os.environ.get("CLAUDE_PID") or 0) if args.events else 0
+    owner = args.owner or (int(os.environ.get("CLAUDE_PID") or 0) if args.events else 0)
     import signal
 
     def _stop(*_):
@@ -1769,8 +1891,9 @@ def cmd_run(args, root: Path) -> int:
         while True:
             try:
                 events = run_tick_now(store)
+                cfg = store.config()
+                desktop_notify(cfg, events)
                 if args.events:
-                    cfg = store.config()
                     for ev in events:
                         if should_notify(cfg, ev.get("kind", "")):
                             print(f"[aiflow] {ev['text']}", flush=True)
@@ -1952,6 +2075,9 @@ def main(argv: list[str] | None = None) -> int:
     rn = sub.add_parser("run", help="цикл (запускается монитором плагина)")
     rn.add_argument("--events", action="store_true")
     rn.add_argument("--no-ui", action="store_true")
+    rn.add_argument("--detach", action="store_true", help="монитор отдельным процессом, здесь только события")
+    rn.add_argument("--spawn", action="store_true", help=argparse.SUPPRESS)
+    rn.add_argument("--owner", type=int, default=0, help="pid процесса, с завершением которого монитор выходит")
     p = sub.add_parser("pause")
     p.add_argument("reason", nargs="?")
     sub.add_parser("resume")
