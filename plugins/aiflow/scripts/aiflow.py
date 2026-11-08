@@ -997,9 +997,13 @@ class Dispatcher:
                 t["pr"] = int(rep["pr"])
                 t["plan_seen_at"] = iso()
                 self.set_state(t, "plan_review")
-                if t.get("auto_approve_plan") and t.get("complexity") == "simple" and self.try_auto_approve(t):
-                    return
-                self.emit(t, "plan_ready", f"{t['id']}: план готов к обсуждению — PR #{t['pr']}",
+                why = ""
+                if t.get("auto_approve_plan") and t.get("complexity") == "simple":
+                    t["plan_checklist_sig"] = self.checklist_sig(t)
+                    if self.try_auto_approve(t):
+                        return
+                    why = "; автоодобрение не прошло — " + "; ".join(t.get("plan_checklist_missing") or [])
+                self.emit(t, "plan_ready", f"{t['id']}: план готов к обсуждению — PR #{t['pr']}{why}",
                           key=f"plan:{rep['rid']}")
                 return
             if rep.get("status") in ("error", "blocked"):
@@ -1019,6 +1023,11 @@ class Dispatcher:
         elif e and st is None and age_minutes(e.get("resumed_at") or e.get("started_at")) > 10:
             self.lost(t, "planner", "planning", "сессия пропала", "сессия планировщика пропала из claude agents")
 
+    @staticmethod
+    def checklist_sig(t: dict) -> str:
+        """Что влияет на чек-лист автоодобрения: последний отчёт планировщика и разрешённые пути."""
+        return json.dumps([t.get("report_seen"), sorted(t.get("allowed_protected_paths") or [])])
+
     def try_auto_approve(self, t: dict) -> bool:
         body = (self.gh.pr(t["pr"], "body").get("body") or "")
         ok, missing = plan_checklist(body, self.cfg, t)
@@ -1026,6 +1035,7 @@ class Dispatcher:
             self.gh.add_label(t["pr"], self.cfg["labels"]["approved"])
             t["plan_approved"] = True
             t["plan_auto_approved"] = True
+            t.pop("plan_checklist_missing", None)
             self.store.log(t["id"], {"auto_approved": True})
             return True
         t["plan_checklist_missing"] = missing
@@ -1054,8 +1064,13 @@ class Dispatcher:
             if self.wake(t, "planner", revise_prompt(t, fresh)):
                 t["plan_seen_at"] = max(c["createdAt"] for c in fresh)
                 t["revising"] = True
-        if t.get("auto_approve_plan") and t.get("complexity") == "simple" and not t.get("plan_checklist_missing"):
-            self.try_auto_approve(t)
+        # Перепроверить, когда план обновили или человек разрешил пути; не дёргать gh каждый тик.
+        if (t.get("auto_approve_plan") and t.get("complexity") == "simple" and not t.get("revising")
+                and t.get("plan_checklist_sig") != self.checklist_sig(t)):
+            t["plan_checklist_sig"] = self.checklist_sig(t)
+            if self.try_auto_approve(t):
+                self.emit(t, "plan_approved", f"{t['id']}: план одобрен автоматически — PR #{t['pr']}",
+                          key=f"autoapprove:{t['plan_checklist_sig']}")
 
     def adv_in_progress(self, t: dict) -> None:
         rep = self.new_report(t, "worker")
