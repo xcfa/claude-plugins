@@ -499,6 +499,9 @@ class Claude:
         p = run([self.bin, "logs", sid], cwd=self.root, timeout=30, env=self.env)
         return (p.stdout or "")[-6000:]
 
+    def stop(self, sid: str) -> bool:
+        return run([self.bin, "stop", sid], cwd=self.root, timeout=60, env=self.env).returncode == 0
+
     def rm(self, sid: str) -> bool:
         return run([self.bin, "rm", sid], cwd=self.root, timeout=60, env=self.env).returncode == 0
 
@@ -1641,38 +1644,77 @@ def cmd_retry(args, root: Path) -> int:
     return 0
 
 
-def cmd_cancel(args, root: Path) -> int:
-    """Снять задачи, которые ещё не начались (state new). Начатые снимаются закрытием PR."""
-    store = Store(root)
+def cancel_tasks(store: Store, ids: list[str], *, close_pr: bool = True, note: str = "aiflow cancel") -> list[str]:
+    """Снять задачи на любой стадии: остановить их сессии, закрыть PR (ветка остаётся),
+    освободить очередь ревью. Возвращает предупреждения (что не удалось сделать)."""
     if not store.initialized:
         raise AiflowError("репозиторий не инициализирован: aiflow init")
-    ids = list(dict.fromkeys(args.ids))
+    ids = list(dict.fromkeys(ids))
+    if not ids:
+        raise AiflowError("не указаны задачи")
     lock = FileLock(store.runs / "tick.lock", stale_minutes=15)
     if not lock.acquire(wait_seconds=120):
         raise AiflowError("очередь занята дольше 2 минут, повторите позже")
+    warnings: list[str] = []
     try:
         tasks = {t["id"]: t for t in store.tasks()}
         for tid in ids:
             t = tasks.get(tid)
             if not t:
                 raise AiflowError(f"нет задачи {tid}")
-            if t.get("state") != "new" or t.get("launching") or t.get("pr"):
-                raise AiflowError(f"{tid} уже в работе ({t.get('state')}): закройте её PR, aiflow снимет задачу сам")
+            if t.get("state") in TERMINAL:
+                raise AiflowError(f"{tid} уже {'смержена' if t['state'] == 'merged' else 'снята'}")
+            if t.get("launching"):
+                raise AiflowError(f"{tid}: сессия как раз запускается, повторите через минуту")
         for t in tasks.values():
             if t["id"] in ids or t.get("state") in TERMINAL:
                 continue
             blocked = [d for d in t.get("depends_on") or [] if d in ids]
             if blocked:
                 raise AiflowError(f"от {', '.join(blocked)} зависит {t['id']}: снимите её тоже или поставьте заново без зависимости")
+        live: dict = {}
+        if any(e.get("id") for tid in ids for lst in (tasks[tid].get("sessions") or {}).values() for e in lst):
+            claude = Claude(store.root)
+            live = claude.agents()
         for tid in ids:
             t = tasks[tid]
-            t.setdefault("history", []).append({"at": iso(), "from": t["state"], "to": "cancelled", "note": "aiflow cancel"})
+            for lst in (t.get("sessions") or {}).values():
+                for e in lst:
+                    s = live.get(e.get("id")) or {}
+                    if s.get("state") in ("working", "blocked"):
+                        if not claude.stop(e["id"]):
+                            warnings.append(f"{tid}: не удалось остановить сессию {e['id']}")
+            if close_pr and t.get("pr"):
+                gh = GH(store.root)
+                try:
+                    state = gh.pr(t["pr"], "state").get("state")
+                except AiflowError as ex:
+                    state = None
+                    warnings.append(f"{tid}: не удалось прочитать PR #{t['pr']}: {ex}")
+                if state == "OPEN":
+                    p = gh.call("pr", "close", str(t["pr"]), "--comment", "Задача снята в aiflow. Ветка оставлена.")
+                    if p.returncode != 0:
+                        warnings.append(f"{tid}: PR #{t['pr']} не закрыт: {(p.stderr or p.stdout).strip()[:200]}")
+            prev = t.get("state")
+            t.setdefault("history", []).append({"at": iso(), "from": prev, "to": "cancelled", "note": note})
             t["state"], t["state_at"], t["cleaned"] = "cancelled", iso(), True
+            t.pop("retry_requested", None)
             store.save_task(t)
-            store.event("cancelled", tid, f"{tid}: снята")
+            store.event("cancelled", tid, f"{tid}: снята" + (f" (была в стадии «{STAGE_LABEL.get(prev, prev)}»)" if prev != "new" else ""))
+        q = store.queue()
+        if q.get("review_lock") in ids:
+            q["review_lock"] = None
+            store.save_queue(q)
     finally:
         lock.release()
-    print("Сняты: " + ", ".join(ids))
+    return warnings
+
+
+def cmd_cancel(args, root: Path) -> int:
+    warnings = cancel_tasks(Store(root), args.ids, close_pr=not args.keep_pr)
+    for w in warnings:
+        print("Внимание: " + w)
+    print("Сняты: " + ", ".join(dict.fromkeys(args.ids)))
     return 0
 
 
@@ -2104,8 +2146,9 @@ def main(argv: list[str] | None = None) -> int:
     al = sub.add_parser("allow-path", help="разрешить задаче менять защищённые пути (только человек)")
     al.add_argument("id")
     al.add_argument("paths", nargs="+", help="glob относительно корня, например 'src/*/Migrations/**'")
-    cn = sub.add_parser("cancel", help="снять задачи, которые ещё не начались")
+    cn = sub.add_parser("cancel", help="снять задачи: остановить их сессии и закрыть PR")
     cn.add_argument("ids", nargs="+")
+    cn.add_argument("--keep-pr", action="store_true", help="не закрывать PR")
     apv = sub.add_parser("approve", help="одобрить план (метка plan-approved)")
     apv.add_argument("id")
     rp = sub.add_parser("reply", help="ответить в тред ревью")

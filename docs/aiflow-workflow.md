@@ -67,6 +67,7 @@ stateDiagram-v2
     needs_human --> in_progress: человек ответил сессии, она продолжила
     needs_human --> plan_review: retry, новая сессия
     new --> cancelled: aiflow cancel
+    in_progress --> cancelled: aiflow cancel / «Снять» (сессии стоп, PR закрыт)
     plan_review --> cancelled: PR закрыт
     merged --> [*]
 ```
@@ -211,7 +212,7 @@ stateDiagram-v2
 | `aiflow approve <id>` | Одобрить план |
 | `aiflow retry <id>` | Повторить задачу в `needs_human` |
 | `aiflow allow-path <id> <glob>…` | Разрешить задаче защищённые пути (только человек; задача в «нужен человек» продолжит работу) |
-| `aiflow cancel <id>…` | Снять ещё не начатые задачи (начатые — закрытием PR) |
+| `aiflow cancel <id>… [--keep-pr]` | Снять задачи на любой стадии: остановить их сессии, закрыть PR (ветка остаётся); в панели — кнопка «Снять» |
 | `aiflow pause [причина]` / `resume` | Пауза очереди: новые сессии не стартуют, работающие доделывают ход |
 | `aiflow stop` | Остановить монитор и панель; продолжить — `/aiflow:resume` |
 | `aiflow ui [--open] [--detach] [--stop]` | Панель |

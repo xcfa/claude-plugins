@@ -30,6 +30,9 @@ button {
 button:hover { border-color: var(--muted); }
 button:focus-visible, a:focus-visible { outline: 2px solid var(--move); outline-offset: 2px; }
 button.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+button.danger { color: var(--fail); }
+button.danger:hover { border-color: var(--fail); }
+button.link { background: none; border: 0; padding: 0; font-size: 12.5px; margin-top: 2px; text-decoration: underline; text-underline-offset: 3px; }
 .num { font-variant-numeric: tabular-nums; }
 
 header { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; flex-wrap: wrap; margin-bottom: 28px; }
@@ -229,13 +232,23 @@ Glob относительно корня репозитория, через за
   await act("allow_paths", id, value);
 }
 
+async function cancelTask(id) {
+  const t = last && last.tasks.find(x => x.id === id);
+  const parts = [`Снять задачу ${id}?`];
+  if (t && t.session && t.session.id) parts.push("Её сессии будут остановлены.");
+  if (t && t.pr) parts.push(`PR #${t.pr} будет закрыт, ветка останется.`);
+  parts.push("Вернуть задачу можно только поставив её заново.");
+  if (confirm(parts.join("\n"))) await act("cancel", id);
+}
+
 async function act(action, id, value) {
   try {
     const r = await fetch("/api/action", { method: "POST", headers: { "Content-Type": "application/json", "X-Aiflow-Token": TOKEN }, body: JSON.stringify({ action, id, value }) });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || r.statusText);
     if (action === "open_session") return toast(`Сессия открыта в новом окне (${d.where})`);
-    toast({ allow_paths: "Пути разрешены, задача продолжит работу", approve: "План одобрен", retry: "Повтор поставлен", pause: "Очередь на паузе", resume: "Очередь продолжает" }[action] || "Готово");
+    if (action === "cancel" && d.warnings && d.warnings.length) { toast("Снята, но: " + d.warnings.join("; ")); setTimeout(load, 600); return; }
+    toast({ allow_paths: "Пути разрешены, задача продолжит работу", cancel: "Задача снята", approve: "План одобрен", retry: "Повтор поставлен", pause: "Очередь на паузе", resume: "Очередь продолжает" }[action] || "Готово");
     setTimeout(load, 600);
   } catch (e) {
     const t = action === "open_session" && last && last.tasks.find(x => x.id === id);
@@ -312,6 +325,7 @@ function render(s) {
     if (t.state === "needs_human" && /защищ|protected/i.test(t.needs || "")) acts.push(`<button data-allow="${esc(t.id)}">Разрешить пути…</button>`);
     if (t.pr_url) acts.push(`<a href="${esc(t.pr_url)}" target="_blank" rel="noopener">PR #${t.pr}</a>`);
     if (t.session && t.session.id) acts.push(`<button data-act="open_session" data-id="${esc(t.id)}">Открыть сессию</button>`);
+    acts.push(`<button class="danger" data-cancel="${esc(t.id)}">Снять</button>`);
     return `<div class="wait-item ${t.state === "needs_human" ? "fail" : ""}">
       <div><div class="what">${esc(t.id)} <span class="why">— ${esc(t.title)}</span></div><div class="why">${esc(t.needs)}</div></div>
       <div class="acts">${acts.join("")}</div></div>`;
@@ -348,7 +362,9 @@ function render(s) {
     });
     const pr = t.pr ? (t.pr_url ? `<a href="${esc(t.pr_url)}" target="_blank" rel="noopener">#${t.pr}</a>` : "#" + t.pr) : "—";
     const rounds = t.rounds ? `раунд ${t.rounds}/${t.max_rounds}` : (t.review_lock ? "на ревью" : "");
-    html += `<div class="meta"><div class="num">${pr}${rounds ? ", " + rounds : ""}</div><div class="line2 num">${t.tokens ? tokens(t.tokens) + " токенов" : "—"}</div></div>`;
+    const cancel = t.state === "merged" || t.state === "cancelled" ? ""
+      : `<button class="link danger" data-cancel="${esc(t.id)}" title="Остановить сессии задачи и закрыть её PR">Снять</button>`;
+    html += `<div class="meta"><div class="num">${pr}${rounds ? ", " + rounds : ""}</div><div class="line2 num">${t.tokens ? tokens(t.tokens) + " токенов" : "—"}</div>${cancel}</div>`;
   }
   g.innerHTML = html;
   renderUsage(s.tasks);
@@ -360,6 +376,8 @@ function render(s) {
 
 document.addEventListener("click", (e) => {
   if (e.target.closest("[data-toggle-cancelled]")) { showCancelled = !showCancelled; return last && render(last); }
+  const cn = e.target.closest("[data-cancel]");
+  if (cn) return cancelTask(cn.dataset.cancel);
   const al = e.target.closest("[data-allow]");
   if (al) return allowPaths(al.dataset.allow);
   const b = e.target.closest("[data-act],[data-copy]");
