@@ -562,8 +562,8 @@ TOKEN_KINDS = ("input", "output", "cache_read", "cache_write")
 _usage_cache: dict[str, tuple[float, dict]] = {}
 
 
-def _file_usage(path: str) -> dict[str, dict]:
-    """{модель: {input, output, cache_read, cache_write}} одного транскрипта (с кэшем по mtime)."""
+def _file_msgs(path: str) -> dict[str, tuple[str, dict]]:
+    """{id сообщения: (модель, usage)} одного транскрипта (с кэшем по mtime)."""
     mtime = os.path.getmtime(path)
     cached = _usage_cache.get(path)
     if cached and cached[0] == mtime:
@@ -581,16 +581,9 @@ def _file_usage(path: str) -> dict[str, dict]:
             model = msg.get("model") or "?"
             if model == "<synthetic>":
                 continue
-            per_msg[msg.get("id") or f"line{i}"] = (model, msg["usage"])
-    out: dict[str, dict] = {}
-    for model, u in per_msg.values():
-        m = out.setdefault(model, dict.fromkeys(TOKEN_KINDS, 0))
-        m["input"] += int(u.get("input_tokens") or 0)
-        m["output"] += int(u.get("output_tokens") or 0)
-        m["cache_read"] += int(u.get("cache_read_input_tokens") or 0)
-        m["cache_write"] += int(u.get("cache_creation_input_tokens") or 0)
-    _usage_cache[path] = (mtime, out)
-    return out
+            per_msg[msg.get("id") or f"{path}:{i}"] = (model, msg["usage"])
+    _usage_cache[path] = (mtime, per_msg)
+    return per_msg
 
 
 def add_usage(into: dict[str, dict], models: dict[str, dict]) -> dict[str, dict]:
@@ -601,8 +594,10 @@ def add_usage(into: dict[str, dict], models: dict[str, dict]) -> dict[str, dict]
     return into
 
 
-def transcript_usage(session_id: str) -> dict | None:
-    """Расход сессии по моделям, вместе с её сабагентами (explorer, researcher и т. п.)."""
+def transcript_usage(session_id: str, seen: set[str] | None = None) -> dict | None:
+    """Расход сессии по моделям, вместе с её сабагентами (explorer, researcher и т. п.).
+    seen — id сообщений, уже посчитанных в других сессиях задачи: возобновлённая через
+    --resume сессия копирует историю предыдущей, и без этого её расход считался бы дважды."""
     base = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
     files = glob.glob(str(base / "projects" / "*" / f"{session_id}.jsonl"))
     if not files:
@@ -612,9 +607,20 @@ def transcript_usage(session_id: str) -> dict | None:
     main: dict[str, dict] = {}
     for i, path in enumerate(files):
         try:
-            fu = _file_usage(path)
+            msgs = _file_msgs(path)
         except OSError:
             continue
+        fu: dict[str, dict] = {}
+        for mid, (model, u) in msgs.items():
+            if seen is not None:
+                if mid in seen:
+                    continue
+                seen.add(mid)
+            m = fu.setdefault(model, dict.fromkeys(TOKEN_KINDS, 0))
+            m["input"] += int(u.get("input_tokens") or 0)
+            m["output"] += int(u.get("output_tokens") or 0)
+            m["cache_read"] += int(u.get("cache_read_input_tokens") or 0)
+            m["cache_write"] += int(u.get("cache_creation_input_tokens") or 0)
         add_usage(models, fu)
         if i == 0:
             main = fu
@@ -1295,12 +1301,13 @@ class Dispatcher:
         for t in tasks:
             if t.get("cleaned"):
                 continue
-            for role, lst in (t.get("sessions") or {}).items():
-                for e in lst:
-                    if e.get("session_id"):
-                        u = transcript_usage(e["session_id"])
-                        if u:
-                            t.setdefault("usage", {})[e["session_id"]] = {"role": role, **u}
+            entries = sorted(((e.get("started_at") or "", role, e) for role, lst in (t.get("sessions") or {}).items()
+                              for e in lst if e.get("session_id")), key=lambda x: x[0])
+            seen: set[str] = set()
+            for _, role, e in entries:  # по времени: общая история достаётся сессии, где она появилась
+                u = transcript_usage(e["session_id"], seen)
+                if u:
+                    t.setdefault("usage", {})[e["session_id"]] = {"role": role, **u}
             self.store.save_task(t)
 
     def check_batch_done(self, tasks: list[dict]) -> None:

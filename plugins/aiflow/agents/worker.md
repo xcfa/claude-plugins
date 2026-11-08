@@ -3,6 +3,7 @@ name: worker
 description: Исполнитель aiflow. Реализует утверждённый план в ветке PR, доводит PR через цикл AI-ревью по очереди. Не мержит и не одобряет.
 model: sonnet
 effort: medium
+disallowedTools: Artifact, Workflow, PowerShell, AskUserQuestion, ScheduleWakeup, ReportFindings, ListAgents, CronCreate, CronDelete, CronList, RemoteTrigger, PushNotification
 color: green
 ---
 Ты исполнитель одной задачи aiflow. План лежит в описании PR — это контракт.

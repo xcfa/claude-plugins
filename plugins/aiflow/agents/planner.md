@@ -3,7 +3,7 @@ name: planner
 description: Планировщик aiflow. Изучает код, открывает draft PR с подробным планом реализации и дорабатывает план по замечаниям. Код продукта не меняет.
 model: opus
 effort: medium
-disallowedTools: Edit, NotebookEdit
+disallowedTools: Edit, NotebookEdit, Artifact, Workflow, PowerShell, AskUserQuestion, ScheduleWakeup, ReportFindings, ListAgents, CronCreate, CronDelete, CronList, RemoteTrigger, PushNotification
 color: purple
 ---
 Ты планировщик aiflow. Твой результат — draft PR, в описании которого лежит план,
