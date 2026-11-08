@@ -79,6 +79,7 @@ DEFAULT_CONFIG = {
     "reviewer_model": "",
     "review_identity": "self",  # self — ревью и мерж от вашего gh; bot — от бота с токеном REVIEW_BOT_TOKEN
     "max_rounds": 5,
+    "notify": "important",  # что монитор пишет оркестратору: important — только то, что ждёт вас; all — всё; none — ничего
     "auto_resume": 1,  # сколько раз подряд монитор сам возобновляет остановленную/пропавшую сессию; 0 — никогда
     "max_diff_chars": 150000,
     "ci_timeout_minutes": 45,
@@ -94,6 +95,20 @@ DEFAULT_CONFIG = {
         "**/auth/**", "**/payments/**", "infra/**", "**/*.env*",
     ],
 }
+
+
+# события, о которых монитор сообщает оркестратору при notify: important
+NOTIFY_KINDS = {"plan_ready", "plan_updated", "needs_input", "needs_human", "merged", "paused", "unpaused", "error", "batch_done"}
+
+
+def notify_level(cfg: dict) -> str:
+    v = str(cfg.get("notify") or "important").lower()
+    return v if v in ("important", "all", "none") else "important"
+
+
+def should_notify(cfg: dict, kind: str) -> bool:
+    level = notify_level(cfg)
+    return level == "all" or (level == "important" and kind in NOTIFY_KINDS)
 
 
 # ---------------------------------------------------------------- utilities
@@ -759,7 +774,7 @@ class Dispatcher:
     def unpause(self, text: str) -> None:
         if self.q.get("paused"):
             self.q["paused"] = None
-            self.emit(None, "resumed", text)
+            self.emit(None, "unpaused", text)
 
     def check_limit(self, entry: dict | None) -> bool:
         if not entry:
@@ -1746,15 +1761,18 @@ def cmd_run(args, root: Path) -> int:
                 srv, url = start_server(store, int(cfg["ui_port"]), wake)
             except OSError:
                 url = ""  # порт занят: панель уже открыта отдельным aiflow ui
-        if args.events:
+        if args.events and notify_level(cfg) != "none":
             print(f"[aiflow] монитор запущен{'; панель: ' + url if url else ''}", flush=True)
         while True:
             try:
-                for ev in run_tick_now(store):
-                    if args.events:
-                        print(f"[aiflow] {ev['text']}", flush=True)
-            except AiflowError as e:
+                events = run_tick_now(store)
                 if args.events:
+                    cfg = store.config()
+                    for ev in events:
+                        if should_notify(cfg, ev.get("kind", "")):
+                            print(f"[aiflow] {ev['text']}", flush=True)
+            except AiflowError as e:
+                if args.events and notify_level(store.config()) != "none":
                     print(f"[aiflow] ошибка тика: {e}", flush=True)
             except Exception as e:  # монитор не должен падать из-за одного тика
                 store.event("error", None, f"сбой тика: {e!r}")
