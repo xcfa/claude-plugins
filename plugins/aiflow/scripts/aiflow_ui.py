@@ -77,10 +77,10 @@ def open_terminal(root: Path, sid: str) -> str:
         wt = shutil.which("wt.exe") or shutil.which("wt")
         if wt:
             subprocess.Popen([wt, "-w", "new", "new-tab", "-d", str(root), "--title", title, claude, "attach", sid],
-                             cwd=root, creationflags=flags)
+                             cwd=root, creationflags=flags, env=aiflow.claude_env())
             return "Windows Terminal"
         subprocess.Popen(["cmd", "/c", "start", title, "/D", str(root), claude, "attach", sid],
-                         cwd=root, creationflags=flags)
+                         cwd=root, creationflags=flags, env=aiflow.claude_env())
         return "cmd"
     cmd = f"cd {shlex.quote(str(root))} && {shlex.quote(claude)} attach {sid}"
     if sys.platform == "darwin":

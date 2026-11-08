@@ -440,13 +440,31 @@ class FileLock:
 
 # ---------------------------------------------------------------- external tools
 
+PLUGIN_BIN_RE = re.compile(r"[\\/]plugins[\\/]cache[\\/][^\\/]+[\\/]aiflow[\\/][^\\/]+[\\/]bin[\\/]?$", re.I)
+
+
+def claude_env() -> dict:
+    """Окружение для вызовов `claude`: без каталогов bin плагина aiflow в PATH.
+
+    Монитор живёт в окружении сессии, где в PATH уже стоит bin той версии плагина, что была
+    при её запуске. Фоновый сервис Claude, поднятый из такого окружения, передаёт этот PATH
+    всем новым сессиям, и после обновления плагина `aiflow` в них оказывается старым.
+    Claude сам добавляет в PATH bin текущей версии."""
+    env = dict(os.environ)
+    key = next((k for k in env if k.upper() == "PATH"), "PATH")
+    parts = env.get(key, "").split(os.pathsep)
+    env[key] = os.pathsep.join(x for x in parts if not PLUGIN_BIN_RE.search(x))
+    return env
+
+
 class Claude:
     def __init__(self, root: Path):
         self.root = root
         self.bin = need("claude")
+        self.env = claude_env()
 
     def agents(self) -> dict[str, dict]:
-        p = run([self.bin, "agents", "--json", "--all", "--cwd", str(self.root)], cwd=self.root, timeout=60)
+        p = run([self.bin, "agents", "--json", "--all", "--cwd", str(self.root)], cwd=self.root, timeout=60, env=self.env)
         if p.returncode != 0:
             raise AiflowError("claude agents --json: " + (p.stderr or p.stdout).strip()[:300])
         text = p.stdout.strip()
@@ -468,21 +486,21 @@ class Claude:
         if effort:
             cmd += ["--effort", effort]
         cmd.append(prompt)
-        p = run(cmd, cwd=self.root, timeout=180)
+        p = run(cmd, cwd=self.root, timeout=180, env=self.env)
         out = (p.stdout or "") + (p.stderr or "")
         return (self._short_id(out) if p.returncode == 0 else None), out.strip()
 
     def resume(self, session_id: str, prompt: str) -> tuple[str | None, str]:
-        p = run([self.bin, "--resume", session_id, "--bg", prompt], cwd=self.root, timeout=180)
+        p = run([self.bin, "--resume", session_id, "--bg", prompt], cwd=self.root, timeout=180, env=self.env)
         out = (p.stdout or "") + (p.stderr or "")
         return (self._short_id(out) if p.returncode == 0 else None), out.strip()
 
     def logs(self, sid: str) -> str:
-        p = run([self.bin, "logs", sid], cwd=self.root, timeout=30)
+        p = run([self.bin, "logs", sid], cwd=self.root, timeout=30, env=self.env)
         return (p.stdout or "")[-6000:]
 
     def rm(self, sid: str) -> bool:
-        return run([self.bin, "rm", sid], cwd=self.root, timeout=60).returncode == 0
+        return run([self.bin, "rm", sid], cwd=self.root, timeout=60, env=self.env).returncode == 0
 
 
 class GH:
