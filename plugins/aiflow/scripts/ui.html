@@ -79,6 +79,9 @@ header .sub b { font-weight: 600; color: var(--ink); }
 .task { padding: 9px 12px 9px 0; border-bottom: 1px solid var(--rule); height: 58px; display: flex; flex-direction: column; justify-content: center; }
 .task .id { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .task .title { color: var(--muted); font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.task .open { all: unset; display: block; min-width: 0; cursor: pointer; border-radius: 4px; }
+.task .open:hover .id { text-decoration: underline; text-underline-offset: 3px; }
+.task .open:focus-visible { outline: 2px solid var(--move); outline-offset: 2px; }
 .meta { border-bottom: 1px solid var(--rule); height: 58px; display: flex; flex-direction: column; justify-content: center; align-items: flex-end; font-size: 13.5px; padding-left: 12px; }
 .meta .line2 { color: var(--muted); }
 .state-label { display: none; }
@@ -305,7 +308,11 @@ function render(s) {
   for (const t of shown) {
     const k = tone(t);
     const stage = t.stage ?? 0;
-    html += `<div class="task"><div class="id">${esc(t.id)}</div><div class="title" title="${esc(t.title)}">${esc(t.title)}</div><div class="state-label here ${k}">${esc(t.label)}${t.needs ? " — " + esc(t.needs) : ""}</div></div>`;
+    const name = `<div class="id">${esc(t.id)}</div><div class="title" title="${esc(t.title)}">${esc(t.title)}</div>`;
+    const head = t.session && t.session.id
+      ? `<button class="open" data-act="open_session" data-id="${esc(t.id)}" title="Открыть сессию ${esc(t.session.role || "")} в терминале">${name}</button>`
+      : name;
+    html += `<div class="task">${head}<div class="state-label here ${k}">${esc(t.label)}${t.needs ? " — " + esc(t.needs) : ""}</div></div>`;
     STATIONS.forEach((_, i) => {
       const pos = i < stage ? "passed" : i === stage ? "half" : "";
       const edge = i === 0 ? "first" : i === STATIONS.length - 1 ? "last" : "";
