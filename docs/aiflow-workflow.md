@@ -60,9 +60,11 @@ stateDiagram-v2
     in_progress --> ready: ready_for_review
     ready --> in_review: review_lock свободен
     in_review --> merged: approve + CI
-    in_progress --> needs_human: сессия упала
+    in_progress --> in_progress: сессия остановилась → возобновить (auto_resume)
+    in_progress --> needs_human: сессия не возобновилась
     in_review --> needs_human: лимит раундов, ошибка
-    needs_human --> plan_review: retry
+    needs_human --> in_progress: retry, та же сессия
+    needs_human --> plan_review: retry, новая сессия
     new --> cancelled: aiflow cancel
     plan_review --> cancelled: PR закрыт
     merged --> [*]
@@ -78,7 +80,7 @@ stateDiagram-v2
 | `ready` | `in_review` | `review_lock` свободен, PR самый старый в очереди | взять lock, разбудить worker'а: rebase на `master`, тесты, push, `aiflow review` |
 | `in_review` | `merged` | PR смержен | снять lock, удалить сессии задачи, разблокировать зависимые |
 | `in_review` | `needs_human` | `limit_reached`, `error`, сессия упала, метка `needs-human` | снять lock (очередь идёт дальше), объяснить причину |
-| `needs_human` | `plan_review` / `new` | метка `retry`, кнопка в панели или `aiflow retry` | новый worker с контекстом PR (или новый planner, если PR нет) |
+| `needs_human` | прежняя стадия (`planning` / `in_progress` / `ready`) | метка `retry`, кнопка в панели или `aiflow retry` | возобновляется та же сессия с её контекстом; если не вышло — новый worker с контекстом PR (`plan_review`) или новый planner (`new`) |
 | очередь | пауза | rate limit, красный `master` после мержа, `aiflow pause` | не запускать новые сессии и не брать lock |
 
 `concurrency` (по умолчанию 2) ограничивает сессии планирования и реализации. Ревью идёт поверх лимита, но строго по одному PR. Ждущая очереди сессия в `ready` слот не занимает. Пока PR ждёт, CI по нему уже бежит.
@@ -240,7 +242,7 @@ claude plugin install aiflow@aiflow-local
 7. Один раз открыть `claude` в репозитории интерактивно и принять доверие к папке.
 8. `! aiflow doctor`.
 
-**Основные настройки `runs/config.json`:** `concurrency` (2), `tick_seconds` (45), `base_branch`, `ui_port` (8765, `0` — без панели), `permission_mode` (`acceptEdits`), `planner_model` и `planner_effort` по сложности, `worker_model` и `worker_effort` (строкой или по сложности), `worker_opus_effort` (`medium`), `reviewer_model`, `max_rounds` (5), `max_diff_chars`, `ci_timeout_minutes`, `rate_limit_pause_minutes`, `watch_integration` (следить за CI базовой ветки после мержа), `protected_paths`.
+**Основные настройки `runs/config.json`:** `concurrency` (2), `tick_seconds` (45), `base_branch`, `ui_port` (8765, `0` — без панели), `permission_mode` (`acceptEdits`), `planner_model` и `planner_effort` по сложности, `worker_model` и `worker_effort` (строкой или по сложности), `worker_opus_effort` (`medium`), `reviewer_model`, `max_rounds` (5), `auto_resume` (1), `max_diff_chars`, `ci_timeout_minutes`, `rate_limit_pause_minutes`, `watch_integration` (следить за CI базовой ветки после мержа), `protected_paths`.
 
 ## 12. Ваша работа день за днём
 
@@ -250,7 +252,7 @@ claude plugin install aiflow@aiflow-local
 4. По ходу работы — вопросы оркестратору («что с пачкой?»), идеи worker'у — ответом в его сессии или комментарием `<!-- human -->` в PR.
 5. По событию «нужен человек» — оркестратор объяснит причину; поправить план и повторить, либо решить разногласие с ревьюером самому.
 6. Проверить `master` после мержей; найденное — новой пачкой через `/aiflow:intake`.
-7. После перезагрузки машины — `/aiflow:resume` в сессии оркестратора.
+7. После перезагрузки машины — `/aiflow:resume` в сессии оркестратора; прерванные сессии монитор возобновит сам.
 
 ## 13. Обкатка на тестовом репозитории
 
@@ -278,7 +280,7 @@ aiflow не читает и не передаёт токены подписки 
 | --- | --- |
 | Agent view в research preview | Флаги CLI могут меняться; все вызовы `claude` собраны в классе `Claude` в `scripts/aiflow.py` |
 | Мониторы плагинов работают только в интерактивных сессиях | Фоновая сессия интерактивна, но это первое, что нужно проверить |
-| Фоновые сессии локальные | Выключение машины их останавливает: `/aiflow:resume`, затем `aiflow retry` |
+| Фоновые сессии локальные | Выключение машины их останавливает: после `/aiflow:resume` монитор возобновляет остановленные и пропавшие сессии (`auto_resume`, по умолчанию 1 раз подряд) |
 | Монитор живёт, пока жива сессия оркестратора | Сессия закреплена; всё состояние в `runs/`, новый монитор продолжает с того же места |
 | Каждое событие монитора стоит токенов оркестратору | Печатается только то, что требует реакции |
 | Значения `userConfig` плагина не доходят до команд агентов | Настройки — в `runs/config.json`, токен бота (режим `bot`) — в файле или переменной окружения |

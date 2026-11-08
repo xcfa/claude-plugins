@@ -79,6 +79,7 @@ DEFAULT_CONFIG = {
     "reviewer_model": "",
     "review_identity": "self",  # self — ревью и мерж от вашего gh; bot — от бота с токеном REVIEW_BOT_TOKEN
     "max_rounds": 5,
+    "auto_resume": 1,  # сколько раз подряд монитор сам возобновляет остановленную/пропавшую сессию; 0 — никогда
     "max_diff_chars": 150000,
     "ci_timeout_minutes": 45,
     "rate_limit_pause_minutes": 30,
@@ -648,6 +649,23 @@ def ci_fix_prompt(t: dict, failed: list[str]) -> str:
     )
 
 
+RESUME_FINISH = {
+    "planning": "Доведи план до конца и отчитайся aiflow report {id} --role planner --status plan_ready, как в твоих инструкциях.",
+    "in_progress": "Доведи реализацию до конца и отчитайся aiflow report {id} --role worker --status ready_for_review, как в твоих инструкциях.",
+    "in_review": "Продолжи цикл ревью PR #{pr} (aiflow review --pr {pr}) до терминального статуса, как в твоих инструкциях.",
+}
+
+
+def resume_prompt(t: dict, state: str, why: str) -> str:
+    """Промпт для возобновления той же сессии после остановки."""
+    return (
+        f"Работу над задачей {t['id']} прервали ({why}). Продолжи с того места, где остановился: "
+        "проверь git status и git log в своём рабочем каталоге — незакоммиченные правки на месте, "
+        "доделай начатое, не начинай заново. "
+        + RESUME_FINISH.get(state, "Продолжи по своим инструкциям.").format(id=t["id"], pr=t.get("pr"))
+    )
+
+
 # ---------------------------------------------------------------- dispatcher
 
 class Dispatcher:
@@ -695,7 +713,34 @@ class Dispatcher:
         if not rep or rep.get("role") != role or rep.get("rid") == t.get("report_seen"):
             return None
         t["report_seen"] = rep.get("rid")
+        (t.get("auto_resumed") or {}).pop(role, None)  # сессия продвинулась — счётчик автовозобновлений заново
         return rep
+
+    def try_resume(self, t: dict, role: str, state: str, why: str, auto: bool) -> bool:
+        """Возобновить ту же сессию роли. auto — монитор сам, не больше auto_resume раз подряд."""
+        e = self.cur(t, role)
+        if not e:
+            return False
+        counts = t.setdefault("auto_resumed", {})
+        if auto:
+            if counts.get(role, 0) >= int(self.cfg.get("auto_resume", 0) or 0):
+                return False
+            counts[role] = counts.get(role, 0) + 1
+        if not self.wake(t, role, resume_prompt(t, state, why)):
+            return False
+        e = self.cur(t, role)
+        e["resumed_at"] = iso()
+        verb = "возобновлена автоматически" if auto else "возобновлена"
+        self.emit(t, "resumed", f"{t['id']}: сессия {role} {verb} ({why})", key=f"resumed:{role}:{iso()}")
+        return True
+
+    def lost(self, t: dict, role: str, state: str, why: str, reason: str) -> None:
+        """Сессия остановилась или пропала: сначала автовозобновление, иначе — к человеку."""
+        e = self.cur(t, role)
+        if e and e.get("resumed_at") and age_minutes(e["resumed_at"]) < 2:
+            return  # только что возобновили: claude agents ещё может показывать старое состояние
+        if not self.try_resume(t, role, state, why, auto=True):
+            self.to_human(t, reason)
 
     def release_lock(self, t: dict) -> None:
         if self.q.get("review_lock") == t["id"]:
@@ -880,7 +925,7 @@ class Dispatcher:
         st = self.sstate(e)
         if st in ("failed", "stopped"):
             if not self.check_limit(e):
-                self.to_human(t, "сессия планировщика завершилась без плана")
+                self.lost(t, "planner", "planning", f"сессия {st}", "сессия планировщика завершилась без плана")
         elif st == "done" and age_minutes((self.sess(e) or {}).get("updatedAt") or t.get("state_at")) > 2:
             self.to_human(t, "планировщик закончил ход без aiflow report")
         elif st == "blocked":
@@ -888,8 +933,8 @@ class Dispatcher:
                 w = (self.sess(e) or {}).get("waitingFor") or "ответ"
                 self.emit(t, "needs_input", f"{t['id']}: планировщик ждёт вас в своей сессии ({w})",
                           key=f"blocked:{e['id']}:{w}")
-        elif e and st is None and age_minutes(e.get("started_at")) > 10:
-            self.to_human(t, "сессия планировщика пропала из claude agents")
+        elif e and st is None and age_minutes(e.get("resumed_at") or e.get("started_at")) > 10:
+            self.lost(t, "planner", "planning", "сессия пропала", "сессия планировщика пропала из claude agents")
 
     def try_auto_approve(self, t: dict) -> bool:
         body = (self.gh.pr(t["pr"], "body").get("body") or "")
@@ -945,7 +990,7 @@ class Dispatcher:
         st = self.sstate(e)
         if st in ("failed", "stopped"):
             if not self.check_limit(e):
-                self.to_human(t, dead_reason)
+                self.lost(t, role, t.get("state", "in_progress"), f"сессия {st}", dead_reason)
         elif st == "blocked":
             if not self.check_limit(e):
                 w = (self.sess(e) or {}).get("waitingFor") or "ответ"
@@ -953,8 +998,8 @@ class Dispatcher:
                           key=f"blocked:{e['id']}:{w}")
         elif st == "done" and age_minutes(t.get("state_at")) > 2 and t.get("state") == "in_progress":
             self.to_human(t, f"{role} закончил ход без aiflow report")
-        elif e and st is None and age_minutes(e.get("started_at")) > 10:
-            self.to_human(t, f"сессия {role} пропала из claude agents")
+        elif e and st is None and age_minutes(e.get("resumed_at") or e.get("started_at")) > 10:
+            self.lost(t, role, t.get("state", "in_progress"), "сессия пропала", f"сессия {role} пропала из claude agents")
 
     def adv_ready(self, t: dict) -> None:
         pr = self.gh.pr(t["pr"], "state")
@@ -992,7 +1037,9 @@ class Dispatcher:
         e = self.cur(t, "worker")
         last_review = (self.store.review(t["id"]) or {}).get("at") or t.get("state_at")
         if self.sstate(e) in ("failed", "stopped") and not self.check_limit(e):
-            self.to_human(t, "сессия worker'а завершилась во время ревью")
+            self.lost(t, "worker", "in_review", f"сессия {self.sstate(e)}", "сессия worker'а завершилась во время ревью")
+        elif e and self.sstate(e) is None and age_minutes(e.get("resumed_at") or e.get("started_at")) > 10                 and age_minutes(last_review) > 10:
+            self.lost(t, "worker", "in_review", "сессия пропала", "сессия worker'а пропала из claude agents во время ревью")
         elif self.sstate(e) == "done" and age_minutes(last_review) > 5 and age_minutes(t.get("state_at")) > 5:
             self.to_human(t, "worker закончил ход, не доведя ревью до итогового статуса")
         elif self.sstate(e) == "blocked" and not self.check_limit(e):
@@ -1024,12 +1071,26 @@ class Dispatcher:
 
     def do_retry(self, t: dict) -> None:
         t["retry_requested"] = False
-        t["retry_pending"] = True
+        reason = t.get("human_reason") or "нужен человек"
         t["human_reason"] = None
         if t.get("pr"):
             self.gh.remove_label(t["pr"], self.cfg["labels"]["needs_human"])
             self.gh.remove_label(t["pr"], self.cfg["labels"]["retry"])
         self.release_lock(t)
+        t.pop("auto_resumed", None)
+        # Сначала — та же сессия с её контекстом и рабочим каталогом, в той же стадии.
+        prev = next((h.get("from") for h in reversed(t.get("history") or []) if h.get("to") == "needs_human"), None)
+        if prev == "in_review" and self.cur(t, "worker"):
+            # Ревью идёт строго по одному: задача снова встаёт в очередь ревью, и монитор будит
+            # эту же сессию worker'а (с её контекстом), когда освободится lock.
+            self.set_state(t, "ready", "повтор: ревью той же сессией")
+            self.emit(t, "retry", f"{t['id']}: повтор — снова в очереди на ревью", key=f"retry:{iso()[:16]}")
+            return
+        role = {"planning": "planner", "in_progress": "worker"}.get(prev or "")
+        if role and self.try_resume(t, role, prev, f"повтор после «{reason}»", auto=False):
+            self.set_state(t, prev, "повтор: та же сессия")
+            return
+        t["retry_pending"] = True
         if t.get("pr") and t.get("plan_approved"):
             self.set_state(t, "plan_review", "повтор: новый worker")
         else:
