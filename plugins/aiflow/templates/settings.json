@@ -5,6 +5,7 @@
       "Bash(aiflow review:*)",
       "Bash(aiflow reply:*)",
       "Bash(aiflow status:*)",
+      "Bash(aiflow run --events)",
       "Bash(aiflow doctor:*)",
       "Bash(aiflow enqueue:*)",
       "Bash(aiflow cancel:*)",
