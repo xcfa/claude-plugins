@@ -1745,6 +1745,9 @@ def cmd_run(args, root: Path) -> int:
         return 0  # уже работает другой монитор — молча выходим
     wake = threading.Event()
     srv = None
+    # На Windows дочерние процессы переживают родителя: монитор сессии сам выходит,
+    # когда завершается процесс Claude, который его запустил.
+    owner = int(os.environ.get("CLAUDE_PID") or 0) if args.events else 0
     import signal
 
     def _stop(*_):
@@ -1776,7 +1779,11 @@ def cmd_run(args, root: Path) -> int:
                     print(f"[aiflow] ошибка тика: {e}", flush=True)
             except Exception as e:  # монитор не должен падать из-за одного тика
                 store.event("error", None, f"сбой тика: {e!r}")
-            wake.wait(timeout=max(10, int(store.config().get("tick_seconds", 45))))
+            deadline = time.time() + max(10, int(store.config().get("tick_seconds", 45)))
+            while not wake.is_set() and time.time() < deadline:
+                if owner and not pid_alive(owner):
+                    return 0  # сессия Claude, запустившая монитор, завершилась
+                wake.wait(timeout=min(5, max(0.1, deadline - time.time())))
             wake.clear()
     except KeyboardInterrupt:
         return 0
