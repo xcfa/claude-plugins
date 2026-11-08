@@ -87,21 +87,26 @@ def forget(root) -> bool:
 
 def panel_token() -> str:
     """Токен панели службы переживает её перезапуск: открытая страница не ловит forbidden."""
+    import secrets
     p = home() / "panel.token"
     try:
         tok = p.read_text(encoding="utf-8").strip()
         if len(tok) >= 24:
             return tok
-    except OSError:
+    except (OSError, ValueError):
         pass
-    import secrets
     tok = secrets.token_urlsafe(24)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(tok, encoding="utf-8")
     try:
-        os.chmod(p, 0o600)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_name(f"panel.token.{os.getpid()}")
+        tmp.write_text(tok, encoding="utf-8")
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp, p)
     except OSError:
-        pass
+        pass  # не записали — токен живёт до перезапуска, как раньше
     return tok
 
 

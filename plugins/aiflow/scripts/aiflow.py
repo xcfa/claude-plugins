@@ -955,13 +955,19 @@ class Dispatcher:
         base = self.cfg["base_branch"]
         key = (str(self.root), base)
         cached = _BASE_SEEN.get(key)
-        if cached is None or time.time() - cached[0] > 600:
-            p = run(["git", "ls-remote", "--heads", "origin", base], cwd=self.root, timeout=30)
-            if p.returncode != 0:
-                return  # сеть или доступ: не повод останавливать очередь
-            cached = _BASE_SEEN[key] = (time.time(), bool(p.stdout.strip()))
+        # Есть ветка — проверять раз в 10 минут; нет или не удалось проверить — раз в минуту.
+        if cached is None or time.time() - cached[0] > (600 if cached[1] else 60):
+            try:
+                p = run(["git", "ls-remote", "--heads", "origin", base], cwd=self.root, timeout=30)
+                found = bool(p.stdout.strip()) if p.returncode == 0 else None
+            except AiflowError:
+                found = None
+            cached = _BASE_SEEN[key] = (time.time(), found)
+        if cached[1] is None:
+            return  # сеть или доступ: не повод останавливать очередь
         paused = self.q.get("paused") or {}
-        if not cached[1] and paused.get("reason") != "base_missing":
+        # Чужую паузу (ручную, по лимиту, по CI) не перезаписываем: её снимет её же условие.
+        if not cached[1] and not paused:
             self.pause("base_missing", None, f"базовой ветки {base} нет на origin: поправьте base_branch "
                        "в runs/config.json либо создайте ветку")
         elif cached[1] and paused.get("reason") == "base_missing":
@@ -973,7 +979,7 @@ class Dispatcher:
             return
         red = r.get("conclusion") in ("failure", "timed_out", "startup_failure")
         paused = self.q.get("paused") or {}
-        if red and paused.get("reason") != "integration_red":
+        if red and not paused:
             self.pause("integration_red", None, f"ветка {self.cfg['base_branch']} покраснела после мержа: {r.get('url', '')}")
         elif not red and paused.get("reason") == "integration_red":
             self.unpause(f"ветка {self.cfg['base_branch']} снова зелёная")

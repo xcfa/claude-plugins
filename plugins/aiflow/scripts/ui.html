@@ -270,8 +270,8 @@ function staleToken() {
 async function act(action, key, id, value) {
   try {
     const r = await fetch("/api/action", { method: "POST", headers: { "Content-Type": "application/json", "X-Aiflow-Token": TOKEN }, body: JSON.stringify({ action, project: key, id, value }) });
-    const d = await r.json();
     if (r.status === 403) return staleToken();
+    const d = await r.json();
     if (!r.ok) throw new Error(d.error || r.statusText);
     if (action === "open_session") return toast(`Сессия открыта в новом окне (${d.where})`);
     if (action === "cancel" && d.warnings && d.warnings.length) { toast("Снята, но: " + d.warnings.join("; ")); setTimeout(load, 600); return; }
@@ -473,7 +473,6 @@ async function loadSettings(refresh) {
   try {
     const r = await fetch(`/api/settings?project=${encodeURIComponent(key)}` + (refresh ? "&refresh=1" : ""), { cache: "no-store" });
     const d = await r.json();
-    if (r.status === 403) return staleToken();
     if (!r.ok) throw new Error(d.error || r.statusText);
     const input = $("rmodel");
     if (settingsFor !== key || !refresh) input.value = d.reviewer_model;
@@ -497,8 +496,8 @@ $("rmform").addEventListener("submit", async (e) => {
   const btn = $("rmsave"); btn.disabled = true;
   try {
     const r = await fetch("/api/action", { method: "POST", headers: { "Content-Type": "application/json", "X-Aiflow-Token": TOKEN }, body: JSON.stringify({ action: "set_reviewer_model", project: key, value }) });
-    const d = await r.json();
     if (r.status === 403) return staleToken();
+    const d = await r.json();
     if (!r.ok) throw new Error(d.error || r.statusText);
     $("rmodel").value = d.reviewer_model; $("rmodel").dataset.saved = d.reviewer_model;
     $("rmstatus").className = "hint"; $("rmstatus").textContent = `Сейчас: ${d.reviewer_model || "по умолчанию opencode"}.`;
