@@ -219,6 +219,73 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
+_BOOT: list[float] = []
+
+
+def boot_time() -> float | None:
+    """Время загрузки системы (unix), если удаётся узнать."""
+    if _BOOT:
+        return _BOOT[0] or None
+    bt = 0.0
+    try:
+        if os.name == "nt":
+            import ctypes
+            k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            k32.GetTickCount64.restype = ctypes.c_ulonglong
+            bt = time.time() - k32.GetTickCount64() / 1000
+        elif Path("/proc/uptime").exists():
+            bt = time.time() - float(Path("/proc/uptime").read_text().split()[0])
+        else:
+            p = subprocess.run(["sysctl", "-n", "kern.boottime"], capture_output=True, text=True, timeout=5)
+            m = re.search(r"sec = (\d+)", p.stdout)
+            bt = float(m.group(1)) if m else 0.0
+    except Exception:
+        bt = 0.0
+    _BOOT.append(bt)
+    return bt or None
+
+
+def process_start(pid: int) -> float | None:
+    """Время запуска процесса (unix); только Windows, иначе None."""
+    if os.name != "nt" or pid <= 0:
+        return None
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    h = k32.OpenProcess(0x1000, False, pid)
+    if not h:
+        return None
+    try:
+        c, e, k, u = (wintypes.FILETIME() for _ in range(4))
+        if not k32.GetProcessTimes(h, ctypes.byref(c), ctypes.byref(e), ctypes.byref(k), ctypes.byref(u)):
+            return None
+        ft = (c.dwHighDateTime << 32) | c.dwLowDateTime
+        return ft / 1e7 - 11644473600
+    finally:
+        k32.CloseHandle(h)
+
+
+def owner_alive(info: dict | None) -> int:
+    """pid из lock/pid-файла, если его владелец всё ещё жив, иначе 0.
+    Pid переиспользуются: после перезагрузки или долгой паузы в файле может стоять pid чужого
+    процесса. Такой файл считается брошенным — служба не должна молча не стартовать
+    и тем более убивать чужой процесс."""
+    info = info or {}
+    pid = int(info.get("pid") or 0)
+    if not pid_alive(pid):
+        return 0
+    at = parse_iso(info.get("at"))
+    if at:
+        ts = at.timestamp()
+        bt = boot_time()
+        if bt and ts < bt - 60:
+            return 0  # файл записан до загрузки системы
+        st = process_start(pid)
+        if st and st > ts + 60:
+            return 0  # процесс с этим pid запущен позже, чем записан файл
+    return pid
+
+
 def glob_to_re(pattern: str) -> re.Pattern:
     out, i = "", 0
     while i < len(pattern):
@@ -410,11 +477,10 @@ class FileLock:
                 return True
             except FileExistsError:
                 info = read_json(self.path, {}) or {}
-                pid = int(info.get("pid") or 0)
-                if not info and age_minutes(None) and self._file_age_minutes() < 0.1:
+                if not info and self._file_age_minutes() < 0.1:
                     time.sleep(0.2)  # файл только что создан, pid ещё не записан
                     continue
-                if not pid_alive(pid):
+                if not owner_alive(info):
                     try:
                         self.path.unlink()
                     except FileNotFoundError:
@@ -439,14 +505,12 @@ class FileLock:
             self.held = False
 
     def owner(self) -> int:
-        info = read_json(self.path, {}) or {}
-        pid = int(info.get("pid") or 0)
-        return pid if pid_alive(pid) else 0
+        return owner_alive(read_json(self.path, {}) or {})
 
     def data(self) -> dict | None:
         """Содержимое lock-файла, если его владелец жив."""
         info = read_json(self.path, {}) or {}
-        return info if pid_alive(int(info.get("pid") or 0)) else None
+        return info if owner_alive(info) else None
 
 
 # ---------------------------------------------------------------- external tools
@@ -2028,7 +2092,7 @@ def _kill(pid: int) -> bool:
 
 def stop_ui(store: Store) -> bool:
     info = read_json(store.runs / "ui.pid", {}) or {}
-    ok = _kill(int(info.get("pid") or 0))
+    ok = _kill(owner_alive(info))
     (store.runs / "ui.pid").unlink(missing_ok=True)
     return ok
 

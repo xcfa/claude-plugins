@@ -310,7 +310,10 @@ def serve() -> int:
     home().mkdir(parents=True, exist_ok=True)
     lock = _lock()
     if not lock.acquire(extra={"version": aiflow.VERSION}):
-        return 0  # служба уже работает
+        other = lock.data() or {}
+        print(f"{iso()} служба aiflow уже работает (pid {other.get('pid', '?')}, версия {other.get('version', '?')})",
+              flush=True)
+        return 0
     import signal
 
     def _stop(*_):
@@ -482,7 +485,12 @@ home = Path(os.environ.get("AIFLOW_HOME") or Path.home() / ".aiflow")
 home.mkdir(parents=True, exist_ok=True)
 os.environ["PYTHONUTF8"] = "1"
 os.environ["PATH"] = {path!r} + os.pathsep + os.environ.get("PATH", "")
+import time
 with open(home / "service.log", "ab") as log:
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    log.write(f"{{stamp}} автозапуск: {{script}}
+".encode("utf-8"))
+    log.flush()
     sys.exit(subprocess.call([sys.executable, "-X", "utf8", script, "service"], stdout=log, stderr=log))
 '''
 
