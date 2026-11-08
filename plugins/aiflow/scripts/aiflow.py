@@ -118,6 +118,10 @@ class AiflowError(Exception):
     pass
 
 
+class TickBusy(AiflowError):
+    """Проход по проекту уже идёт в другом процессе."""
+
+
 def now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
@@ -392,13 +396,13 @@ class FileLock:
         self.stale = stale_minutes
         self.held = False
 
-    def acquire(self, wait_seconds: float = 0) -> bool:
+    def acquire(self, wait_seconds: float = 0, extra: dict | None = None) -> bool:
         deadline = time.time() + wait_seconds
         self.path.parent.mkdir(parents=True, exist_ok=True)
         while True:
             try:
                 fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(fd, json.dumps({"pid": os.getpid(), "at": iso()}).encode())
+                os.write(fd, json.dumps({"pid": os.getpid(), "at": iso(), **(extra or {})}).encode())
                 os.close(fd)
                 self.held = True
                 return True
@@ -436,6 +440,11 @@ class FileLock:
         info = read_json(self.path, {}) or {}
         pid = int(info.get("pid") or 0)
         return pid if pid_alive(pid) else 0
+
+    def data(self) -> dict | None:
+        """Содержимое lock-файла, если его владелец жив."""
+        info = read_json(self.path, {}) or {}
+        return info if pid_alive(int(info.get("pid") or 0)) else None
 
 
 # ---------------------------------------------------------------- external tools
@@ -1430,7 +1439,8 @@ def cmd_init(args, root: Path) -> int:
 
 def setup_desktop_preview(root: Path, store: Store) -> str:
     """Добавляет панель aiflow в .claude/launch.json — Browser pane вкладки Code в Claude Desktop."""
-    port = int(store.config().get("ui_port") or 8765)
+    import aiflow_service as svc
+    port = int(svc.global_config().get("ui_port") or svc.DEFAULT_PORT)
     entries = [
         # подключиться к панели, которую уже поднял монитор
         {"name": "aiflow", "url": f"http://127.0.0.1:{port}", "port": port},
@@ -1609,10 +1619,10 @@ def cmd_status(args, root: Path) -> int:
     return 0
 
 
-def run_tick_now(store: Store) -> list[dict]:
+def run_tick_now(store: Store, wait: float = 60) -> list[dict]:
     lock = FileLock(store.runs / "tick.lock", stale_minutes=15)
-    if not lock.acquire(wait_seconds=60):
-        raise AiflowError("tick уже выполняется")
+    if not lock.acquire(wait_seconds=wait):
+        raise TickBusy("tick уже выполняется")
     try:
         return Dispatcher(store).tick()
     finally:
@@ -1979,7 +1989,8 @@ def cmd_ui(args, root: Path) -> int:
         data = svc.ensure()
         url = svc.panel_url(data)
         if not url:
-            raise AiflowError("у службы выключена панель (ui_port: 0 в ~/.aiflow/config.json)")
+            raise AiflowError("панель службы недоступна: " + (data.get("panel_error")
+                              or "выключена (ui_port: 0 в ~/.aiflow/config.json)"))
         where = svc.open_window(url) if args.open else ""
         print(f"Панель aiflow: {url}" + (f" (открыта: {where})" if where else ""))
         return 0

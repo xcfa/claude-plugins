@@ -331,7 +331,7 @@ function renderWaiting() {
     if (t.state === "plan_review") acts.push(`<button class="primary" data-act="approve" data-project="${k}" data-id="${id}">Одобрить план</button>`);
     if (t.state === "needs_human") acts.push(`<button class="primary" data-act="retry" data-project="${k}" data-id="${id}">Повторить</button>`);
     if (t.state === "needs_human" && /защищ|protected/i.test(t.needs || "")) acts.push(`<button data-allow="${id}" data-project="${k}">Разрешить пути…</button>`);
-    if (t.pr_url) acts.push(`<a href="${esc(t.pr_url)}" target="_blank" rel="noopener">PR #${t.pr}</a>`);
+    if (t.pr_url) acts.push(`<a href="${esc(t.pr_url)}" target="_blank" rel="noopener">PR #${esc(t.pr)}</a>`);
     if (t.session && t.session.id) acts.push(`<button data-act="open_session" data-project="${k}" data-id="${id}">Открыть сессию</button>`);
     acts.push(`<button class="danger" data-cancel="${id}" data-project="${k}">Снять</button>`);
     const proj = many() ? `<span class="proj">${esc(p.name)}</span> ` : "";
@@ -369,8 +369,8 @@ function renderBoard(p) {
       }
       html += `<div class="cell ${edge} ${pos}">${dot}</div>`;
     });
-    const pr = t.pr ? (t.pr_url ? `<a href="${esc(t.pr_url)}" target="_blank" rel="noopener">#${t.pr}</a>` : "#" + t.pr) : "—";
-    const rounds = t.rounds ? `раунд ${t.rounds}/${t.max_rounds}` : (t.review_lock ? "на ревью" : "");
+    const pr = t.pr ? (t.pr_url ? `<a href="${esc(t.pr_url)}" target="_blank" rel="noopener">#${esc(t.pr)}</a>` : "#" + esc(t.pr)) : "—";
+    const rounds = t.rounds ? `раунд ${esc(t.rounds)}/${esc(t.max_rounds)}` : (t.review_lock ? "на ревью" : "");
     const cancel = t.state === "merged" || t.state === "cancelled" ? ""
       : `<button class="link danger" data-cancel="${id}" data-project="${k}" title="Остановить сессии задачи и закрыть её PR">Снять</button>`;
     html += `<div class="meta"><div class="num">${pr}${rounds ? ", " + rounds : ""}</div><div class="line2 num">${t.tokens ? tokens(t.tokens) + " токенов" : "—"}</div>${cancel}</div>`;
@@ -395,7 +395,7 @@ function renderProject(p) {
   return `<section class="project">
     <div class="phead">
       <div><h2>${esc(p.name)}</h2>
-        <div class="sub">база <b>${esc(p.base)}</b>, до ${p.concurrency} сессий параллельно${mon}</div></div>
+        <div class="sub">база <b>${esc(p.base)}</b>, до ${esc(p.concurrency)} сессий параллельно${mon}</div></div>
       <div class="queue">${qstate}${qbtn}${forget}</div>
     </div>
     ${renderBoard(p)}

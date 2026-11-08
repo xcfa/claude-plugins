@@ -11,11 +11,13 @@ import sys
 import threading
 import time
 from pathlib import Path
+from xml.sax.saxutils import escape as xml_escape
 
 import aiflow
 from aiflow import AiflowError, FileLock, Store, iso, pid_alive, read_json, write_json
 
 DEFAULT_PORT = 8765
+PANEL_RETRY_SECONDS = 30
 
 
 def home() -> Path:
@@ -36,40 +38,51 @@ def _registry_path() -> Path:
     return home() / "projects.json"
 
 
-def projects() -> list[str]:
+def _entries() -> list[dict]:
     data = read_json(_registry_path(), {}) or {}
+    return [e for e in data.get("projects") or [] if isinstance(e, dict) and e.get("root")]
+
+
+def projects() -> list[str]:
     out, seen = [], set()
-    for e in data.get("projects") or []:
-        root = e.get("root") if isinstance(e, dict) else None
-        if root and project_key(root) not in seen:
-            seen.add(project_key(root))
-            out.append(norm(root))
+    for e in _entries():
+        k = project_key(e["root"])
+        if k not in seen:
+            seen.add(k)
+            out.append(norm(e["root"]))
     return out
 
 
-def _save(roots: list[str]) -> None:
+def _edit_registry(change) -> bool:
+    """Изменить реестр под lock'ом: change(list[dict]) -> list[dict] | None (None — без изменений)."""
     home().mkdir(parents=True, exist_ok=True)
-    old = {project_key(e["root"]): e for e in (read_json(_registry_path(), {}) or {}).get("projects") or []
-           if isinstance(e, dict) and e.get("root")}
-    write_json(_registry_path(), {"projects": [old.get(project_key(r)) or {"root": r, "added_at": iso()} for r in roots]})
+    lock = FileLock(home() / "projects.lock", stale_minutes=1)
+    if not lock.acquire(wait_seconds=10):
+        raise AiflowError("реестр проектов занят, повторите")
+    try:
+        new = change(_entries())
+        if new is None:
+            return False
+        write_json(_registry_path(), {"projects": new})
+        return True
+    finally:
+        lock.release()
 
 
 def register(root) -> bool:
     """Добавить проект в реестр службы. True, если его там не было."""
-    roots = projects()
-    if any(project_key(r) == project_key(root) for r in roots):
-        return False
-    _save(roots + [norm(root)])
-    return True
+    key = project_key(root)
+    return _edit_registry(lambda es: None if any(project_key(e["root"]) == key for e in es)
+                          else es + [{"root": norm(root), "added_at": iso()}])
 
 
 def forget(root) -> bool:
-    roots = projects()
-    rest = [r for r in roots if project_key(r) != project_key(root)]
-    if len(rest) == len(roots):
-        return False
-    _save(rest)
-    return True
+    key = project_key(root)
+
+    def change(es):
+        rest = [e for e in es if project_key(e["root"]) != key]
+        return rest if len(rest) != len(es) else None
+    return _edit_registry(change)
 
 
 def global_config() -> dict:
@@ -80,30 +93,35 @@ def global_config() -> dict:
 
 # ---------------------------------------------------------------- процесс службы
 
-def _version_tuple(v: str) -> tuple:
+def _version_tuple(v) -> tuple:
     try:
         return tuple(int(x) for x in str(v).split("."))
     except ValueError:
         return (0,)
 
 
+def _lock() -> FileLock:
+    return FileLock(home() / "service.lock", stale_minutes=0)
+
+
 def info() -> dict | None:
-    """Работающая служба: {pid, version, port, script, started_at} или None."""
-    pid = FileLock(home() / "service.lock").owner()
-    if not pid:
+    """Работающая служба: {pid, version, port, panel_error, ...} или None.
+    Версия пишется в lock при старте; port появляется, когда служба подняла панель."""
+    data = _lock().data()
+    if not data:
         return None
-    data = read_json(home() / "service.json", {}) or {}
-    if int(data.get("pid") or 0) != pid:
-        data = {"pid": pid}
+    extra = read_json(home() / "service.json", {}) or {}
+    if int(extra.get("pid") or 0) == int(data["pid"]):
+        data = {**extra, **data}
     return data
 
 
 def panel_url(data: dict | None = None) -> str:
-    data = data or info() or {}
-    port = data.get("port") if data else None
-    if port == 0:
+    data = data if data is not None else info()
+    port = (data or {}).get("port")
+    if not port:
         return ""
-    return f"http://127.0.0.1:{port or global_config().get('ui_port') or DEFAULT_PORT}/"
+    return f"http://127.0.0.1:{port}/"
 
 
 def _python(windowless: bool = False) -> str:
@@ -121,57 +139,152 @@ def spawn(via_helper: bool = True) -> None:
     cmd = [_python(), "-X", "utf8", str(Path(aiflow.__file__).resolve()), "service"]
     if via_helper:
         cmd.append("--spawn")
-    log = (home() / "service.log").open("ab")
     env = aiflow.claude_env()
     env["PYTHONUTF8"] = "1"
-    kw: dict = {"cwd": str(home()), "stdin": subprocess.DEVNULL, "stdout": log, "stderr": log,
-                "close_fds": True, "env": env}
-    if os.name == "nt":
-        base = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-        try:  # выйти из job-объекта родителя, если он это позволяет
-            subprocess.Popen(cmd, creationflags=base | subprocess.CREATE_BREAKAWAY_FROM_JOB, **kw)
-        except OSError:
-            subprocess.Popen(cmd, creationflags=base, **kw)
-    else:
-        subprocess.Popen(cmd, start_new_session=True, **kw)
-    log.close()
+    with (home() / "service.log").open("ab") as log:
+        kw: dict = {"cwd": str(home()), "stdin": subprocess.DEVNULL, "stdout": log, "stderr": log,
+                    "close_fds": True, "env": env}
+        if os.name == "nt":
+            base = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+            try:  # выйти из job-объекта родителя, если он это позволяет
+                subprocess.Popen(cmd, creationflags=base | subprocess.CREATE_BREAKAWAY_FROM_JOB, **kw)
+            except OSError:
+                subprocess.Popen(cmd, creationflags=base, **kw)
+        else:
+            subprocess.Popen(cmd, start_new_session=True, **kw)
 
 
-def stop() -> bool:
+def _down_marker() -> Path:
+    return home() / "service.down"
+
+
+def stopped_by_user() -> bool:
+    return _down_marker().is_file()
+
+
+def stop(mark_down: bool = True) -> bool:
+    """Остановить службу. mark_down — пользователь остановил её сам: мониторы сессий
+    не поднимают её снова, пока он не попросит (aiflow up, /aiflow:intake, /aiflow:resume)."""
+    if mark_down:
+        home().mkdir(parents=True, exist_ok=True)
+        _down_marker().write_text(iso(), encoding="utf-8")
     data = info()
     if not data:
         return False
-    ok = aiflow._kill(int(data["pid"]))
+    pid = int(data["pid"])
+    ok = aiflow._kill(pid)
     if ok:
-        (home() / "service.json").unlink(missing_ok=True)
-        (home() / "service.lock").unlink(missing_ok=True)
+        for name in ("service.json", "service.lock"):
+            path = home() / name
+            if int((read_json(path, {}) or {}).get("pid") or 0) == pid:  # не трогать файлы новой службы
+                path.unlink(missing_ok=True)
     return ok
 
 
-def ensure(wait: float = 15) -> dict:
-    """Служба работает и не старше этой версии плагина: иначе (пере)запустить."""
+def ensure(wait: float = 20) -> dict:
+    """Служба работает и не старше этой версии плагина: иначе (пере)запустить.
+    Явный запрос пользователя: снимает отметку «остановлена вручную»."""
+    _down_marker().unlink(missing_ok=True)
     data = info()
-    if data and _version_tuple(data.get("version", "0")) < _version_tuple(aiflow.VERSION):
-        stop()
+    if data and data.get("version") and _version_tuple(data["version"]) < _version_tuple(aiflow.VERSION):
+        stop(mark_down=False)
         data = None
     if not data:
         spawn()
-        deadline = time.time() + wait
-        while time.time() < deadline:
-            data = info()
-            if data and data.get("version"):
-                break
-            time.sleep(0.2)
-        else:
+    deadline = time.time() + wait
+    while True:
+        data = info()
+        if data and data.get("version") and ("port" in data or time.time() >= deadline):
+            return data  # port появляется, когда служба закончила старт (поднялась панель или нет)
+        if time.time() >= deadline:
             raise AiflowError(f"служба aiflow не запустилась, см. {home() / 'service.log'}")
-    return data
+        time.sleep(0.2)
+
+
+def _foreign_monitor(store: Store) -> int:
+    """pid монитора сессии старой версии, который держит проект, или 0."""
+    pid = FileLock(store.runs / "monitor.lock").owner()
+    svc = info()
+    return pid if pid and pid != os.getpid() and (not svc or pid != int(svc["pid"])) else 0
+
+
+class _Panel:
+    def __init__(self, wake: threading.Event):
+        self.wake = wake
+        self.srv = None
+        self.port = int(global_config().get("ui_port") or 0)
+        self.error = ""
+        self.tried = 0.0
+
+    def ensure(self) -> None:
+        if self.srv or not self.port or time.time() - self.tried < PANEL_RETRY_SECONDS:
+            return
+        self.tried = time.time()
+        from aiflow_ui import start_server
+        try:
+            self.srv, _ = start_server(lambda: [Store(Path(r)) for r in projects()], self.port, self.wake, service=True)
+            self.error = ""
+        except OSError as e:
+            self.error = f"порт {self.port} занят ({e.strerror or e}); повтор через {PANEL_RETRY_SECONDS} с"
+
+    def shutdown(self) -> None:
+        if self.srv:
+            self.srv.shutdown()
+
+
+def _write_info(panel: _Panel) -> None:
+    write_json(home() / "service.json", {
+        "pid": os.getpid(), "version": aiflow.VERSION, "script": str(Path(aiflow.__file__).resolve()),
+        "port": panel.port if panel.srv else 0, "panel_error": panel.error, "started_at": iso()})
+
+
+def _tick_project(root: str, held: dict, next_at: dict, errors: dict, warned: set, forced: bool, many: bool) -> None:
+    k = project_key(root)
+    store = Store(Path(root))
+    if not store.initialized:
+        return
+    if k not in held:
+        lk = FileLock(store.runs / "monitor.lock", stale_minutes=0)
+        if not lk.acquire():
+            other = _foreign_monitor(store)
+            if other and k not in warned:
+                warned.add(k)
+                store.event("error", None, f"проект ведёт монитор сессии старой версии (pid {other}), "
+                                           "служба его не трогает: aiflow stop в каталоге проекта или перезапустите ту сессию")
+            return
+        held[k] = lk
+        warned.discard(k)
+    if not forced and time.time() < next_at.get(k, 0):
+        return
+    cfg = aiflow.DEFAULT_CONFIG
+    try:
+        cfg = store.config()
+        events = aiflow.run_tick_now(store, wait=0)
+        errors.pop(k, None)
+        aiflow.desktop_notify(cfg, events, project=store.root.name if many else None)
+    except aiflow.TickBusy:
+        pass  # проход уже идёт (aiflow tick вручную) — в следующий раз
+    except Exception as e:  # ошибка проекта не должна останавливать службу и другие проекты
+        text = f"сбой тика: {e}" if isinstance(e, AiflowError) else f"сбой тика: {e!r}"
+        if errors.get(k) != text:  # одну и ту же ошибку пишем один раз, пока не сменится
+            errors[k] = text
+            try:
+                store.event("error", None, text)
+                aiflow.desktop_notify(cfg, [{"kind": "error", "text": text}], project=store.root.name)
+            except Exception:
+                pass
+    try:
+        interval = max(10, int(cfg.get("tick_seconds", 45)))
+    except (TypeError, ValueError):
+        interval = 45
+    next_at[k] = time.time() + interval
 
 
 def serve() -> int:
     """Цикл службы: проходы по всем проектам реестра и общая панель."""
     home().mkdir(parents=True, exist_ok=True)
-    lock = FileLock(home() / "service.lock", stale_minutes=0)
-    if not lock.acquire():
+    lock = _lock()
+    if not lock.acquire(extra={"version": aiflow.VERSION}):
         return 0  # служба уже работает
     import signal
 
@@ -181,61 +294,37 @@ def serve() -> int:
         if hasattr(signal, sig):
             signal.signal(getattr(signal, sig), _stop)
     wake = threading.Event()
+    panel = _Panel(wake)
     held: dict[str, FileLock] = {}
     next_at: dict[str, float] = {}
-    srv = None
-    port = int(global_config().get("ui_port") or 0)
+    errors: dict[str, str] = {}
+    warned: set[str] = set()
     try:
-        if port:
-            from aiflow_ui import start_server
-            try:
-                srv, _ = start_server(lambda: [Store(Path(r)) for r in projects()], port, wake, service=True)
-            except OSError as e:
-                print(f"{iso()} панель не поднялась на порту {port}: {e}", flush=True)
-                port = 0
-        write_json(home() / "service.json", {"pid": os.getpid(), "version": aiflow.VERSION, "port": port,
-                                            "script": str(Path(aiflow.__file__).resolve()), "started_at": iso()})
-        print(f"{iso()} служба aiflow {aiflow.VERSION} запущена, панель: {panel_url() or 'нет'}", flush=True)
+        panel.ensure()
+        _write_info(panel)
+        print(f"{iso()} служба aiflow {aiflow.VERSION} запущена, панель: {panel_url(info()) or panel.error or 'выключена'}",
+              flush=True)
         while True:
+            had_panel = bool(panel.srv)
+            panel.ensure()
+            if bool(panel.srv) != had_panel:
+                _write_info(panel)
             forced = wake.is_set()
             wake.clear()
             roots = projects()
             keys = {project_key(r) for r in roots}
             for k in [k for k in held if k not in keys]:
                 held.pop(k).release()
-            many = len(roots) > 1
             for root in roots:
-                k = project_key(root)
-                store = Store(Path(root))
-                if not store.initialized:
-                    continue
-                if k not in held:
-                    lk = FileLock(store.runs / "monitor.lock", stale_minutes=0)
-                    if not lk.acquire():
-                        continue  # проект ведёт монитор сессии старой версии
-                    held[k] = lk
-                if not forced and time.time() < next_at.get(k, 0):
-                    continue
-                events: list[dict] = []
-                try:
-                    events = aiflow.run_tick_now(store)
-                except AiflowError:
-                    pass  # проход уже идёт (aiflow tick вручную) — в следующий раз
-                except Exception as e:  # служба не должна падать из-за одного проекта
-                    store.event("error", None, f"сбой тика: {e!r}")
-                cfg = store.config()
-                aiflow.desktop_notify(cfg, events, project=store.root.name if many else None)
-                next_at[k] = time.time() + max(10, int(cfg.get("tick_seconds", 45)))
+                _tick_project(root, held, next_at, errors, warned, forced, len(roots) > 1)
             wake.wait(timeout=5)
     except KeyboardInterrupt:
         return 0
     finally:
         for lk in held.values():
             lk.release()
-        if srv:
-            srv.shutdown()
-        data = read_json(home() / "service.json", {}) or {}
-        if int(data.get("pid") or 0) == os.getpid():
+        panel.shutdown()
+        if int((read_json(home() / "service.json", {}) or {}).get("pid") or 0) == os.getpid():
             (home() / "service.json").unlink(missing_ok=True)
         lock.release()
 
@@ -244,32 +333,49 @@ def serve() -> int:
 
 def relay_events(store: Store) -> int:
     """Монитор сессии: поднять службу и пересказывать события своего проекта в stdout.
-    Пока служба жива, сам ничего не решает; если она упала — поднимает снова."""
+    Сам ничего не решает. Если служба упала — поднимает снова; если её остановил
+    пользователь (aiflow down) — сообщает и выходит."""
     events = store.runs / "events.jsonl"
     pos = events.stat().st_size if events.is_file() else 0
     owner = int(os.environ.get("CLAUDE_PID") or 0)
     register(store.root)
+    other = _foreign_monitor(store)
+    if other:  # монитор сессии старой версии держит проект — службе он больше не нужен
+        aiflow._kill(other)
     try:
         data = ensure()
     except AiflowError as e:
         print(f"[aiflow] {e}", flush=True)
         return 1
-    cfg = store.config()
-    if aiflow.notify_level(cfg) != "none":
+    quiet = aiflow.notify_level(store.config()) == "none"
+    if not quiet:
         url = panel_url(data)
-        print(f"[aiflow] монитор запущен{'; панель: ' + url if url else ''}", flush=True)
+        note = f"; панель: {url}" if url else (f"; панель недоступна: {data['panel_error']}" if data.get("panel_error") else "")
+        print(f"[aiflow] монитор запущен{note}", flush=True)
     while True:
         time.sleep(2)
         if owner and not pid_alive(owner):
             return 0
         if not info():
-            try:
-                ensure()
-            except AiflowError as e:
+            if stopped_by_user():
                 if aiflow.notify_level(store.config()) != "none":
-                    print(f"[aiflow] монитор остановился: {e}", flush=True)
-                return 1
-        if not events.is_file() or events.stat().st_size <= pos:
+                    print("[aiflow] служба остановлена командой aiflow down; продолжить — aiflow up или /aiflow:resume",
+                          flush=True)
+                return 0
+            time.sleep(3)  # служба могла как раз перезапускаться с новой версией
+            if not info():
+                try:
+                    ensure()
+                except AiflowError as e:
+                    if aiflow.notify_level(store.config()) != "none":
+                        print(f"[aiflow] монитор остановился: {e}", flush=True)
+                    return 1
+        if not events.is_file():
+            continue
+        size = events.stat().st_size
+        if size < pos:
+            pos = 0  # файл событий пересоздан
+        if size <= pos:
             continue
         with events.open("rb") as f:
             f.seek(pos)
@@ -328,9 +434,13 @@ def open_window(url: str) -> str:
     return "браузер"
 
 
-LAUNCHER = '''"""Автозапуск службы aiflow: берёт самую новую установленную версию плагина."""
-import os, re, subprocess, sys
+LAUNCHER = '''"""Автозапуск службы aiflow: самая новая версия плагина из того же маркетплейса."""
+import os, subprocess, sys
 from pathlib import Path
+
+CACHE = Path({cache!r})
+FALLBACK = {fallback!r}
+
 
 def ver(p):
     try:
@@ -338,20 +448,37 @@ def ver(p):
     except ValueError:
         return (0,)
 
-found = sorted(Path.home().glob(".claude/plugins/cache/*/aiflow/*/scripts/aiflow.py"), key=ver)
-script = str(found[-1]) if found else {fallback!r}
+
+found = sorted(CACHE.glob("*/scripts/aiflow.py"), key=ver)
+script = str(found[-1]) if found else FALLBACK
+if not Path(script).is_file():
+    sys.exit(0)  # плагин удалён — автозапуск ничего не делает
+home = Path(os.environ.get("AIFLOW_HOME") or Path.home() / ".aiflow")
+home.mkdir(parents=True, exist_ok=True)
 os.environ["PYTHONUTF8"] = "1"
-sys.exit(subprocess.call([sys.executable, "-X", "utf8", script, "service"]))
+os.environ["PATH"] = {path!r} + os.pathsep + os.environ.get("PATH", "")
+with open(home / "service.log", "ab") as log:
+    sys.exit(subprocess.call([sys.executable, "-X", "utf8", script, "service"], stdout=log, stderr=log))
 '''
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 
-def autostart(enable: bool) -> str:
+def _write_launcher() -> Path:
+    script = Path(aiflow.__file__).resolve()
+    # .../plugins/cache/<маркетплейс>/aiflow/<версия>/scripts/aiflow.py → .../cache/<маркетплейс>/aiflow
+    cache = script.parent.parent.parent
+    env = aiflow.claude_env()
+    raw = next((v for k, v in env.items() if k.upper() == "PATH"), "")
+    path = os.pathsep.join(x for x in raw.split(os.pathsep) if x)
     launcher = home() / "launcher.py"
-    if enable:
-        home().mkdir(parents=True, exist_ok=True)
-        launcher.write_text(LAUNCHER.format(fallback=str(Path(aiflow.__file__).resolve())), encoding="utf-8")
+    home().mkdir(parents=True, exist_ok=True)
+    launcher.write_text(LAUNCHER.format(cache=str(cache), fallback=str(script), path=path), encoding="utf-8")
+    return launcher
+
+
+def autostart(enable: bool) -> str:
+    launcher = _write_launcher() if enable else home() / "launcher.py"
     if os.name == "nt":
         import winreg
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
@@ -371,7 +498,7 @@ def autostart(enable: bool) -> str:
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>Label</key><string>dev.aiflow.service</string>
-<key>ProgramArguments</key><array><string>{_python()}</string><string>{launcher}</string></array>
+<key>ProgramArguments</key><array><string>{xml_escape(_python())}</string><string>{xml_escape(str(launcher))}</string></array>
 <key>RunAtLoad</key><true/>
 </dict></plist>
 """, encoding="utf-8")
@@ -380,8 +507,10 @@ def autostart(enable: bool) -> str:
         return str(plist)
     desktop = Path.home() / ".config/autostart/aiflow.desktop"
     if enable:
+        def q(x: str) -> str:  # кавычки по спецификации Desktop Entry
+            return '"' + x.replace("\\", "\\\\").replace('"', '\\"').replace("`", "\\`").replace("$", "\\$") + '"'
         desktop.parent.mkdir(parents=True, exist_ok=True)
-        desktop.write_text(f"[Desktop Entry]\nType=Application\nName=aiflow\nExec={_python()} {launcher}\n"
+        desktop.write_text(f"[Desktop Entry]\nType=Application\nName=aiflow\nExec={q(_python())} {q(str(launcher))}\n"
                            "X-GNOME-Autostart-enabled=true\nNoDisplay=true\n", encoding="utf-8")
     else:
         desktop.unlink(missing_ok=True)

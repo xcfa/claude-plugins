@@ -221,7 +221,7 @@ stateDiagram-v2
 | `aiflow tick` | Один проход вручную |
 | `aiflow enqueue`, `report`, `review`, `reply` | Команды для агентов |
 
-**Панель** поднимается вместе с монитором на `http://127.0.0.1:8765/`: вверху то, что ждёт вас (кнопки «Одобрить план», «Повторить», «Открыть сессию»), ниже доска задач по стадиям и лента событий, в разделе «Настройки» — выбор модели ревьюера opencode (пишется в `reviewer_model` в `runs/config.json`). Слушает только loopback, действия защищены токеном страницы. В Claude Desktop её можно открыть в Browser pane вкладки Code через конфигурацию `aiflow` в `.claude/launch.json` (её добавляет `aiflow init`) и вынести в отдельное окно. Добавить пункт в боковое меню Desktop плагин не может. Для строки состояния есть `aiflow statusline`.
+**Панель** держит служба на `http://127.0.0.1:8765/` (порт — `ui_port` в `~/.aiflow/config.json`, `0` — без панели), одна на все проекты: вверху то, что ждёт вас во всех проектах (кнопки «Одобрить план», «Повторить», «Открыть сессию»), ниже проекты со своей паузой и доской задач по стадиям, общая лента событий, в разделе «Настройки» — выбор модели ревьюера opencode (пишется в `reviewer_model` в `runs/config.json`). Слушает только loopback, действия защищены токеном страницы. В Claude Desktop её можно открыть в Browser pane вкладки Code через конфигурацию `aiflow` в `.claude/launch.json` (её добавляет `aiflow init`) и вынести в отдельное окно. Добавить пункт в боковое меню Desktop плагин не может. Для строки состояния есть `aiflow statusline`.
 
 **Как остановить:** пауза очереди — кнопка или `aiflow pause`; служба и панель — `aiflow down`; сами фоновые сессии — `Ctrl+X` в `claude agents` или `claude stop <id>`.
 
@@ -247,7 +247,7 @@ claude plugin install aiflow@aiflow-local
 7. Один раз открыть `claude` в репозитории интерактивно и принять доверие к папке.
 8. `! aiflow doctor`.
 
-**Основные настройки `runs/config.json`:** `concurrency` (2), `tick_seconds` (45), `base_branch`, `ui_port` (8765, `0` — без панели), `permission_mode` (`acceptEdits`), `planner_model` и `planner_effort` по сложности, `worker_model` и `worker_effort` (строкой или по сложности), `worker_opus_effort` (`medium`), `reviewer_model`, `max_rounds` (5), `auto_resume` (1), `notify` (`important` — оркестратору только события, которые ждут вас; `all`; `none`), `desktop_notify` (`true` — те же важные события системными уведомлениями), `max_diff_chars`, `ci_timeout_minutes`, `rate_limit_pause_minutes`, `watch_integration` (следить за CI базовой ветки после мержа), `protected_paths`.
+**Основные настройки `runs/config.json`:** `concurrency` (2), `tick_seconds` (45), `base_branch`, `permission_mode` (`acceptEdits`), `planner_model` и `planner_effort` по сложности, `worker_model` и `worker_effort` (строкой или по сложности), `worker_opus_effort` (`medium`), `reviewer_model`, `max_rounds` (5), `auto_resume` (1), `notify` (`important` — оркестратору только события, которые ждут вас; `all`; `none`), `desktop_notify` (`true` — те же важные события системными уведомлениями), `max_diff_chars`, `ci_timeout_minutes`, `rate_limit_pause_minutes`, `watch_integration` (следить за CI базовой ветки после мержа), `protected_paths`.
 
 ## 12. Ваша работа день за днём
 
@@ -286,7 +286,7 @@ aiflow не читает и не передаёт токены подписки 
 | Agent view в research preview | Флаги CLI могут меняться; все вызовы `claude` собраны в классе `Claude` в `scripts/aiflow.py` |
 | Мониторы плагинов работают только в интерактивных сессиях | Фоновая сессия интерактивна, но это первое, что нужно проверить |
 | Фоновые сессии локальные | Выключение машины их останавливает: после `/aiflow:resume` монитор возобновляет остановленные и пропавшие сессии (`auto_resume`, по умолчанию 1 раз подряд) |
-| Монитор живёт, пока жива сессия оркестратора | Сессия закреплена; всё состояние в `runs/`, новый монитор продолжает с того же места |
+| Служба — обычный процесс пользователя | Выключение машины её останавливает: с `aiflow up --autostart` она поднимается при входе, без него — `aiflow up` или `/aiflow:resume`; всё состояние в `runs/`, служба продолжает с того же места |
 | Каждое событие монитора стоит токенов оркестратору | Печатается только то, что требует реакции |
 | Значения `userConfig` плагина не доходят до команд агентов | Настройки — в `runs/config.json`, токен бота (режим `bot`) — в файле или переменной окружения |
 | Deny-правила обходятся при желании | В режиме `self` агенты работают с вашим `gh`, и смержить в обход ревью им мешают только deny-правила (`gh pr merge`, `gh api`) и инструкции. Жёсткая граница — режим `bot` с обязательным одобрением в защите ветки |
