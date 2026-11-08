@@ -64,6 +64,7 @@ stateDiagram-v2
     in_progress --> needs_human: сессия не возобновилась
     in_review --> needs_human: лимит раундов, ошибка
     needs_human --> in_progress: retry, та же сессия
+    needs_human --> in_progress: человек ответил сессии, она продолжила
     needs_human --> plan_review: retry, новая сессия
     new --> cancelled: aiflow cancel
     plan_review --> cancelled: PR закрыт

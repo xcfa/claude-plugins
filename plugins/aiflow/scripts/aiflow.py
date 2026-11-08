@@ -649,6 +649,8 @@ def ci_fix_prompt(t: dict, failed: list[str]) -> str:
     )
 
 
+STAGE_ROLE = {"planning": "planner", "in_progress": "worker", "in_review": "worker"}
+
 RESUME_FINISH = {
     "planning": "Доведи план до конца и отчитайся aiflow report {id} --role planner --status plan_ready, как в твоих инструкциях.",
     "in_progress": "Доведи реализацию до конца и отчитайся aiflow report {id} --role worker --status ready_for_review, как в твоих инструкциях.",
@@ -772,6 +774,11 @@ class Dispatcher:
     def to_human(self, t: dict, reason: str) -> None:
         self.release_lock(t)
         t["human_reason"] = reason
+        role = STAGE_ROLE.get(t.get("state", ""))
+        # Запоминаем, в каком состоянии была сессия: если человек ответит ей сам и она
+        # снова заработает, задача вернётся в свою стадию (см. adv_needs_human).
+        t["human_watch"] = {"role": role, "seen": self.sstate(self.cur(t, role)) if role else None,
+                            "report": t.get("report_seen")}
         self.set_state(t, "needs_human", reason)
         if t.get("pr"):
             self.gh.add_label(t["pr"], self.cfg["labels"]["needs_human"])
@@ -1047,6 +1054,8 @@ class Dispatcher:
             self.emit(t, "needs_input", f"{t['id']}: worker ждёт вас в своей сессии ({w})", key=f"blocked:{e['id']}:{w}")
 
     def adv_needs_human(self, t: dict) -> None:
+        if self.continued_by_human(t):
+            return
         if not t.get("pr"):
             return
         pr = self.gh.pr(t["pr"], "state,labels")
@@ -1069,10 +1078,41 @@ class Dispatcher:
         self.release_lock(t)
         t["cleaned"] = True
 
+    def continued_by_human(self, t: dict) -> bool:
+        """Человек ответил сессии напрямую (дал доступ, «всё норм»), и она продолжила работу:
+        вернуть задачу в прежнюю стадию без «Повторить»."""
+        w = t.get("human_watch") or {}
+        role = w.get("role")
+        prev = next((h.get("from") for h in reversed(t.get("history") or []) if h.get("to") == "needs_human"), None)
+        if not role or STAGE_ROLE.get(prev or "") != role:
+            return False
+        st = self.sstate(self.cur(t, role))
+        rep = self.store.report(t["id"]) or {}
+        new_report = rep.get("role") == role and rep.get("rid") not in (None, w.get("report"))
+        woke = st == "working" and w.get("seen") != "working"
+        if st != w.get("seen"):
+            w["seen"] = st
+        if not (woke or new_report):
+            return False
+        if prev == "in_review":
+            if self.q.get("review_lock") not in (None, t["id"]):
+                return False  # ревью другого PR идёт — вернём, когда освободится
+            self.q["review_lock"] = t["id"]
+        t["human_reason"] = None
+        t.pop("human_watch", None)
+        t.pop("auto_resumed", None)
+        if t.get("pr"):
+            self.gh.remove_label(t["pr"], self.cfg["labels"]["needs_human"])
+        self.set_state(t, prev, "сессия продолжила работу после ответа человека")
+        self.emit(t, "continued", f"{t['id']}: {role} продолжил работу — задача снова в стадии «{STAGE_LABEL.get(prev, prev)}»",
+                  key=f"continued:{iso()}")
+        return True
+
     def do_retry(self, t: dict) -> None:
         t["retry_requested"] = False
         reason = t.get("human_reason") or "нужен человек"
         t["human_reason"] = None
+        t.pop("human_watch", None)
         if t.get("pr"):
             self.gh.remove_label(t["pr"], self.cfg["labels"]["needs_human"])
             self.gh.remove_label(t["pr"], self.cfg["labels"]["retry"])
