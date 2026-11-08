@@ -189,6 +189,10 @@ def start_server(store: aiflow.Store, port: int, wake: threading.Event):
                         return self._json(400, {"error": "у задачи ещё нет сессии"})
                     where = open_terminal(store.root, sid)
                     return self._json(200, {"ok": True, "where": where, "command": f"claude attach {sid}"})
+                elif action == "allow_paths" and tid:
+                    value = body.get("value")
+                    paths = value if isinstance(value, list) else re.split(r"[,\n]+", str(value or ""))
+                    aiflow.allow_paths(store, tid, [p for p in paths if str(p).strip()])
                 elif action == "set_reviewer_model":
                     value = body.get("value")
                     value = value.strip() if isinstance(value, str) else None

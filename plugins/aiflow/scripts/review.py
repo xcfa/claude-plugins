@@ -411,7 +411,7 @@ def main(argv: list[str] | None = None) -> int:
         if viol:
             cs = [{"severity": "blocking", "file": f, "line": None,
                    "text": "Изменение защищённого пути без явного разрешения в задаче. Откатите или попросите человека "
-                           "добавить путь в allowed_protected_paths."} for f in viol]
+                           f"разрешить путь: aiflow allow-path {(task or {}).get('id') or '<id>'} '<glob>' (кнопка в панели)."} for f in viol]
             posted = publish(r, args.pr, head, "changes", rnd, max_rounds, "Нарушены защищённые пути.", cs, {}, tmp,
                              identity)
             finish("changes_requested", round=rnd, max_rounds=max_rounds, summary="защищённые пути", comments=posted)

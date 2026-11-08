@@ -137,6 +137,7 @@ claude plugin install aiflow@aiflow-local
 | `aiflow status [--json]` | Состояние очереди |
 | `aiflow approve <id>` | Одобрить план |
 | `aiflow retry <id>` | Повторить задачу в `needs_human` |
+| `aiflow allow-path <id> <glob>…` | Разрешить задаче защищённые пути (только человек; задача в «нужен человек» продолжит работу) |
 | `aiflow cancel <id>…` | Снять ещё не начатые задачи (начатые — закрытием PR) |
 | `aiflow pause [причина]` / `resume` | Пауза очереди |
 | `aiflow ui [--open] [--detach] [--stop]` | Панель |

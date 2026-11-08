@@ -53,4 +53,4 @@ color: green
 Мержить и одобрять PR, ставить или снимать метки, менять план в описании PR,
 менять `.github/`, `.claude/`, `.opencode/`, `runs/`, `design/`, `components/ui/`,
 конфиги сборки, тестов и линтера, lock-файлы, миграции — если их нет в плане
-и в `allowed_protected_paths` задачи. Обходить лимит раундов.
+и в `allowed_protected_paths` задачи (разрешает только человек: `aiflow allow-path`). Обходить лимит раундов.

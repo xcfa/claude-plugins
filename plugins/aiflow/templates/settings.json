@@ -32,6 +32,7 @@
       "Bash(gh pr review:*)",
       "Bash(gh api:*)",
       "Bash(aiflow approve:*)",
+      "Bash(aiflow allow-path:*)",
       "Read(~/.config/ai-review/**)"
     ]
   }

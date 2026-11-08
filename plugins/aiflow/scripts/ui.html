@@ -207,13 +207,35 @@ function toast(text) {
   clearTimeout(toast.h); toast.h = setTimeout(() => t.classList.remove("on"), 2200);
 }
 
-async function act(action, id) {
+function suggestPaths(text) {
+  const found = [];
+  for (const m of String(text || "").matchAll(/[`"']([^`"'\s]+\/[^`"'\s]*)[`"']/g)) {
+    let p = m[1].replace(/^\.\//, "");
+    if (p.endsWith("/")) p += "**";
+    if (!found.includes(p)) found.push(p);
+  }
+  return found;
+}
+
+async function allowPaths(id) {
+  const t = last && last.tasks.find(x => x.id === id);
+  const value = prompt(
+    `Разрешить задаче ${id} менять защищённые пути.
+Glob относительно корня репозитория, через запятую. После этого задача продолжит работу.` +
+    (t && t.allowed_paths.length ? `
+Уже разрешено: ${t.allowed_paths.join(", ")}` : ""),
+    suggestPaths(t && t.needs).join(", "));
+  if (value === null || !value.trim()) return;
+  await act("allow_paths", id, value);
+}
+
+async function act(action, id, value) {
   try {
-    const r = await fetch("/api/action", { method: "POST", headers: { "Content-Type": "application/json", "X-Aiflow-Token": TOKEN }, body: JSON.stringify({ action, id }) });
+    const r = await fetch("/api/action", { method: "POST", headers: { "Content-Type": "application/json", "X-Aiflow-Token": TOKEN }, body: JSON.stringify({ action, id, value }) });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || r.statusText);
     if (action === "open_session") return toast(`Сессия открыта в новом окне (${d.where})`);
-    toast({ approve: "План одобрен", retry: "Повтор поставлен", pause: "Очередь на паузе", resume: "Очередь продолжает" }[action] || "Готово");
+    toast({ allow_paths: "Пути разрешены, задача продолжит работу", approve: "План одобрен", retry: "Повтор поставлен", pause: "Очередь на паузе", resume: "Очередь продолжает" }[action] || "Готово");
     setTimeout(load, 600);
   } catch (e) {
     const t = action === "open_session" && last && last.tasks.find(x => x.id === id);
@@ -287,6 +309,7 @@ function render(s) {
     const acts = [];
     if (t.state === "plan_review") acts.push(`<button class="primary" data-act="approve" data-id="${esc(t.id)}">Одобрить план</button>`);
     if (t.state === "needs_human") acts.push(`<button class="primary" data-act="retry" data-id="${esc(t.id)}">Повторить</button>`);
+    if (t.state === "needs_human" && /защищ|protected/i.test(t.needs || "")) acts.push(`<button data-allow="${esc(t.id)}">Разрешить пути…</button>`);
     if (t.pr_url) acts.push(`<a href="${esc(t.pr_url)}" target="_blank" rel="noopener">PR #${t.pr}</a>`);
     if (t.session && t.session.id) acts.push(`<button data-act="open_session" data-id="${esc(t.id)}">Открыть сессию</button>`);
     return `<div class="wait-item ${t.state === "needs_human" ? "fail" : ""}">
@@ -337,6 +360,8 @@ function render(s) {
 
 document.addEventListener("click", (e) => {
   if (e.target.closest("[data-toggle-cancelled]")) { showCancelled = !showCancelled; return last && render(last); }
+  const al = e.target.closest("[data-allow]");
+  if (al) return allowPaths(al.dataset.allow);
   const b = e.target.closest("[data-act],[data-copy]");
   if (!b) return;
   if (b.dataset.copy) return copy(b.dataset.copy);

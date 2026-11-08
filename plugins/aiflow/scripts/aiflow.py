@@ -216,7 +216,8 @@ def glob_to_re(pattern: str) -> re.Pattern:
         else:
             out += re.escape(c)
         i += 1
-    return re.compile(r"^" + out + r"$")
+    # без учёта регистра: на Windows и macOS Migrations/ и migrations/ — одна папка, защита fail-closed
+    return re.compile(r"^" + out + r"$", re.I)
 
 
 def path_matches(path: str, patterns: list[str]) -> bool:
@@ -1111,6 +1112,9 @@ class Dispatcher:
     def do_retry(self, t: dict) -> None:
         t["retry_requested"] = False
         reason = t.get("human_reason") or "нужен человек"
+        note = t.pop("retry_note", None)
+        if note:
+            reason += f"»; {note}; «продолжай"
         t["human_reason"] = None
         t.pop("human_watch", None)
         if t.get("pr"):
@@ -1288,6 +1292,7 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
             "complexity": t.get("complexity"), "pr": pr,
             "pr_url": f"{repo_url}/pull/{pr}" if pr and repo_url else None,
             "rounds": review.get("round"), "max_rounds": cfg["max_rounds"],
+            "allowed_paths": t.get("allowed_protected_paths") or [],
             "tokens": task_tokens(t), "usage": task_usage(t), "session": cur, "needs": needs,
             "depends_on": t.get("depends_on") or [], "state_at": t.get("state_at"),
             "launching": bool(t.get("launching")), "review_lock": q.get("review_lock") == t["id"],
@@ -1637,6 +1642,57 @@ def cmd_cancel(args, root: Path) -> int:
     return 0
 
 
+def allow_paths(store: Store, tid: str, paths: list[str]) -> list[str]:
+    """Разрешить задаче менять защищённые пути (только человек). Если задача ждёт человека — повтор."""
+    clean = []
+    for raw in paths:
+        g = str(raw).strip().strip("`'\"").replace("\\", "/")
+        while g.startswith("./"):
+            g = g[2:]
+        if not g:
+            continue
+        if len(g) > 200 or g.startswith("/") or re.match(r"^[A-Za-z]:", g) or ".." in g.split("/"):
+            raise AiflowError(f"некорректный путь: {raw} (нужен glob относительно корня репозитория)")
+        if g in ("**", "*", "**/*"):
+            raise AiflowError("разрешать все пути разом нельзя — укажите конкретную папку или файлы")
+        clean.append(g)
+    if not clean or len(clean) > 20:
+        raise AiflowError("укажите от 1 до 20 путей")
+    lock = FileLock(store.runs / "tick.lock", stale_minutes=15)
+    if not lock.acquire(wait_seconds=120):
+        raise AiflowError("очередь занята дольше 2 минут, повторите позже")
+    try:
+        t = store.task(tid)
+        if not t:
+            raise AiflowError(f"нет задачи {tid}")
+        if t.get("state") in TERMINAL:
+            raise AiflowError(f"задача {tid} уже завершена")
+        allowed = t.setdefault("allowed_protected_paths", [])
+        added = [g for g in clean if g not in allowed]
+        allowed.extend(added)
+        t.setdefault("history", []).append({"at": iso(), "from": t.get("state"), "to": t.get("state"),
+                                            "note": "разрешены защищённые пути: " + ", ".join(clean)})
+        if t.get("state") == "needs_human":
+            t["retry_note"] = "человек разрешил защищённые пути: " + ", ".join(allowed)
+        store.save_task(t)
+        store.event("config", tid, f"{tid}: разрешены защищённые пути — " + ", ".join(clean))
+        needs_retry = t.get("state") == "needs_human"
+    finally:
+        lock.release()
+    if needs_retry:
+        queue_or_apply(store, {"cmd": "retry", "id": tid})
+    return added
+
+
+def cmd_allow_path(args, root: Path) -> int:
+    store = Store(root)
+    allow_paths(store, args.id, args.paths)
+    t = store.task(args.id) or {}
+    print(f"{args.id}: разрешены {', '.join(t.get('allowed_protected_paths') or [])}"
+          + (" — задача продолжит работу." if t.get("state") != "needs_human" or t.get("retry_requested") else ""))
+    return 0
+
+
 def cmd_approve(args, root: Path) -> int:
     store = Store(root)
     t = store.task(args.id)
@@ -1876,6 +1932,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("resume")
     rt = sub.add_parser("retry")
     rt.add_argument("id")
+    al = sub.add_parser("allow-path", help="разрешить задаче менять защищённые пути (только человек)")
+    al.add_argument("id")
+    al.add_argument("paths", nargs="+", help="glob относительно корня, например 'src/*/Migrations/**'")
     cn = sub.add_parser("cancel", help="снять задачи, которые ещё не начались")
     cn.add_argument("ids", nargs="+")
     apv = sub.add_parser("approve", help="одобрить план (метка plan-approved)")
@@ -1907,7 +1966,7 @@ def main(argv: list[str] | None = None) -> int:
         handlers = {
             "init": cmd_init, "enqueue": cmd_enqueue, "report": cmd_report, "status": cmd_status,
             "tick": cmd_tick, "run": cmd_run, "pause": cmd_pause, "resume": cmd_resume,
-            "retry": cmd_retry, "cancel": cmd_cancel, "approve": cmd_approve, "reply": cmd_reply, "review": cmd_review,
+            "retry": cmd_retry, "cancel": cmd_cancel, "allow-path": cmd_allow_path, "approve": cmd_approve, "reply": cmd_reply, "review": cmd_review,
             "ui": cmd_ui, "stop": cmd_stop,
         }
         return handlers[args.cmd](args, root)
