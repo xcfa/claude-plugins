@@ -29,7 +29,7 @@ REVIEW_MARKER = "<!-- ai-review -->"
 REPLY_MARKER = "<!-- ai-review-reply -->"
 HUMAN_MARKER = "<!-- human -->"
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
-PARSE_ATTEMPTS = 2
+PARSE_ATTEMPTS = 3
 OPENCODE_TIMEOUT = 15 * 60
 TERMINAL = {"approved", "limit_reached", "already_closed", "error"}
 
@@ -251,14 +251,21 @@ def call_reviewer(r: Runner, pr: int, rnd: int, max_rounds: int, model: str, ctx
     if model:
         cmd += ["--model", model]
     cmd += ["--file", str(ctx_path)]
-    last = ""
+    last = err = ""
     for _ in range(PARSE_ATTEMPTS):
         proc = r.run(cmd, env=env, check=False, timeout=OPENCODE_TIMEOUT)
         last = ANSI_RE.sub("", proc.stdout or "")
+        err = ANSI_RE.sub("", proc.stderr or "").strip()
         data = extract_json(last)
         if data is not None and "comments" in data:
             return data
-    raise RuntimeError("ревьюер не вернул валидный JSON. Конец вывода:\n" + last[-2000:])
+        if proc.returncode != 0 and not last.strip() and "--pure" not in cmd:
+            # opencode упал до ответа модели. Бывает, что в каталоге проекта ломается один из
+            # встроенных плагинов opencode; ревьюеру они не нужны — повторяем без них.
+            cmd = cmd[:2] + ["--pure"] + cmd[2:]
+    tail = last[-2000:] if last.strip() else "(пусто)"
+    raise RuntimeError("ревьюер не вернул валидный JSON. Конец вывода:\n" + tail
+                       + (f"\nstderr opencode: {err[-800:]}" if err else ""))
 
 
 def normalize(data: dict, truncated: bool) -> tuple[str, list[dict], str]:
