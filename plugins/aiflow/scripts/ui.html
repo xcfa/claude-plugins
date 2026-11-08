@@ -44,7 +44,15 @@ header .sub b { font-weight: 600; color: var(--ink); }
 .queue .state.paused { color: var(--wait); font-weight: 600; }
 
 #waiting { margin-bottom: 32px; }
-#waiting h2, #board h2, #usage h2, #events h2 { font-size: 15px; font-weight: 650; margin: 0 0 10px; }
+#waiting h2, #usage h2, #events h2 { font-size: 15px; font-weight: 650; margin: 0 0 10px; }
+.project { margin-bottom: 40px; }
+.phead { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px 24px; flex-wrap: wrap; margin-bottom: 12px; }
+.phead h2 { font-size: 19px; font-weight: 650; margin: 0; letter-spacing: -0.005em; }
+.phead .sub { color: var(--muted); font-size: 13.5px; margin-top: 2px; }
+.phead .sub b { font-weight: 600; color: var(--ink); }
+.phead .sub.path { font-size: 12.5px; }
+.phead .queue button.link { margin-top: 0; }
+.proj { display: inline-block; font-size: 12px; font-weight: 600; color: var(--muted); border: 1px solid var(--rule); border-radius: 4px; padding: 0 5px; margin-right: 2px; vertical-align: 1px; }
 .wait-item {
   display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 20px; align-items: center;
   background: var(--wait-bg); border-left: 4px solid var(--wait); padding: 12px 16px; margin-bottom: 8px; border-radius: 0 6px 6px 0;
@@ -54,7 +62,7 @@ header .sub b { font-weight: 600; color: var(--ink); }
 .wait-item .acts { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 .wait-item.fail { border-left-color: var(--fail); }
 
-#board, #usage { margin-bottom: 36px; }
+#usage { margin-bottom: 36px; }
 .grid { display: grid; grid-template-columns: minmax(200px, 280px) repeat(7, minmax(64px, 1fr)) minmax(150px, 190px); }
 .grid > div { min-width: 0; }
 .head { color: var(--muted); font-size: 12.5px; padding: 0 4px 8px; text-align: center; border-bottom: 1px solid var(--rule); }
@@ -114,6 +122,9 @@ header .sub b { font-weight: 600; color: var(--ink); }
 #settings summary:focus-visible { outline: 2px solid var(--move); outline-offset: 2px; }
 .setting { margin-top: 14px; }
 .setting label { display: block; font-weight: 600; margin-bottom: 6px; }
+.setting label.inline { display: inline; margin: 0; }
+.setting #rmprojrow { margin-bottom: 12px; }
+.setting select { font: inherit; font-size: 14px; color: var(--ink); background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 4px 8px; }
 .setting .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .setting input {
   font: inherit; font-size: 14px; color: var(--ink); background: var(--surface); border: 1px solid var(--rule);
@@ -144,12 +155,8 @@ header .sub b { font-weight: 600; color: var(--ink); }
 <body>
 <header>
   <div>
-    <h1 id="repo">aiflow</h1>
+    <h1 id="title">aiflow</h1>
     <div class="sub" id="sub">загрузка…</div>
-  </div>
-  <div class="queue">
-    <span class="state" id="qstate"></span>
-    <button id="qbtn" hidden></button>
   </div>
 </header>
 
@@ -158,11 +165,7 @@ header .sub b { font-weight: 600; color: var(--ink); }
   <div id="waitlist"></div>
 </section>
 
-<section id="board">
-  <h2>Задачи</h2>
-  <div class="grid" id="grid"></div>
-  <div class="hidden-note" id="cancelnote" hidden></div>
-</section>
+<div id="projects"></div>
 
 <section id="usage" hidden>
   <h2>Расход токенов</h2>
@@ -181,6 +184,10 @@ header .sub b { font-weight: 600; color: var(--ink); }
 <details id="settings">
   <summary>Настройки</summary>
   <form class="setting" id="rmform" autocomplete="off">
+    <div class="row" id="rmprojrow" hidden>
+      <label for="rmproj" class="inline">Проект</label>
+      <select id="rmproj"></select>
+    </div>
     <label for="rmodel">Модель ревьюера (opencode)</label>
     <div class="row">
       <input id="rmodel" list="rmodels" placeholder="по умолчанию из конфига opencode" spellcheck="false">
@@ -193,7 +200,7 @@ header .sub b { font-weight: 600; color: var(--ink); }
   </form>
 </details>
 
-<footer class="foot">Пауза — кнопка вверху справа: работающие сессии доделают ход, новые не стартуют. Остановить монитор и эту панель — <code>aiflow stop</code>; фоновые сессии Claude продолжат работать, остановить их — <code>Ctrl+X</code> в <code>claude agents</code>.</footer>
+<footer class="foot">Пауза — у каждого проекта своя: работающие сессии доделают ход, новые не стартуют. Добавить проект — <code>aiflow up</code> в его каталоге; остановить службу и эту панель — <code>aiflow down</code>; фоновые сессии Claude при этом продолжат работать, остановить их — <code>Ctrl+X</code> в <code>claude agents</code>.</footer>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
@@ -203,12 +210,16 @@ const STATIONS = ["В очереди", "План", "Обсуждение", "Ре
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 let last = null;
-let showCancelled = false;
+const showCancelled = new Set();
 
 function toast(text) {
   const t = $("toast"); t.textContent = text; t.classList.add("on");
-  clearTimeout(toast.h); toast.h = setTimeout(() => t.classList.remove("on"), 2200);
+  clearTimeout(toast.h); toast.h = setTimeout(() => t.classList.remove("on"), 2600);
 }
+
+function project(key) { return last && last.projects.find(p => p.key === key); }
+function findTask(key, id) { const p = project(key); return p && p.tasks.find(t => t.id === id); }
+function many() { return last && last.projects.length > 1; }
 
 function suggestPaths(text) {
   const found = [];
@@ -220,8 +231,8 @@ function suggestPaths(text) {
   return found;
 }
 
-async function allowPaths(id) {
-  const t = last && last.tasks.find(x => x.id === id);
+async function allowPaths(key, id) {
+  const t = findTask(key, id);
   const value = prompt(
     `Разрешить задаче ${id} менять защищённые пути.
 Glob относительно корня репозитория, через запятую. После этого задача продолжит работу.` +
@@ -229,29 +240,36 @@ Glob относительно корня репозитория, через за
 Уже разрешено: ${t.allowed_paths.join(", ")}` : ""),
     suggestPaths(t && t.needs).join(", "));
   if (value === null || !value.trim()) return;
-  await act("allow_paths", id, value);
+  await act("allow_paths", key, id, value);
 }
 
-async function cancelTask(id) {
-  const t = last && last.tasks.find(x => x.id === id);
+async function cancelTask(key, id) {
+  const t = findTask(key, id);
   const parts = [`Снять задачу ${id}?`];
   if (t && t.session && t.session.id) parts.push("Её сессии будут остановлены.");
   if (t && t.pr) parts.push(`PR #${t.pr} будет закрыт, ветка останется.`);
   parts.push("Вернуть задачу можно только поставив её заново.");
-  if (confirm(parts.join("\n"))) await act("cancel", id);
+  if (confirm(parts.join("\n"))) await act("cancel", key, id);
 }
 
-async function act(action, id, value) {
+async function forgetProject(key) {
+  const p = project(key);
+  if (!p) return;
+  if (confirm(`Убрать проект ${p.name} из службы?\nОчередь проекта перестанет обрабатываться, задачи и PR не трогаются. Вернуть: aiflow up в каталоге проекта.`))
+    await act("forget", key);
+}
+
+async function act(action, key, id, value) {
   try {
-    const r = await fetch("/api/action", { method: "POST", headers: { "Content-Type": "application/json", "X-Aiflow-Token": TOKEN }, body: JSON.stringify({ action, id, value }) });
+    const r = await fetch("/api/action", { method: "POST", headers: { "Content-Type": "application/json", "X-Aiflow-Token": TOKEN }, body: JSON.stringify({ action, project: key, id, value }) });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || r.statusText);
     if (action === "open_session") return toast(`Сессия открыта в новом окне (${d.where})`);
     if (action === "cancel" && d.warnings && d.warnings.length) { toast("Снята, но: " + d.warnings.join("; ")); setTimeout(load, 600); return; }
-    toast({ allow_paths: "Пути разрешены, задача продолжит работу", cancel: "Задача снята", approve: "План одобрен", retry: "Повтор поставлен", pause: "Очередь на паузе", resume: "Очередь продолжает" }[action] || "Готово");
+    toast({ allow_paths: "Пути разрешены, задача продолжит работу", cancel: "Задача снята", approve: "План одобрен", retry: "Повтор поставлен", pause: "Очередь на паузе", resume: "Очередь продолжает", forget: "Проект убран из службы" }[action] || "Готово");
     setTimeout(load, 600);
   } catch (e) {
-    const t = action === "open_session" && last && last.tasks.find(x => x.id === id);
+    const t = action === "open_session" && findTask(key, id);
     if (t && t.session && t.session.id) {
       navigator.clipboard?.writeText("claude attach " + t.session.id);
       return toast(`Не открылось (${e.message}). Команда скопирована: claude attach ${t.session.id}`);
@@ -260,36 +278,36 @@ async function act(action, id, value) {
   }
 }
 
-function copy(text) {
-  navigator.clipboard?.writeText(text).then(() => toast("Скопировано: " + text), () => toast(text));
-}
-
 function time(iso) {
   const d = new Date(iso);
-  return isNaN(d) ? "" : d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+  if (isNaN(d)) return "";
+  const today = new Date().toDateString() === d.toDateString();
+  return today ? d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })
+    : d.toLocaleDateString("ru-RU", { day: "numeric", month: "short" });
 }
 
 function tokens(n) { return n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? Math.round(n / 1e3) + "k" : String(n || 0); }
-
 function num(n) { return (n || 0).toLocaleString("ru-RU"); }
-
 function shortModel(m) { return String(m || "?").replace(/^claude-/, ""); }
 
 function usageRow(first, m, u, cls) {
   return `<tr class="${cls}"><td>${first}</td><td>${esc(shortModel(m))}</td><td>${num(u.input)}</td><td>${num(u.output)}</td><td>${num(u.cache_read)}</td><td>${num(u.cache_write)}</td></tr>`;
 }
 
-function renderUsage(tasks) {
+function renderUsage() {
   const rows = [], total = {};
-  for (const t of tasks) {
-    Object.entries(t.usage || {}).sort((a, b) => b[1].output - a[1].output).forEach(([m, u], i) => {
-      rows.push(usageRow(i === 0 ? esc(t.id) : "", m, u, ""));
+  let withUsage = 0;
+  for (const p of last.projects) for (const t of p.tasks) {
+    const entries = Object.entries(t.usage || {});
+    if (entries.length) withUsage++;
+    const label = (many() ? `<span class="proj">${esc(p.name)}</span> ` : "") + esc(t.id);
+    entries.sort((a, b) => b[1].output - a[1].output).forEach(([m, u], i) => {
+      rows.push(usageRow(i === 0 ? label : "", m, u, ""));
       const s = total[m] ||= { input: 0, output: 0, cache_read: 0, cache_write: 0 };
       for (const k in s) s[k] += u[k] || 0;
     });
   }
-  const many = tasks.filter(t => Object.keys(t.usage || {}).length).length > 1;
-  if (many) Object.entries(total).sort((a, b) => b[1].output - a[1].output)
+  if (withUsage > 1) Object.entries(total).sort((a, b) => b[1].output - a[1].output)
     .forEach(([m, u], i) => rows.push(usageRow(i === 0 ? "Всего" : "", m, u, "sum")));
   $("usage").hidden = rows.length === 0;
   $("usagebody").innerHTML = rows.join("");
@@ -303,116 +321,172 @@ function tone(t) {
   return "moving";
 }
 
-function render(s) {
-  last = s;
-  $("repo").textContent = s.repo;
-  const mon = s.monitor_pid ? "монитор работает" : "монитор не запущен — в сессии оркестратора выполните /aiflow:resume";
-  $("sub").innerHTML = `база <b>${esc(s.base)}</b>, до ${s.concurrency} сессий параллельно, <span class="${s.monitor_pid ? "" : "offline"}">${esc(mon)}</span>`;
-  const p = s.paused;
-  const reasons = { manual: "вручную", rate_limit: "лимит использования", integration_red: "ветка " + s.base + " красная", trust: "нет доверия к папке" };
-  $("qstate").textContent = p ? `Пауза: ${reasons[p.reason] || p.reason}${p.until ? ", до " + time(p.until) : ""}` : "Очередь идёт";
-  $("qstate").className = "state" + (p ? " paused" : "");
-  const qb = $("qbtn"); qb.hidden = false;
-  qb.textContent = p ? "Продолжить очередь" : "Поставить на паузу";
-  qb.onclick = () => act(p ? "resume" : "pause");
+const REASONS = { manual: "вручную", rate_limit: "лимит использования", trust: "нет доверия к папке" };
 
-  const waiting = s.tasks.filter(t => t.needs);
-  $("waiting").hidden = waiting.length === 0;
-  $("waitlist").innerHTML = waiting.map(t => {
+function renderWaiting() {
+  const items = [];
+  for (const p of last.projects) for (const t of p.tasks.filter(t => t.needs)) {
+    const k = esc(p.key), id = esc(t.id);
     const acts = [];
-    if (t.state === "plan_review") acts.push(`<button class="primary" data-act="approve" data-id="${esc(t.id)}">Одобрить план</button>`);
-    if (t.state === "needs_human") acts.push(`<button class="primary" data-act="retry" data-id="${esc(t.id)}">Повторить</button>`);
-    if (t.state === "needs_human" && /защищ|protected/i.test(t.needs || "")) acts.push(`<button data-allow="${esc(t.id)}">Разрешить пути…</button>`);
+    if (t.state === "plan_review") acts.push(`<button class="primary" data-act="approve" data-project="${k}" data-id="${id}">Одобрить план</button>`);
+    if (t.state === "needs_human") acts.push(`<button class="primary" data-act="retry" data-project="${k}" data-id="${id}">Повторить</button>`);
+    if (t.state === "needs_human" && /защищ|protected/i.test(t.needs || "")) acts.push(`<button data-allow="${id}" data-project="${k}">Разрешить пути…</button>`);
     if (t.pr_url) acts.push(`<a href="${esc(t.pr_url)}" target="_blank" rel="noopener">PR #${t.pr}</a>`);
-    if (t.session && t.session.id) acts.push(`<button data-act="open_session" data-id="${esc(t.id)}">Открыть сессию</button>`);
-    acts.push(`<button class="danger" data-cancel="${esc(t.id)}">Снять</button>`);
-    return `<div class="wait-item ${t.state === "needs_human" ? "fail" : ""}">
-      <div><div class="what">${esc(t.id)} <span class="why">— ${esc(t.title)}</span></div><div class="why">${esc(t.needs)}</div></div>
-      <div class="acts">${acts.join("")}</div></div>`;
-  }).join("");
+    if (t.session && t.session.id) acts.push(`<button data-act="open_session" data-project="${k}" data-id="${id}">Открыть сессию</button>`);
+    acts.push(`<button class="danger" data-cancel="${id}" data-project="${k}">Снять</button>`);
+    const proj = many() ? `<span class="proj">${esc(p.name)}</span> ` : "";
+    items.push(`<div class="wait-item ${t.state === "needs_human" ? "fail" : ""}">
+      <div><div class="what">${proj}${id} <span class="why">— ${esc(t.title)}</span></div><div class="why">${esc(t.needs)}</div></div>
+      <div class="acts">${acts.join("")}</div></div>`);
+  }
+  $("waiting").hidden = items.length === 0;
+  $("waitlist").innerHTML = items.join("");
+}
 
-  const g = $("grid");
+function renderBoard(p) {
+  const k = esc(p.key);
   let html = `<div class="head left">Задача</div>` + STATIONS.map(n => `<div class="head">${n}</div>`).join("") + `<div class="head right">PR, раунды, токены</div>`;
-  const cancelled = s.tasks.filter(t => t.state === "cancelled").length;
-  const shown = showCancelled ? s.tasks : s.tasks.filter(t => t.state !== "cancelled");
-  const note = $("cancelnote");
-  note.hidden = cancelled === 0;
-  note.innerHTML = cancelled
-    ? `Снятых задач: ${cancelled}<button data-toggle-cancelled>${showCancelled ? "Скрыть" : "Показать"}</button>` : "";
+  const cancelled = p.tasks.filter(t => t.state === "cancelled").length;
+  const shown = showCancelled.has(p.key) ? p.tasks : p.tasks.filter(t => t.state !== "cancelled");
   if (!shown.length) {
-    html += `<div class="empty" style="grid-column: 1 / -1">Задач нет. Напишите их в сессии оркестратора: <code>/aiflow:intake …</code></div>`;
+    html += `<div class="empty" style="grid-column: 1 / -1">Задач нет. Напишите их в сессии оркестратора этого проекта: <code>/aiflow:intake …</code></div>`;
   }
   for (const t of shown) {
-    const k = tone(t);
+    const tn = tone(t), id = esc(t.id);
     const stage = t.stage ?? 0;
-    const name = `<div class="id">${esc(t.id)}</div><div class="title" title="${esc(t.title)}">${esc(t.title)}</div>`;
+    const name = `<div class="id">${id}</div><div class="title" title="${esc(t.title)}">${esc(t.title)}</div>`;
     const head = t.session && t.session.id
-      ? `<button class="open" data-act="open_session" data-id="${esc(t.id)}" title="Открыть сессию ${esc(t.session.role || "")} в терминале">${name}</button>`
+      ? `<button class="open" data-act="open_session" data-project="${k}" data-id="${id}" title="Открыть сессию ${esc(t.session.role || "")} в терминале">${name}</button>`
       : name;
-    html += `<div class="task">${head}<div class="state-label here ${k}">${esc(t.label)}${t.needs ? " — " + esc(t.needs) : ""}</div></div>`;
+    html += `<div class="task">${head}<div class="state-label here ${tn}">${esc(t.label)}${t.needs ? " — " + esc(t.needs) : ""}</div></div>`;
     STATIONS.forEach((_, i) => {
       const pos = i < stage ? "passed" : i === stage ? "half" : "";
       const edge = i === 0 ? "first" : i === STATIONS.length - 1 ? "last" : "";
       let dot = `<span class="dot ${i < stage ? "passed" : ""}"></span>`;
       if (i === stage && t.state !== "cancelled") {
         const live = t.session && t.session.state === "working" ? "live" : "";
-        dot = `<span class="dot here ${k} ${live}" title="${esc(t.label)}${t.needs ? ": " + esc(t.needs) : ""}"></span>`;
+        dot = `<span class="dot here ${tn} ${live}" title="${esc(t.label)}${t.needs ? ": " + esc(t.needs) : ""}"></span>`;
       }
       html += `<div class="cell ${edge} ${pos}">${dot}</div>`;
     });
     const pr = t.pr ? (t.pr_url ? `<a href="${esc(t.pr_url)}" target="_blank" rel="noopener">#${t.pr}</a>` : "#" + t.pr) : "—";
     const rounds = t.rounds ? `раунд ${t.rounds}/${t.max_rounds}` : (t.review_lock ? "на ревью" : "");
     const cancel = t.state === "merged" || t.state === "cancelled" ? ""
-      : `<button class="link danger" data-cancel="${esc(t.id)}" title="Остановить сессии задачи и закрыть её PR">Снять</button>`;
+      : `<button class="link danger" data-cancel="${id}" data-project="${k}" title="Остановить сессии задачи и закрыть её PR">Снять</button>`;
     html += `<div class="meta"><div class="num">${pr}${rounds ? ", " + rounds : ""}</div><div class="line2 num">${t.tokens ? tokens(t.tokens) + " токенов" : "—"}</div>${cancel}</div>`;
   }
-  g.innerHTML = html;
-  renderUsage(s.tasks);
+  const note = cancelled
+    ? `<div class="hidden-note">Снятых задач: ${cancelled}<button data-toggle-cancelled="${k}">${showCancelled.has(p.key) ? "Скрыть" : "Показать"}</button></div>` : "";
+  return `<div class="grid">${html}</div>${note}`;
+}
 
-  $("evlist").innerHTML = s.events.length
-    ? s.events.map(e => `<li class="${esc(e.kind)}"><time class="num">${time(e.at)}</time><span>${esc(e.text)}</span></li>`).join("")
+function renderProject(p) {
+  const k = esc(p.key);
+  const forget = last.service ? `<button class="link" data-forget="${k}" title="Убрать проект из службы">Убрать</button>` : "";
+  if (p.error) {
+    return `<section class="project"><div class="phead"><div><h2>${esc(p.name)}</h2><div class="sub offline">${esc(p.error)}</div>
+      <div class="sub path">${esc(p.root)}</div></div><div class="queue">${forget}</div></div></section>`;
+  }
+  const mon = p.monitor_pid ? "" : `, <span class="offline">очередь не обрабатывается — выполните aiflow up</span>`;
+  const pz = p.paused;
+  const reason = pz ? (pz.reason === "integration_red" ? "ветка " + p.base + " красная" : REASONS[pz.reason] || pz.reason) : "";
+  const qstate = pz ? `<span class="state paused">Пауза: ${esc(reason)}${pz.until ? ", до " + time(pz.until) : ""}</span>` : `<span class="state">Очередь идёт</span>`;
+  const qbtn = `<button data-act="${pz ? "resume" : "pause"}" data-project="${k}">${pz ? "Продолжить очередь" : "Поставить на паузу"}</button>`;
+  return `<section class="project">
+    <div class="phead">
+      <div><h2>${esc(p.name)}</h2>
+        <div class="sub">база <b>${esc(p.base)}</b>, до ${p.concurrency} сессий параллельно${mon}</div></div>
+      <div class="queue">${qstate}${qbtn}${forget}</div>
+    </div>
+    ${renderBoard(p)}
+  </section>`;
+}
+
+function renderEvents() {
+  const all = [];
+  for (const p of last.projects) for (const e of p.events || []) all.push({ ...e, proj: p.name });
+  all.sort((a, b) => String(b.at).localeCompare(String(a.at)));
+  const shown = all.slice(0, 60);
+  $("evlist").innerHTML = shown.length
+    ? shown.map(e => `<li class="${esc(e.kind)}"><time class="num">${time(e.at)}</time><span>${many() ? `<span class="proj">${esc(e.proj)}</span> ` : ""}${esc(e.text)}</span></li>`).join("")
     : `<li><time></time><span>Событий пока нет.</span></li>`;
 }
 
+function renderSettingsProjects() {
+  const sel = $("rmproj");
+  const keys = last.projects.filter(p => !p.error).map(p => p.key);
+  const cur = sel.value;
+  sel.innerHTML = last.projects.filter(p => !p.error).map(p => `<option value="${esc(p.key)}">${esc(p.name)}</option>`).join("");
+  if (keys.includes(cur)) sel.value = cur;
+  $("rmprojrow").hidden = keys.length < 2;
+}
+
+function render(s) {
+  last = s;
+  const n = s.projects.length;
+  if (s.service) {
+    $("title").textContent = "aiflow";
+    $("sub").textContent = `служба работает, проектов: ${n}` + (n ? "" : " — добавьте проект: aiflow up в его каталоге");
+  } else {
+    $("title").textContent = n ? s.projects[0].name : "aiflow";
+    $("sub").innerHTML = `<span class="offline">панель одного проекта, служба не запущена — aiflow up запустит её для всех проектов</span>`;
+  }
+  renderWaiting();
+  $("projects").innerHTML = s.projects.map(renderProject).join("");
+  renderUsage();
+  renderEvents();
+  renderSettingsProjects();
+}
+
 document.addEventListener("click", (e) => {
-  if (e.target.closest("[data-toggle-cancelled]")) { showCancelled = !showCancelled; return last && render(last); }
+  const tg = e.target.closest("[data-toggle-cancelled]");
+  if (tg) {
+    const k = tg.dataset.toggleCancelled;
+    showCancelled.has(k) ? showCancelled.delete(k) : showCancelled.add(k);
+    return last && render(last);
+  }
+  const fg = e.target.closest("[data-forget]");
+  if (fg) return forgetProject(fg.dataset.forget);
   const cn = e.target.closest("[data-cancel]");
-  if (cn) return cancelTask(cn.dataset.cancel);
+  if (cn) return cancelTask(cn.dataset.project, cn.dataset.cancel);
   const al = e.target.closest("[data-allow]");
-  if (al) return allowPaths(al.dataset.allow);
-  const b = e.target.closest("[data-act],[data-copy]");
-  if (!b) return;
-  if (b.dataset.copy) return copy(b.dataset.copy);
-  act(b.dataset.act, b.dataset.id);
+  if (al) return allowPaths(al.dataset.project, al.dataset.allow);
+  const b = e.target.closest("[data-act]");
+  if (b) act(b.dataset.act, b.dataset.project, b.dataset.id);
 });
 
-let settingsLoaded = false;
+let settingsFor = null;
 async function loadSettings(refresh) {
   const st = $("rmstatus");
+  const key = $("rmproj").value;
+  if (!key) { st.className = "hint err"; st.textContent = "Нет проектов."; return; }
   st.className = "hint"; st.textContent = refresh ? "Запрашиваю opencode models…" : "Загрузка…";
   try {
-    const r = await fetch("/api/settings" + (refresh ? "?refresh=1" : ""), { cache: "no-store" });
+    const r = await fetch(`/api/settings?project=${encodeURIComponent(key)}` + (refresh ? "&refresh=1" : ""), { cache: "no-store" });
     const d = await r.json();
+    if (!r.ok) throw new Error(d.error || r.statusText);
     const input = $("rmodel");
-    if (!settingsLoaded || !refresh) input.value = d.reviewer_model;
+    if (settingsFor !== key || !refresh) input.value = d.reviewer_model;
     input.dataset.saved = d.reviewer_model;
     $("rmodels").innerHTML = d.models.map(m => `<option value="${esc(m)}"></option>`).join("");
-    settingsLoaded = true;
+    settingsFor = key;
     if (d.models_error) { st.className = "hint err"; st.textContent = "Список моделей недоступен: " + d.models_error + ". Модель можно вписать вручную."; }
     else st.textContent = `Сейчас: ${d.reviewer_model || "по умолчанию opencode"}. Доступно моделей: ${d.models.length}.`;
   } catch (e) { st.className = "hint err"; st.textContent = "Не удалось загрузить настройки: " + e.message; }
 }
 
-$("settings").addEventListener("toggle", () => { if ($("settings").open && !settingsLoaded) loadSettings(false); });
+$("settings").addEventListener("toggle", () => { if ($("settings").open && settingsFor !== $("rmproj").value) loadSettings(false); });
+$("rmproj").addEventListener("change", () => loadSettings(false));
 $("rmrefresh").addEventListener("click", () => loadSettings(true));
 $("rmform").addEventListener("submit", async (e) => {
   e.preventDefault();
+  const key = $("rmproj").value;
   const value = $("rmodel").value.trim();
   const known = [...$("rmodels").options].map(o => o.value);
   if (value && known.length && !known.includes(value) && !confirm(`Модели «${value}» нет в списке opencode models. Сохранить всё равно?`)) return;
   const btn = $("rmsave"); btn.disabled = true;
   try {
-    const r = await fetch("/api/action", { method: "POST", headers: { "Content-Type": "application/json", "X-Aiflow-Token": TOKEN }, body: JSON.stringify({ action: "set_reviewer_model", value }) });
+    const r = await fetch("/api/action", { method: "POST", headers: { "Content-Type": "application/json", "X-Aiflow-Token": TOKEN }, body: JSON.stringify({ action: "set_reviewer_model", project: key, value }) });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || r.statusText);
     $("rmodel").value = d.reviewer_model; $("rmodel").dataset.saved = d.reviewer_model;
@@ -428,7 +502,7 @@ async function load() {
     const r = await fetch("/api/state", { cache: "no-store" });
     render(await r.json());
   } catch (e) {
-    $("sub").innerHTML = `<span class="offline">Панель не отвечает: монитор остановлен или порт занят.</span>`;
+    $("sub").innerHTML = `<span class="offline">Панель не отвечает: служба остановлена (aiflow up) или порт занят.</span>`;
   }
 }
 load();

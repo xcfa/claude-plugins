@@ -97,6 +97,8 @@ def open_terminal(root: Path, sid: str) -> str:
 
 
 class _Cache:
+    """Сессии и адрес репозитория одного проекта: `claude agents` и `gh repo view` дорогие."""
+
     def __init__(self, store: aiflow.Store):
         self.store = store
         self.lock = threading.Lock()
@@ -120,10 +122,31 @@ class _Cache:
             return aiflow.build_state(self.store, self.sessions, self.repo_url or "")
 
 
-def start_server(store: aiflow.Store, port: int, wake: threading.Event):
+def start_server(provider, port: int, wake: threading.Event, service: bool = False):
+    """provider() — список Store проектов панели. service=True — общая панель службы."""
+    import aiflow_service as svc
     token = secrets.token_urlsafe(24)
-    cache = _Cache(store)
-    models = _Models(store.root)
+    caches: dict[str, _Cache] = {}
+    models: dict[str, _Models] = {}
+    lock = threading.Lock()
+
+    def stores() -> dict[str, aiflow.Store]:
+        return {svc.project_key(st.root): st for st in provider()}
+
+    def cache(key: str, store: aiflow.Store) -> _Cache:
+        with lock:
+            if key not in caches:
+                caches[key] = _Cache(store)
+            return caches[key]
+
+    def project_state(key: str, store: aiflow.Store) -> dict:
+        base = {"key": key, "name": store.root.name, "root": str(store.root)}
+        if not store.initialized:
+            return {**base, "error": "проект не инициализирован или удалён (нет runs/config.json)", "tasks": [], "events": []}
+        try:
+            return {**cache(key, store).state(), **base}
+        except Exception as e:  # один сломанный проект не должен ронять всю панель
+            return {**base, "error": f"не удалось прочитать состояние: {e}", "tasks": [], "events": []}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):  # тишина в stdout монитора
@@ -154,11 +177,18 @@ def start_server(store: aiflow.Store, port: int, wake: threading.Event):
                 return self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
             url = urlsplit(self.path)
             if url.path == "/api/state":
-                return self._json(200, cache.state())
+                return self._json(200, {"version": aiflow.VERSION, "service": service, "now": aiflow.iso(),
+                                        "projects": [project_state(k, st) for k, st in stores().items()]})
             if url.path == "/api/settings":
-                refresh = parse_qs(url.query).get("refresh") == ["1"]
-                items, error = models.get(refresh)
-                return self._json(200, {"reviewer_model": store.config().get("reviewer_model") or "",
+                q = parse_qs(url.query)
+                st = stores().get((q.get("project") or [""])[0])
+                if not st or not st.initialized:
+                    return self._json(404, {"error": "нет такого проекта"})
+                key = svc.project_key(st.root)
+                with lock:
+                    m = models.setdefault(key, _Models(st.root))
+                items, error = m.get(q.get("refresh") == ["1"])
+                return self._json(200, {"reviewer_model": st.config().get("reviewer_model") or "",
                                         "models": items, "models_error": error})
             self._send(404, b"not found", "text/plain")
 
@@ -171,6 +201,22 @@ def start_server(store: aiflow.Store, port: int, wake: threading.Event):
                 n = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(n) or b"{}")
                 action, tid = body.get("action"), body.get("id")
+                if action == "tick":
+                    wake.set()
+                    return self._json(200, {"ok": True})
+                all_stores = stores()
+                store = all_stores.get(body.get("project") or "")
+                if store is None and len(all_stores) == 1 and not body.get("project"):
+                    store = next(iter(all_stores.values()))
+                if store is None:
+                    return self._json(400, {"error": "не указан проект"})
+                if action == "forget":
+                    if not service:
+                        return self._json(400, {"error": "проекты убираются только из общей панели службы"})
+                    svc.forget(store.root)
+                    return self._json(200, {"ok": True})
+                if not store.initialized:
+                    return self._json(400, {"error": "проект не инициализирован"})
                 if action == "pause":
                     store.command({"cmd": "pause", "reason": "из панели"})
                 elif action == "resume":
@@ -205,8 +251,6 @@ def start_server(store: aiflow.Store, port: int, wake: threading.Event):
                     store.set_config("reviewer_model", value)
                     store.event("config", None, f"модель ревьюера: {value or 'по умолчанию opencode'} (из панели)")
                     return self._json(200, {"ok": True, "reviewer_model": value})
-                elif action == "tick":
-                    pass
                 else:
                     return self._json(400, {"error": "неизвестное действие"})
                 wake.set()

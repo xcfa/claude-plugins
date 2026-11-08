@@ -1415,6 +1415,9 @@ def cmd_init(args, root: Path) -> int:
                                   (cfg["labels"]["retry"], "1D76DB", "aiflow: повторить задачу")):
             run(["gh", "label", "create", name, "--color", color, "--description", desc, "--force"], cwd=root)
         created.append("метки GitHub: plan-approved, needs-human, retry")
+    import aiflow_service as svc
+    if svc.register(root):
+        created.append("проект добавлен в службу aiflow (~/.aiflow/projects.json)")
     print("Готово:\n  " + "\n  ".join(created))
     print("\nДальше:\n"
           "  1. Впишите модель ревьюера в runs/config.json → reviewer_model (opencode models deepseek).\n"
@@ -1431,9 +1434,9 @@ def setup_desktop_preview(root: Path, store: Store) -> str:
     entries = [
         # подключиться к панели, которую уже поднял монитор
         {"name": "aiflow", "url": f"http://127.0.0.1:{port}", "port": port},
-        # или запустить панель отдельно, если монитор не работает
-        {"name": "aiflow (без монитора)", "runtimeExecutable": sys.executable,
-         "runtimeArgs": [str(Path(__file__).resolve()), "ui", "--port", str(port)],
+        # или запустить службу (монитор всех проектов и панель), если она не работает
+        {"name": "aiflow (запустить службу)", "runtimeExecutable": sys.executable,
+         "runtimeArgs": [str(Path(__file__).resolve()), "up", "--foreground"],
          "port": port, "autoPort": False},
     ]
     lp = root / ".claude" / "launch.json"
@@ -1833,147 +1836,102 @@ def _toast(title: str, text: str) -> None:
         pass
 
 
-def desktop_notify(cfg: dict, events: list[dict]) -> None:
+def desktop_notify(cfg: dict, events: list[dict], project: str | None = None) -> None:
     """Системные уведомления о событиях, которые ждут пользователя (desktop_notify в конфиге)."""
     if not cfg.get("desktop_notify", True):
         return
+    title = f"aiflow · {project}" if project else "aiflow"
     important = [ev for ev in events if ev.get("kind") in NOTIFY_KINDS]
     if len(important) > 3:
-        _toast("aiflow", f"{len(important)} событий, подробности в панели")
+        _toast(title, f"{len(important)} событий, подробности в панели")
         return
     for ev in important:
-        _toast("aiflow", ev.get("text", ""))
-
-
-def _spawn_monitor(store: Store, owner: int, via_helper: bool = True) -> None:
-    """Запустить монитор отдельным фоновым процессом, не связанным с процессом-родителем.
-
-    Через промежуточный процесс, который сразу выходит: у монитора не остаётся живого
-    родителя, и завершение дерева процессов (`taskkill /T`) его не заденет."""
-    cmd = [sys.executable, "-X", "utf8", str(Path(__file__).resolve()), "run"]
-    if owner:
-        cmd += ["--owner", str(owner)]
-    if via_helper:
-        cmd.append("--spawn")
-    log = (store.runs / "monitor.log").open("ab")
-    kw: dict = {"cwd": store.root, "stdin": subprocess.DEVNULL, "stdout": log, "stderr": log, "close_fds": True}
-    if os.name == "nt":
-        base = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-        try:  # выйти из job-объекта родителя, если он это позволяет
-            subprocess.Popen(cmd, creationflags=base | subprocess.CREATE_BREAKAWAY_FROM_JOB, **kw)
-        except OSError:
-            subprocess.Popen(cmd, creationflags=base, **kw)
-        return
-    subprocess.Popen(cmd, start_new_session=True, **kw)
-
-
-def run_detached(store: Store) -> int:
-    """`aiflow run --events --detach`: монитор живёт отдельным процессом (его не остановит
-    лимит инструмента Monitor), а этот процесс только пересказывает события в stdout."""
-    lock = FileLock(store.runs / "monitor.lock")
-    events = store.runs / "events.jsonl"
-    pos = events.stat().st_size if events.is_file() else 0
-    owner = int(os.environ.get("CLAUDE_PID") or 0)
-    if not lock.owner():
-        _spawn_monitor(store, owner)
-        for _ in range(100):
-            if lock.owner():
-                break
-            time.sleep(0.2)
-        else:
-            print("[aiflow] монитор не запустился, см. runs/monitor.log", flush=True)
-            return 1
-    cfg = store.config()
-    if notify_level(cfg) != "none":
-        url = f"http://127.0.0.1:{cfg['ui_port']}/" if cfg.get("ui_port") else ""
-        print(f"[aiflow] монитор запущен{'; панель: ' + url if url else ''}", flush=True)
-    while True:
-        time.sleep(2)
-        if not lock.owner():
-            if notify_level(store.config()) != "none":
-                print("[aiflow] монитор остановился", flush=True)
-            return 0
-        if owner and not pid_alive(owner):
-            return 0
-        if not events.is_file() or events.stat().st_size <= pos:
-            continue
-        with events.open("rb") as f:
-            f.seek(pos)
-            chunk = f.read()
-        end = chunk.rfind(b"\n") + 1
-        pos += end
-        cfg = store.config()
-        for line in chunk[:end].decode("utf-8", "replace").splitlines():
-            try:
-                ev = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if should_notify(cfg, ev.get("kind", "")):
-                print(f"[aiflow] {ev.get('text', '')}", flush=True)
+        _toast(title, ev.get("text", ""))
 
 
 def cmd_run(args, root: Path) -> int:
+    """Монитор плагина (`--events`): поднять службу и пересказывать события проекта.
+    Без `--events` — служба на переднем плане (для отладки)."""
+    import aiflow_service as svc
     store = Store(root)
     if not store.initialized:
         print("[aiflow] репозиторий не инициализирован: выполните aiflow init", flush=True)
         return 1
-    if args.spawn:
-        _spawn_monitor(store, args.owner, via_helper=False)
-        return 0
-    if args.detach:
-        return run_detached(store)
-    mon = FileLock(store.runs / "monitor.lock", stale_minutes=0)
-    if not mon.acquire():
-        return 0  # уже работает другой монитор — молча выходим
-    wake = threading.Event()
-    srv = None
-    # На Windows дочерние процессы переживают родителя: монитор сессии сам выходит,
-    # когда завершается процесс Claude, который его запустил.
-    owner = args.owner or (int(os.environ.get("CLAUDE_PID") or 0) if args.events else 0)
-    import signal
+    if args.events:
+        return svc.relay_events(store)
+    svc.register(root)
+    return svc.serve()
 
-    def _stop(*_):
-        raise KeyboardInterrupt
-    for sig in ("SIGTERM", "SIGHUP"):
-        if hasattr(signal, sig):
-            signal.signal(getattr(signal, sig), _stop)
-    try:
-        cfg = store.config()
-        url = ""
-        if cfg.get("ui_port") and not args.no_ui:
-            from aiflow_ui import start_server
-            try:
-                srv, url = start_server(store, int(cfg["ui_port"]), wake)
-            except OSError:
-                url = ""  # порт занят: панель уже открыта отдельным aiflow ui
-        if args.events and notify_level(cfg) != "none":
-            print(f"[aiflow] монитор запущен{'; панель: ' + url if url else ''}", flush=True)
-        while True:
-            try:
-                events = run_tick_now(store)
-                cfg = store.config()
-                desktop_notify(cfg, events)
-                if args.events:
-                    for ev in events:
-                        if should_notify(cfg, ev.get("kind", "")):
-                            print(f"[aiflow] {ev['text']}", flush=True)
-            except AiflowError as e:
-                if args.events and notify_level(store.config()) != "none":
-                    print(f"[aiflow] ошибка тика: {e}", flush=True)
-            except Exception as e:  # монитор не должен падать из-за одного тика
-                store.event("error", None, f"сбой тика: {e!r}")
-            deadline = time.time() + max(10, int(store.config().get("tick_seconds", 45)))
-            while not wake.is_set() and time.time() < deadline:
-                if owner and not pid_alive(owner):
-                    return 0  # сессия Claude, запустившая монитор, завершилась
-                wake.wait(timeout=min(5, max(0.1, deadline - time.time())))
-            wake.clear()
-    except KeyboardInterrupt:
+
+def cmd_service(args, root: Path | None) -> int:
+    import aiflow_service as svc
+    if args.spawn:
+        svc.spawn(via_helper=False)
         return 0
-    finally:
-        if srv:
-            srv.shutdown()
-        mon.release()
+    return svc.serve()
+
+
+def cmd_up(args, root: Path | None) -> int:
+    import aiflow_service as svc
+    if root is not None and Store(root).initialized:
+        if svc.register(root):
+            print(f"Проект {root.name} добавлен в службу.")
+    elif root is not None:
+        print(f"{root.name} не инициализирован (aiflow init) — в службу не добавлен.")
+    if args.autostart is not None:
+        where = svc.autostart(args.autostart)
+        print(("Автозапуск при входе в систему включён: " if args.autostart else "Автозапуск выключен: ") + where)
+    if args.foreground:
+        return svc.serve()
+    data = svc.ensure()
+    url = svc.panel_url(data)
+    print(f"Служба aiflow {data.get('version', '?')} работает (pid {data['pid']}); проектов: {len(svc.projects())}"
+          + (f"; панель: {url}" if url else ""))
+    if args.open and url:
+        svc.open_window(url)
+    return 0
+
+
+def cmd_down(args, root: Path | None) -> int:
+    import aiflow_service as svc
+    if args.no_autostart:
+        print("Автозапуск выключен: " + svc.autostart(False))
+    if svc.stop():
+        print("Служба aiflow остановлена. Фоновые сессии Claude продолжают работать; "
+              "продолжить очередь — aiflow up или /aiflow:resume.")
+    else:
+        print("Служба aiflow не запущена.")
+    return 0
+
+
+def cmd_projects(args, root: Path | None) -> int:
+    import aiflow_service as svc
+    data = svc.info()
+    print(f"Служба: {'работает, pid ' + str(data['pid']) + ', версия ' + str(data.get('version', '?')) if data else 'не запущена'}"
+          f"; автозапуск: {'включён' if svc.autostart_enabled() else 'выключен'}"
+          + (f"; панель: {svc.panel_url(data)}" if data and svc.panel_url(data) else ""))
+    roots = svc.projects()
+    if not roots:
+        print("Проектов нет: aiflow up в каталоге проекта.")
+    for r in roots:
+        st = Store(Path(r))
+        if not st.initialized:
+            note = "нет runs/config.json"
+        else:
+            tasks = st.tasks()
+            live = sum(1 for t in tasks if t.get("state") not in TERMINAL)
+            note = f"задач в работе: {live}" + (", пауза" if st.queue().get("paused") else "")
+        print(f"  {Path(r).name:<24} {note:<28} {r}")
+    return 0
+
+
+def cmd_forget(args, root: Path | None) -> int:
+    import aiflow_service as svc
+    target = Path(args.path).resolve() if args.path else root
+    if target is None:
+        raise AiflowError("укажите путь проекта или запустите внутри него")
+    print(f"{target.name} убран из службы." if svc.forget(target) else f"{target} не был в службе.")
+    return 0
 
 
 def _port_busy(port: int) -> bool:
@@ -2009,67 +1967,60 @@ def stop_ui(store: Store) -> bool:
 
 
 def cmd_ui(args, root: Path) -> int:
+    import aiflow_service as svc
     store = Store(root)
     if args.stop:
         print("Панель остановлена." if stop_ui(store) else
-              "Отдельно запущенной панели нет. Панель монитора останавливается вместе с ним: aiflow stop.")
+              "Отдельно запущенной панели нет. Общая панель останавливается вместе со службой: aiflow down.")
         return 0
+    if not args.port and (args.detach or svc.info()):
+        if store.initialized:
+            svc.register(root)
+        data = svc.ensure()
+        url = svc.panel_url(data)
+        if not url:
+            raise AiflowError("у службы выключена панель (ui_port: 0 в ~/.aiflow/config.json)")
+        where = svc.open_window(url) if args.open else ""
+        print(f"Панель aiflow: {url}" + (f" (открыта: {where})" if where else ""))
+        return 0
+    # отдельная панель только этого проекта на переднем плане (служба не запущена)
     port = args.port or int(store.config().get("ui_port") or 8765)
-    url = f"http://127.0.0.1:{port}/"
-    if not _port_busy(port):
-        if args.detach:
-            py = Path(sys.executable)
-            if os.name == "nt" and (py.parent / "pythonw.exe").is_file():
-                py = py.parent / "pythonw.exe"  # без консольного окна
-            kw = {"cwd": str(root), "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
-                  "stdin": subprocess.DEVNULL}
-            if os.name == "nt":
-                kw["creationflags"] = 0x08000000 | 0x00000200  # CREATE_NO_WINDOW | NEW_PROCESS_GROUP
-            else:
-                kw["start_new_session"] = True
-            subprocess.Popen([str(py), str(Path(__file__)), "ui", "--port", str(port)], **kw)
-            for _ in range(20):
-                if _port_busy(port):
-                    break
-                time.sleep(0.25)
-        else:
-            from aiflow_ui import start_server
-            srv, url = start_server(store, port, threading.Event())
-            write_json(store.runs / "ui.pid", {"pid": os.getpid(), "port": port, "at": iso()})
-            print(f"Панель aiflow: {url}  (остановить: Ctrl+C или aiflow ui --stop)", flush=True)
-            if args.open:
-                import webbrowser
-                webbrowser.open(url)
-            try:
-                while True:
-                    time.sleep(3600)
-            except KeyboardInterrupt:
-                srv.shutdown()
-            finally:
-                (store.runs / "ui.pid").unlink(missing_ok=True)
-            return 0
-    print(f"Панель aiflow: {url}  (остановить: aiflow ui --stop)")
+    if _port_busy(port):
+        raise AiflowError(f"порт {port} занят")
+    from aiflow_ui import start_server
+    srv, url = start_server(lambda: [store], port, threading.Event())
+    write_json(store.runs / "ui.pid", {"pid": os.getpid(), "port": port, "at": iso()})
+    print(f"Панель aiflow: {url}  (остановить: Ctrl+C или aiflow ui --stop)", flush=True)
     if args.open:
-        import webbrowser
-        webbrowser.open(url)
+        svc.open_window(url)
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        srv.shutdown()
+    finally:
+        (store.runs / "ui.pid").unlink(missing_ok=True)
     return 0
 
 
 def cmd_stop(args, root: Path) -> int:
+    import aiflow_service as svc
     store = Store(root)
-    pid = FileLock(store.runs / "monitor.lock").owner()
     stopped = []
-    if pid and _kill(pid):
+    if svc.stop():
+        stopped.append("служба (все проекты)")
+    pid = FileLock(store.runs / "monitor.lock").owner()
+    if pid and _kill(pid):  # монитор сессии старой версии
         (store.runs / "monitor.lock").unlink(missing_ok=True)
-        store.event("stopped", None, "монитор остановлен командой aiflow stop")
         stopped.append("монитор")
     if stop_ui(store):
         stopped.append("панель")
     if stopped:
+        store.event("stopped", None, "монитор остановлен командой aiflow stop")
         print("Остановлено: " + ", ".join(stopped) + ". Фоновые сессии Claude продолжают работать; "
-              "очередь продолжит /aiflow:resume.")
+              "очередь продолжит aiflow up или /aiflow:resume.")
     else:
-        print("Монитор и панель не запущены.")
+        print("Служба и панель не запущены.")
     return 0
 
 
@@ -2132,12 +2083,21 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("status", help="состояние очереди")
     s.add_argument("--json", action="store_true")
     sub.add_parser("tick", help="один проход")
-    rn = sub.add_parser("run", help="цикл (запускается монитором плагина)")
+    rn = sub.add_parser("run", help="монитор плагина: поднять службу и пересказывать события проекта")
     rn.add_argument("--events", action="store_true")
-    rn.add_argument("--no-ui", action="store_true")
-    rn.add_argument("--detach", action="store_true", help="монитор отдельным процессом, здесь только события")
-    rn.add_argument("--spawn", action="store_true", help=argparse.SUPPRESS)
-    rn.add_argument("--owner", type=int, default=0, help="pid процесса, с завершением которого монитор выходит")
+    rn.add_argument("--detach", action="store_true", help=argparse.SUPPRESS)  # совместимость: служба всегда отдельно
+    sv = sub.add_parser("service", help=argparse.SUPPRESS)
+    sv.add_argument("--spawn", action="store_true")
+    up = sub.add_parser("up", help="запустить службу (все проекты и панель), добавить в неё текущий проект")
+    up.add_argument("--open", action="store_true", help="открыть панель")
+    up.add_argument("--foreground", action="store_true", help="служба в этом терминале")
+    up.add_argument("--autostart", action="store_true", default=None, help="запускать службу при входе в систему")
+    up.add_argument("--no-autostart", dest="autostart", action="store_false", help="выключить автозапуск")
+    dn = sub.add_parser("down", help="остановить службу")
+    dn.add_argument("--no-autostart", action="store_true", help="и выключить автозапуск")
+    sub.add_parser("projects", help="проекты службы")
+    fg = sub.add_parser("forget", help="убрать проект из службы")
+    fg.add_argument("path", nargs="?")
     p = sub.add_parser("pause")
     p.add_argument("reason", nargs="?")
     sub.add_parser("resume")
@@ -2162,7 +2122,7 @@ def main(argv: list[str] | None = None) -> int:
     u.add_argument("--open", action="store_true")
     u.add_argument("--detach", action="store_true")
     u.add_argument("--stop", action="store_true", help="остановить отдельно запущенную панель")
-    sub.add_parser("stop", help="остановить монитор и панель (сессии Claude продолжают работать)")
+    sub.add_parser("stop", help="остановить службу и панель (сессии Claude продолжают работать)")
     sub.add_parser("statusline", help="одна строка для statusLine")
     args = ap.parse_args(argv)
 
@@ -2171,8 +2131,10 @@ def main(argv: list[str] | None = None) -> int:
             root = repo_root()
         except AiflowError:
             root = None
-        if args.cmd in ("doctor", "statusline"):
-            return {"doctor": cmd_doctor, "statusline": cmd_statusline}[args.cmd](args, root)
+        rootless = {"doctor": cmd_doctor, "statusline": cmd_statusline, "service": cmd_service, "up": cmd_up,
+                    "down": cmd_down, "projects": cmd_projects, "forget": cmd_forget}
+        if args.cmd in rootless:
+            return rootless[args.cmd](args, root)
         if root is None:
             raise AiflowError("запустите aiflow внутри git-репозитория")
         handlers = {
