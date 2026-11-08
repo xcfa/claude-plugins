@@ -59,6 +59,9 @@ header .sub b { font-weight: 600; color: var(--ink); }
 }
 .wait-item .what { font-weight: 600; }
 .wait-item .why { color: var(--muted); }
+button:disabled { opacity: .45; cursor: default; }
+button:disabled:hover { border-color: var(--rule); }
+.wait-item .busy-note { color: var(--muted); font-size: 12.5px; margin-top: 4px; }
 .wait-item .acts { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 .wait-item.fail { border-left-color: var(--fail); }
 
@@ -267,7 +270,32 @@ function staleToken() {
   else location.reload();
 }
 
+// Действия, которые очередь применит на ближайшем проходе: до тех пор кнопки задачи
+// (или очереди проекта) заблокированы, чтобы не нажать дважды и не гадать, сработало ли.
+const QUEUED = new Set(["approve", "retry", "allow_paths", "cancel", "pause", "resume"]);
+const BUSY_MS = 3 * 60 * 1000;
+const busy = new Map();
+function busyKey(key, id) { return key + ":" + (id || "queue"); }
+function sigOf(key, id) {
+  if (!id) { const p = project(key); return JSON.stringify(p ? p.paused || null : null); }
+  const t = findTask(key, id);
+  return t ? t.state + "|" + (t.needs || "") + "|" + (t.allowed_paths || []).join(",") : "gone";
+}
+function isBusy(key, id) {
+  const b = busy.get(busyKey(key, id));
+  if (!b) return false;
+  if (Date.now() > b.until || sigOf(key, id) !== b.sig) { busy.delete(busyKey(key, id)); return false; }
+  return true;
+}
+function dis(key, id) { return isBusy(key, id) ? " disabled" : ""; }
+
 async function act(action, key, id, value) {
+  const queued = QUEUED.has(action);
+  const bk = busyKey(key, ["pause", "resume"].includes(action) ? null : id);
+  if (queued) {
+    busy.set(bk, { sig: sigOf(key, ["pause", "resume"].includes(action) ? null : id), until: Date.now() + BUSY_MS });
+    if (last) render(last);
+  }
   try {
     const r = await fetch("/api/action", { method: "POST", headers: { "Content-Type": "application/json", "X-Aiflow-Token": TOKEN }, body: JSON.stringify({ action, project: key, id, value }) });
     if (r.status === 403) return staleToken();
@@ -278,6 +306,7 @@ async function act(action, key, id, value) {
     toast({ allow_paths: "Пути разрешены, задача продолжит работу", cancel: "Задача снята", approve: "План одобрен", retry: "Повтор поставлен", pause: "Очередь на паузе", resume: "Очередь продолжает", forget: "Проект убран из службы" }[action] || "Готово");
     setTimeout(load, 600);
   } catch (e) {
+    if (queued) { busy.delete(bk); if (last) render(last); }
     const t = action === "open_session" && findTask(key, id);
     if (t && t.session && t.session.id) {
       navigator.clipboard?.writeText("claude attach " + t.session.id);
@@ -335,17 +364,17 @@ const REASONS = { manual: "вручную", rate_limit: "лимит исполь
 function renderWaiting() {
   const items = [];
   for (const p of last.projects) for (const t of p.tasks.filter(t => t.needs)) {
-    const k = esc(p.key), id = esc(t.id);
+    const k = esc(p.key), id = esc(t.id), d = dis(p.key, t.id);
     const acts = [];
-    if (t.state === "plan_review") acts.push(`<button class="primary" data-act="approve" data-project="${k}" data-id="${id}">Одобрить план</button>`);
-    if (t.state === "needs_human") acts.push(`<button class="primary" data-act="retry" data-project="${k}" data-id="${id}">Повторить</button>`);
-    if (t.state === "needs_human" && /защищ|protected/i.test(t.needs || "")) acts.push(`<button data-allow="${id}" data-project="${k}">Разрешить пути…</button>`);
+    if (t.state === "plan_review") acts.push(`<button class="primary" data-act="approve" data-project="${k}" data-id="${id}"${d}>Одобрить план</button>`);
+    if (t.state === "needs_human") acts.push(`<button class="primary" data-act="retry" data-project="${k}" data-id="${id}"${d}>Повторить</button>`);
+    if (t.state === "needs_human" && /защищ|protected/i.test(t.needs || "")) acts.push(`<button data-allow="${id}" data-project="${k}"${d}>Разрешить пути…</button>`);
     if (t.pr_url) acts.push(`<a href="${esc(t.pr_url)}" target="_blank" rel="noopener">PR #${esc(t.pr)}</a>`);
     if (t.session && t.session.id) acts.push(`<button data-act="open_session" data-project="${k}" data-id="${id}">Открыть сессию</button>`);
-    acts.push(`<button class="danger" data-cancel="${id}" data-project="${k}">Снять</button>`);
+    acts.push(`<button class="danger" data-cancel="${id}" data-project="${k}"${d}>Снять</button>`);
     const proj = many() ? `<span class="proj">${esc(p.name)}</span> ` : "";
     items.push(`<div class="wait-item ${t.state === "needs_human" ? "fail" : ""}">
-      <div><div class="what">${proj}${id} <span class="why">— ${esc(t.title)}</span></div><div class="why">${esc(t.needs)}</div></div>
+      <div><div class="what">${proj}${id} <span class="why">— ${esc(t.title)}</span></div><div class="why">${esc(t.needs)}</div>${d ? `<div class="busy-note">Принято, ждёт прохода очереди…</div>` : ""}</div>
       <div class="acts">${acts.join("")}</div></div>`);
   }
   $("waiting").hidden = items.length === 0;
@@ -381,7 +410,7 @@ function renderBoard(p) {
     const pr = t.pr ? (t.pr_url ? `<a href="${esc(t.pr_url)}" target="_blank" rel="noopener">#${esc(t.pr)}</a>` : "#" + esc(t.pr)) : "—";
     const rounds = t.rounds ? `раунд ${esc(t.rounds)}/${esc(t.max_rounds)}` : (t.review_lock ? "на ревью" : "");
     const cancel = t.state === "merged" || t.state === "cancelled" ? ""
-      : `<button class="link danger" data-cancel="${id}" data-project="${k}" title="Остановить сессии задачи и закрыть её PR">Снять</button>`;
+      : `<button class="link danger" data-cancel="${id}" data-project="${k}" title="Остановить сессии задачи и закрыть её PR"${dis(p.key, t.id)}>Снять</button>`;
     html += `<div class="meta"><div class="num">${pr}${rounds ? ", " + rounds : ""}</div><div class="line2 num">${t.tokens ? tokens(t.tokens) + " токенов" : "—"}</div>${cancel}</div>`;
   }
   const note = cancelled
@@ -400,7 +429,7 @@ function renderProject(p) {
   const pz = p.paused;
   const reason = pz ? (pz.reason === "integration_red" ? "ветка " + p.base + " красная" : REASONS[pz.reason] || pz.reason) : "";
   const qstate = pz ? `<span class="state paused">Пауза: ${esc(reason)}${pz.until ? ", до " + time(pz.until) : ""}</span>` : `<span class="state">Очередь идёт</span>`;
-  const qbtn = `<button data-act="${pz ? "resume" : "pause"}" data-project="${k}">${pz ? "Продолжить очередь" : "Поставить на паузу"}</button>`;
+  const qbtn = `<button data-act="${pz ? "resume" : "pause"}" data-project="${k}"${dis(p.key, null)}>${pz ? "Продолжить очередь" : "Поставить на паузу"}</button>`;
   return `<section class="project">
     <div class="phead">
       <div><h2>${esc(p.name)}</h2>
