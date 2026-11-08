@@ -488,8 +488,7 @@ os.environ["PATH"] = {path!r} + os.pathsep + os.environ.get("PATH", "")
 import time
 with open(home / "service.log", "ab") as log:
     stamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-    log.write(f"{{stamp}} автозапуск: {{script}}
-".encode("utf-8"))
+    log.write(f"{{stamp}} автозапуск: {{script}}\n".encode("utf-8"))
     log.flush()
     sys.exit(subprocess.call([sys.executable, "-X", "utf8", script, "service"], stdout=log, stderr=log))
 '''
