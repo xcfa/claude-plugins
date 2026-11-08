@@ -85,6 +85,26 @@ def forget(root) -> bool:
     return _edit_registry(change)
 
 
+def panel_token() -> str:
+    """Токен панели службы переживает её перезапуск: открытая страница не ловит forbidden."""
+    p = home() / "panel.token"
+    try:
+        tok = p.read_text(encoding="utf-8").strip()
+        if len(tok) >= 24:
+            return tok
+    except OSError:
+        pass
+    import secrets
+    tok = secrets.token_urlsafe(24)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(tok, encoding="utf-8")
+    try:
+        os.chmod(p, 0o600)
+    except OSError:
+        pass
+    return tok
+
+
 def global_config() -> dict:
     cfg = {"ui_port": DEFAULT_PORT}
     cfg.update(read_json(home() / "config.json", {}) or {})

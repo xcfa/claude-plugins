@@ -698,6 +698,8 @@ def ci_fix_prompt(t: dict, failed: list[str]) -> str:
     )
 
 
+_BASE_SEEN: dict[tuple[str, str], tuple[float, bool]] = {}
+
 STAGE_ROLE = {"planning": "planner", "in_progress": "worker", "in_review": "worker"}
 
 RESUME_FINISH = {
@@ -707,10 +709,11 @@ RESUME_FINISH = {
 }
 
 
-def resume_prompt(t: dict, state: str, why: str) -> str:
+def resume_prompt(t: dict, state: str, why: str, base: str) -> str:
     """Промпт для возобновления той же сессии после остановки."""
     return (
-        f"Работу над задачей {t['id']} прервали ({why}). Продолжи с того места, где остановился: "
+        f"Работу над задачей {t['id']} прервали ({why}). Базовая ветка сейчас: {base} — "
+        "если раньше была указана другая, работай от этой. Продолжи с того места, где остановился: "
         "проверь git status и git log в своём рабочем каталоге — незакоммиченные правки на месте, "
         "доделай начатое, не начинай заново. "
         + RESUME_FINISH.get(state, "Продолжи по своим инструкциям.").format(id=t["id"], pr=t.get("pr"))
@@ -777,7 +780,7 @@ class Dispatcher:
             if counts.get(role, 0) >= int(self.cfg.get("auto_resume", 0) or 0):
                 return False
             counts[role] = counts.get(role, 0) + 1
-        if not self.wake(t, role, resume_prompt(t, state, why)):
+        if not self.wake(t, role, resume_prompt(t, state, why, self.cfg['base_branch'])):
             return False
         e = self.cur(t, role)
         e["resumed_at"] = iso()
@@ -900,6 +903,7 @@ class Dispatcher:
         by_id = {t["id"]: t for t in tasks}
         self.process_commands(by_id)
         self.check_pause_timer()
+        self.check_base()
         if self.cfg.get("watch_integration"):
             self.check_integration()
         for t in tasks:
@@ -945,6 +949,23 @@ class Dispatcher:
         p = self.q.get("paused")
         if p and p.get("until") and now() >= (parse_iso(p["until"]) or now()):
             self.unpause("пауза по лимиту закончилась, очередь продолжает")
+
+    def check_base(self) -> None:
+        """Нет базовой ветки на origin — пауза, а не сессии, которые упрутся в это."""
+        base = self.cfg["base_branch"]
+        key = (str(self.root), base)
+        cached = _BASE_SEEN.get(key)
+        if cached is None or time.time() - cached[0] > 600:
+            p = run(["git", "ls-remote", "--heads", "origin", base], cwd=self.root, timeout=30)
+            if p.returncode != 0:
+                return  # сеть или доступ: не повод останавливать очередь
+            cached = _BASE_SEEN[key] = (time.time(), bool(p.stdout.strip()))
+        paused = self.q.get("paused") or {}
+        if not cached[1] and paused.get("reason") != "base_missing":
+            self.pause("base_missing", None, f"базовой ветки {base} нет на origin: поправьте base_branch "
+                       "в runs/config.json либо создайте ветку")
+        elif cached[1] and paused.get("reason") == "base_missing":
+            self.unpause(f"базовая ветка {base} есть на origin, очередь продолжает")
 
     def check_integration(self) -> None:
         r = self.gh.last_push_run(self.cfg["base_branch"])
@@ -1393,7 +1414,11 @@ def cmd_init(args, root: Path) -> int:
     store.runs.mkdir(exist_ok=True)
     created = []
     if not (store.runs / "config.json").exists():
-        write_json(store.runs / "config.json", DEFAULT_CONFIG)
+        cfg = dict(DEFAULT_CONFIG)
+        p = run(["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], cwd=root, timeout=30)
+        if p.returncode == 0 and p.stdout.strip().startswith("origin/"):
+            cfg["base_branch"] = p.stdout.strip()[len("origin/"):]
+        write_json(store.runs / "config.json", cfg)
         created.append("runs/config.json")
     gi = root / ".gitignore"
     lines = gi.read_text(encoding="utf-8").splitlines() if gi.exists() else []

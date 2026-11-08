@@ -125,7 +125,7 @@ class _Cache:
 def start_server(provider, port: int, wake: threading.Event, service: bool = False):
     """provider() — список Store проектов панели. service=True — общая панель службы."""
     import aiflow_service as svc
-    token = secrets.token_urlsafe(24)
+    token = svc.panel_token() if service else secrets.token_urlsafe(24)
     caches: dict[str, _Cache] = {}
     models: dict[str, _Models] = {}
     lock = threading.Lock()
