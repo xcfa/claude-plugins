@@ -99,7 +99,9 @@ DEFAULT_CONFIG = {
 
 
 # события, о которых монитор сообщает оркестратору при notify: important
-NOTIFY_KINDS = {"plan_ready", "plan_updated", "needs_input", "needs_human", "merged", "paused", "unpaused", "error", "batch_done"}
+NOTIFY_KINDS = {"plan_ready", "plan_updated", "needs_input", "needs_human", "merged", "paused", "unpaused", "error", "batch_done", "cancelled"}
+# Снятие задачи будит оркестратора (чтобы закрыть его вопрос по ней), но без системного уведомления.
+NO_TOAST_KINDS = {"cancelled"}
 
 
 def notify_level(cfg: dict) -> str:
@@ -1061,6 +1063,7 @@ class Dispatcher:
             self.finish_merged(t)
         elif pr.get("state") == "CLOSED":
             self.set_state(t, "cancelled", "PR закрыт")
+            self.emit(t, "cancelled", f"{t['id']}: PR #{t['pr']} закрыт, задача снята", key="cancelled")
 
     def adv_in_review(self, t: dict) -> None:
         pr = self.gh.pr(t["pr"], "state,labels,headRefOid,statusCheckRollup")
@@ -1069,6 +1072,7 @@ class Dispatcher:
         if pr.get("state") == "CLOSED":
             self.release_lock(t)
             self.set_state(t, "cancelled", "PR закрыт")
+            self.emit(t, "cancelled", f"{t['id']}: PR #{t['pr']} закрыт, задача снята", key="cancelled")
             return
         labels = {lb.get("name") for lb in pr.get("labels") or []}
         rep = self.new_report(t, "worker")
@@ -1851,7 +1855,7 @@ def desktop_notify(cfg: dict, events: list[dict], project: str | None = None) ->
     if not cfg.get("desktop_notify", True):
         return
     title = f"aiflow · {project}" if project else "aiflow"
-    important = [ev for ev in events if ev.get("kind") in NOTIFY_KINDS]
+    important = [ev for ev in events if ev.get("kind") in NOTIFY_KINDS - NO_TOAST_KINDS]
     if len(important) > 3:
         _toast(title, f"{len(important)} событий, подробности в панели")
         return
