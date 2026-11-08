@@ -301,7 +301,7 @@ async function act(action, key, id, value) {
     if (r.status === 403) return staleToken();
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || r.statusText);
-    if (action === "open_session") return toast(`Сессия открыта в новом окне (${d.where})`);
+    if (action === "open_session") return toast(d.where === "уже открытом окне" ? "Окно сессии уже открыто — вывел его на передний план" : `Сессия открыта в новом окне (${d.where})`);
     if (action === "cancel" && d.warnings && d.warnings.length) { toast("Снята, но: " + d.warnings.join("; ")); setTimeout(load, 600); return; }
     toast({ allow_paths: "Пути разрешены, задача продолжит работу", cancel: "Задача снята", approve: "План одобрен", retry: "Повтор поставлен", pause: "Очередь на паузе", resume: "Очередь продолжает", forget: "Проект убран из службы" }[action] || "Готово");
     setTimeout(load, 600);

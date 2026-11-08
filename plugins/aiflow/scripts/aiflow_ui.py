@@ -66,22 +66,69 @@ def _task_session(t: dict) -> str | None:
     return None
 
 
+def _win_focus(title: str, wait: float = 0.0) -> bool:
+    """Windows: вывести на передний план окно, в заголовке которого есть title.
+    Служба — фоновый процесс, и Windows не даёт ему просто так забрать фокус: перед
+    SetForegroundWindow нажимаем и отпускаем Alt — это снимает блокировку переднего плана."""
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+    found: list[int] = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def each(hwnd, _):
+        if user32.IsWindowVisible(hwnd):
+            n = user32.GetWindowTextLengthW(hwnd)
+            if n:
+                buf = ctypes.create_unicode_buffer(n + 1)
+                user32.GetWindowTextW(hwnd, buf, n + 1)
+                if title in buf.value:
+                    found.append(hwnd)
+                    return False
+        return True
+
+    deadline = time.time() + wait
+    while True:
+        found.clear()
+        user32.EnumWindows(each, 0)
+        if found or time.time() >= deadline:
+            break
+        time.sleep(0.25)
+    if not found:
+        return False
+    hwnd = found[0]
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+    user32.keybd_event(0x12, 0, 0, 0)  # VK_MENU down
+    user32.keybd_event(0x12, 0, 2, 0)  # VK_MENU up
+    user32.SetForegroundWindow(hwnd)
+    user32.BringWindowToTop(hwnd)
+    return True
+
+
 def open_terminal(root: Path, sid: str) -> str:
-    """Открыть `claude attach <sid>` в новом окне терминала. Возвращает, где открыли."""
+    """Открыть `claude attach <sid>` в окне терминала; если окно этой сессии уже открыто —
+    вывести его на передний план. Возвращает, где открыли."""
     if not re.fullmatch(r"[A-Za-z0-9][\w\-]{0,100}", sid):
         raise aiflow.AiflowError("некорректный id сессии")
     claude = shutil.which("claude") or "claude"
     title = f"aiflow {sid}"
     if os.name == "nt":
+        if _win_focus(title):
+            return "уже открытом окне"
         flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         wt = shutil.which("wt.exe") or shutil.which("wt")
         if wt:
-            subprocess.Popen([wt, "-w", "new", "new-tab", "-d", str(root), "--title", title, claude, "attach", sid],
+            # --suppressApplicationTitle: Claude Code меняет заголовок, а по нему окно ищется в следующий раз.
+            subprocess.Popen([wt, "-w", "new", "new-tab", "-d", str(root), "--title", title, "--suppressApplicationTitle",
+                              claude, "attach", sid], cwd=root, creationflags=flags, env=aiflow.claude_env())
+            where = "Windows Terminal"
+        else:
+            subprocess.Popen(["cmd", "/c", "start", title, "/D", str(root), claude, "attach", sid],
                              cwd=root, creationflags=flags, env=aiflow.claude_env())
-            return "Windows Terminal"
-        subprocess.Popen(["cmd", "/c", "start", title, "/D", str(root), claude, "attach", sid],
-                         cwd=root, creationflags=flags, env=aiflow.claude_env())
-        return "cmd"
+            where = "cmd"
+        threading.Thread(target=_win_focus, args=(title, 8.0), daemon=True).start()
+        return where
     cmd = f"cd {shlex.quote(str(root))} && {shlex.quote(claude)} attach {sid}"
     if sys.platform == "darwin":
         esc = cmd.replace("\\", "\\\\").replace('"', '\\"')
