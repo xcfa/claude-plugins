@@ -190,16 +190,64 @@ def extract_json(text: str) -> dict | None:
     return None
 
 
+AGENT = "aiflow-reviewer"
+REVIEWER_PERMISSION = {
+    "edit": "deny", "webfetch": "deny",
+    "bash": {"*": "deny", "git diff*": "allow", "git log*": "allow", "git show*": "allow"},
+}
+
+
+def reviewer_prompt(root: Path) -> str:
+    """Инструкции ревьюера: своя версия проекта (.opencode/aiflow-reviewer.md или старая
+    .opencode/agent/reviewer.md от aiflow init), иначе шаблон плагина. Frontmatter отбрасывается."""
+    old = root / ".opencode" / "agent" / "reviewer.md"
+    for p in (root / ".opencode" / "aiflow-reviewer.md", old, aiflow.TEMPLATES / "reviewer.md"):
+        try:
+            text = p.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if p == old and "aiflow" not in text.split("---", 2)[1 if text.startswith("---") else 0][:400]:
+            continue  # это собственный reviewer проекта, а не версия шаблона aiflow
+        if text.startswith("---"):
+            text = text.split("---", 2)[2] if text.count("---") >= 2 else text
+        return text.strip() + "\n"
+    raise RuntimeError("нет инструкций ревьюера: шаблон плагина не найден")
+
+
+def reviewer_config(r: Runner, tmp: Path) -> dict:
+    """Окружение opencode с агентом aiflow-reviewer из отдельного конфига: в репозиторий ничего
+    не пишется, и агент не путается с собственным reviewer проекта (.opencode/agent(s)/reviewer.md)."""
+    prompt = tmp / "aiflow-reviewer.md"
+    prompt.write_text(reviewer_prompt(r.cwd), encoding="utf-8")
+    cfg: dict = {}
+    user_cfg = r.plain_env.get("OPENCODE_CONFIG")
+    if user_cfg:
+        try:
+            cfg = json.loads(Path(user_cfg).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            cfg = {}
+    cfg.setdefault("agent", {})[AGENT] = {
+        "description": "Read-only ревьюер pull request'ов aiflow. Возвращает только JSON.",
+        "mode": "primary",
+        "prompt": "{file:" + prompt.as_posix() + "}",
+        "permission": REVIEWER_PERMISSION,
+    }
+    path = tmp / "opencode.json"
+    path.write_text(json.dumps(cfg, ensure_ascii=False, indent=1), encoding="utf-8")
+    return {**r.plain_env, "OPENCODE_CONFIG": str(path)}
+
+
 def call_reviewer(r: Runner, pr: int, rnd: int, max_rounds: int, model: str, ctx_path: Path) -> dict:
     message = (f"Review pull request #{pr}, round {rnd} of {max_rounds}. All materials are in the attached file. "
                "Reply with exactly one JSON object following your instructions.")
-    cmd = [r.opencode, "run", message, "--agent", "reviewer"]
+    env = reviewer_config(r, ctx_path.parent)
+    cmd = [r.opencode, "run", message, "--agent", AGENT]
     if model:
         cmd += ["--model", model]
     cmd += ["--file", str(ctx_path)]
     last = ""
     for _ in range(PARSE_ATTEMPTS):
-        proc = r.run(cmd, env=r.plain_env, check=False, timeout=OPENCODE_TIMEOUT)
+        proc = r.run(cmd, env=env, check=False, timeout=OPENCODE_TIMEOUT)
         last = ANSI_RE.sub("", proc.stdout or "")
         data = extract_json(last)
         if data is not None and "comments" in data:

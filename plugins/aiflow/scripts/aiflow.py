@@ -1518,8 +1518,7 @@ def cmd_init(args, root: Path) -> int:
     if add:
         gi.write_text("\n".join(lines + add) + "\n", encoding="utf-8")
         created.append(".gitignore (+" + ", ".join(add) + ")")
-    for src, dst in (("reviewer.md", ".opencode/agent/reviewer.md"),
-                     ("ci.yml", ".github/workflows/ci.yml"),
+    for src, dst in (("ci.yml", ".github/workflows/ci.yml"),
                      ("ARCHITECTURE.md", "docs/ARCHITECTURE.md")):
         d = root / dst
         if not d.exists():
@@ -1553,7 +1552,7 @@ def cmd_init(args, root: Path) -> int:
           "  1. Впишите модель ревьюера в runs/config.json → reviewer_model (opencode models deepseek).\n"
           f"  2. Заполните .github/workflows/ci.yml и сделайте job обязательной проверкой для {store.config()['base_branch']}.\n"
           "  3. Добавьте в .claude/settings.json allow-правила для сборки и тестов проекта.\n"
-          "  4. Закоммитьте .claude/settings.json, .opencode/, .github/, docs/.\n"
+          "  4. Закоммитьте .claude/settings.json, .github/, docs/.\n"
           "  5. aiflow doctor")
     return 0
 

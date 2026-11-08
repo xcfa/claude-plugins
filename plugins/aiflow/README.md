@@ -55,11 +55,14 @@ claude plugin install aiflow@aiflow-local
    обязательное одобрение — только в режиме `bot`. CODEOWNERS и «Require approval of the most
    recent push» не включайте.
 3. **Инициализация.** В сессии Claude Code в корне репозитория: `! aiflow init`. Команда
-   создаст `runs/config.json`, шаблоны `.opencode/agent/reviewer.md`, `.github/workflows/ci.yml`,
+   создаст `runs/config.json`, шаблоны `.github/workflows/ci.yml`,
    `docs/ARCHITECTURE.md`, добавит права для фоновых сессий в `.claude/settings.json`
    и метки `plan-approved`, `needs-human`, `retry`.
 4. **Настройка.** Выберите модель ревьюера в панели («Настройки» внизу страницы) или впишите
    `reviewer_model` в `runs/config.json` (`opencode models deepseek`),
+   при желании положите свои инструкции ревьюера в `.opencode/aiflow-reviewer.md` (по умолчанию —
+   `templates/reviewer.md` плагина; aiflow запускает его агентом `aiflow-reviewer` через отдельный
+   конфиг opencode, так что он не пересекается с агентами проекта),
    заполните `ci.yml`, добавьте в `.claude/settings.json` allow-правила для сборки и тестов
    проекта (иначе фоновые сессии будут ждать вашего разрешения). Закоммитьте всё, кроме `runs/`.
 5. **Доверие к папке.** Хотя бы раз откройте `claude` в репозитории интерактивно и примите

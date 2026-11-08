@@ -319,7 +319,7 @@ function renderUsage() {
   if (withUsage > 1) Object.entries(total).sort((a, b) => b[1].output - a[1].output)
     .forEach(([m, u], i) => rows.push(usageRow(i === 0 ? "Всего" : "", m, u, "sum")));
   $("usage").hidden = rows.length === 0;
-  $("usagebody").innerHTML = rows.join("");
+  setHTML($("usagebody"), rows.join(""));
 }
 
 function tone(t) {
@@ -349,7 +349,7 @@ function renderWaiting() {
       <div class="acts">${acts.join("")}</div></div>`);
   }
   $("waiting").hidden = items.length === 0;
-  $("waitlist").innerHTML = items.join("");
+  setHTML($("waitlist"), items.join(""));
 }
 
 function renderBoard(p) {
@@ -416,19 +416,37 @@ function renderEvents() {
   for (const p of last.projects) for (const e of p.events || []) all.push({ ...e, proj: p.name });
   all.sort((a, b) => String(b.at).localeCompare(String(a.at)));
   const shown = all.slice(0, 60);
-  $("evlist").innerHTML = shown.length
+  setHTML($("evlist"), shown.length
     ? shown.map(e => `<li class="${esc(e.kind)}"><time class="num">${time(e.at)}</time><span>${many() ? `<span class="proj">${esc(e.proj)}</span> ` : ""}${esc(e.text)}</span></li>`).join("")
-    : `<li><time></time><span>Событий пока нет.</span></li>`;
+    : `<li><time></time><span>Событий пока нет.</span></li>`);
 }
 
 function renderSettingsProjects() {
   const sel = $("rmproj");
   const keys = last.projects.filter(p => !p.error).map(p => p.key);
   const cur = sel.value;
-  sel.innerHTML = last.projects.filter(p => !p.error).map(p => `<option value="${esc(p.key)}">${esc(p.name)}</option>`).join("");
+  setHTML(sel, last.projects.filter(p => !p.error).map(p => `<option value="${esc(p.key)}">${esc(p.name)}</option>`).join(""));
   if (keys.includes(cur)) sel.value = cur;
   $("rmprojrow").hidden = keys.length < 2;
 }
+
+// Перерисовывать блок, только если его разметка изменилась: иначе каждые 5 секунд
+// сбрасывались бы выделение текста, фокус и прокрутка внутри блоков.
+function setHTML(el, html) {
+  if (el._html === html) return;
+  el._html = html;
+  el.innerHTML = html;
+}
+
+// Пока пользователь выделяет текст, свежее состояние откладывается до снятия выделения.
+function selecting() {
+  const sel = window.getSelection();
+  return !!sel && !sel.isCollapsed && sel.toString().length > 0;
+}
+let pendingState = null;
+document.addEventListener("selectionchange", () => {
+  if (pendingState && !selecting()) { const s = pendingState; pendingState = null; render(s); }
+});
 
 function render(s) {
   last = s;
@@ -441,7 +459,7 @@ function render(s) {
     $("sub").innerHTML = `<span class="offline">панель одного проекта, служба не запущена — aiflow up запустит её для всех проектов</span>`;
   }
   renderWaiting();
-  $("projects").innerHTML = s.projects.map(renderProject).join("");
+  setHTML($("projects"), s.projects.map(renderProject).join(""));
   renderUsage();
   renderEvents();
   renderSettingsProjects();
@@ -510,7 +528,9 @@ $("rmform").addEventListener("submit", async (e) => {
 async function load() {
   try {
     const r = await fetch("/api/state", { cache: "no-store" });
-    render(await r.json());
+    const s = await r.json();
+    if (selecting()) { pendingState = s; return; }
+    render(s);
   } catch (e) {
     $("sub").innerHTML = `<span class="offline">Панель не отвечает: служба остановлена (aiflow up) или порт занят.</span>`;
   }
