@@ -13,6 +13,7 @@
       "Bash(aiflow doctor:*)",
       "Bash(aiflow enqueue:*)",
       "Bash(aiflow cancel:*)",
+      "Bash(aiflow amend:*)",
       "Bash(git status:*)",
       "Bash(git diff:*)",
       "Bash(git log:*)",

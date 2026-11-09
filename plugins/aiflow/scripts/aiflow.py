@@ -77,7 +77,9 @@ DEFAULT_CONFIG = {
     "tick_seconds": 45,
     "base_branch": "master",
     "ui_port": 8765,
-    "permission_mode": "acceptEdits",
+    # auto — безопасные действия одобряет классификатор Claude Code, без вопросов вам; deny из
+    # .claude/settings.json действуют и в нём. acceptEdits — спрашивать о каждой команде вне allow.
+    "permission_mode": "auto",
     "planner_model": {"complex": "opus", "simple": "sonnet"},
     "planner_effort": {"complex": "medium", "simple": "medium"},
     "discuss_model": "opus",  # сессия обсуждения идеи (задача kind: discuss)
@@ -625,8 +627,11 @@ class Claude:
         out = (p.stdout or "") + (p.stderr or "")
         return (self._short_id(out) if p.returncode == 0 else None), out.strip()
 
-    def resume(self, session_id: str, prompt: str) -> tuple[str | None, str]:
-        p = run([self.bin, "--resume", session_id, "--bg", prompt], cwd=self.root, timeout=180, env=self.env)
+    def resume(self, session_id: str, prompt: str, mode=None) -> tuple[str | None, str]:
+        cmd = [self.bin, "--resume", session_id, "--bg"]
+        if mode:
+            cmd += ["--permission-mode", mode]
+        p = run(cmd + [prompt], cwd=self.root, timeout=180, env=self.env)
         out = (p.stdout or "") + (p.stderr or "")
         return (self._short_id(out) if p.returncode == 0 else None), out.strip()
 
@@ -1113,7 +1118,7 @@ class Dispatcher:
             sid_full = (self.sess(entry) or {}).get("sessionId")
         if not sid_full:
             return False
-        new_id, out = self.claude.resume(sid_full, prompt)
+        new_id, out = self.claude.resume(sid_full, prompt, mode=self.cfg.get("permission_mode"))
         if new_id and new_id != entry["id"]:
             self.adopt(t, role, new_id, entry.get("name", f"{role}: {t['id']}"))
         elif not new_id:

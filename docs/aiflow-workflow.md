@@ -247,7 +247,7 @@ claude plugin install aiflow@aiflow-local
 7. Один раз открыть `claude` в репозитории интерактивно и принять доверие к папке.
 8. `! aiflow doctor`.
 
-**Основные настройки `runs/config.json`:** `concurrency` (2), `tick_seconds` (45), `base_branch`, `permission_mode` (`acceptEdits`), `planner_model` и `planner_effort` по сложности, `worker_model` и `worker_effort` (строкой или по сложности), `worker_opus_effort` (`medium`), `reviewer_model`, `max_rounds` (5), `auto_resume` (1), `notify` (`important` — оркестратору только события, которые ждут вас; `all`; `none`), `desktop_notify` (`true` — те же важные события системными уведомлениями), `max_diff_chars`, `ci_timeout_minutes`, `rate_limit_pause_minutes`, `watch_integration` (следить за CI базовой ветки после мержа), `protected_paths`.
+**Основные настройки `runs/config.json`:** `concurrency` (2), `tick_seconds` (45), `base_branch`, `permission_mode` (`auto` — безопасные действия одобряет классификатор Claude Code, запреты `deny` из `.claude/settings.json` действуют; `acceptEdits` — спрашивать о каждой команде вне `allow`), `planner_model` и `planner_effort` по сложности, `worker_model` и `worker_effort` (строкой или по сложности), `worker_opus_effort` (`medium`), `reviewer_model`, `max_rounds` (5), `auto_resume` (1), `notify` (`important` — оркестратору только события, которые ждут вас; `all`; `none`), `desktop_notify` (`true` — те же важные события системными уведомлениями), `max_diff_chars`, `ci_timeout_minutes`, `rate_limit_pause_minutes`, `watch_integration` (следить за CI базовой ветки после мержа), `protected_paths`.
 
 ## 12. Ваша работа день за днём
 
