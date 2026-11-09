@@ -332,6 +332,7 @@ def serve() -> int:
         _write_info(panel)
         print(f"{iso()} служба aiflow {aiflow.VERSION} запущена, панель: {panel_url(info()) or panel.error or 'выключена'}",
               flush=True)
+        migrated: set[str] = set()
         while True:
             had_panel = bool(panel.srv)
             panel.ensure()
@@ -344,6 +345,9 @@ def serve() -> int:
             for k in [k for k in held if k not in keys]:
                 held.pop(k).release()
             for root in roots:
+                if project_key(root) not in migrated:
+                    migrated.add(project_key(root))
+                    _migrate_config(root)
                 _tick_project(root, held, next_at, errors, warned, forced, len(roots) > 1)
             wake.wait(timeout=5)
     except KeyboardInterrupt:
@@ -355,6 +359,19 @@ def serve() -> int:
         if int((read_json(home() / "service.json", {}) or {}).get("pid") or 0) == os.getpid():
             (home() / "service.json").unlink(missing_ok=True)
         lock.release()
+
+
+def _migrate_config(root) -> None:
+    """Новые ключи настроек — в runs/config.json проекта, один раз за запуск службы."""
+    try:
+        st = Store(Path(root))
+        added = st.migrate_config()
+        if added:
+            st.event("config", None, f"aiflow {aiflow.VERSION}: в runs/config.json добавлены настройки "
+                                     + ", ".join(added))
+            print(f"{iso()} {Path(root).name}: в runs/config.json добавлено {', '.join(added)}", flush=True)
+    except Exception as e:
+        print(f"{iso()} {Path(root).name}: не удалось обновить runs/config.json: {e}", flush=True)
 
 
 # ---------------------------------------------------------------- события для сессии оркестратора

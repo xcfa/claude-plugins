@@ -386,6 +386,27 @@ class Store:
                 cfg[k] = v
         return cfg
 
+    def migrate_config(self) -> list[str]:
+        """Дописать в runs/config.json ключи, появившиеся в новой версии. Заданные значения не меняются:
+        строка на месте словаря (например, worker_effort: "high") так и остаётся, списки не дополняются."""
+        path = self.runs / "config.json"
+        user = read_json(path, None)
+        if not isinstance(user, dict):
+            return []
+        added = []
+        for k, v in DEFAULT_CONFIG.items():
+            if k not in user:
+                user[k] = json.loads(json.dumps(v))
+                added.append(k)
+            elif isinstance(v, dict) and isinstance(user[k], dict):
+                for sk, sv in v.items():
+                    if sk not in user[k]:
+                        user[k][sk] = sv
+                        added.append(f"{k}.{sk}")
+        if added:
+            write_json(path, user)
+        return added
+
     def set_config(self, key: str, value) -> None:
         """Меняет один ключ в runs/config.json, остальное содержимое файла сохраняет как есть."""
         path = self.runs / "config.json"
@@ -1851,6 +1872,10 @@ def cmd_init(args, root: Path) -> int:
             cfg["base_branch"] = p.stdout.strip()[len("origin/"):]
         write_json(store.runs / "config.json", cfg)
         created.append("runs/config.json")
+    else:
+        added = store.migrate_config()
+        if added:
+            created.append("runs/config.json (+" + ", ".join(added) + ")")
     gi = root / ".gitignore"
     lines = gi.read_text(encoding="utf-8").splitlines() if gi.exists() else []
     add = [x for x in ("runs/", ".claude/worktrees/") if x not in lines]
