@@ -38,7 +38,7 @@ def _plugin_version() -> str:
 VERSION = _plugin_version()
 
 STAGES = ["new", "planning", "plan_review", "in_progress", "ready", "in_review", "merged"]
-SIDE_STATES = ["needs_human", "cancelled"]
+SIDE_STATES = ["needs_human", "cancelled", "discussing"]
 IMPLEMENTING = {"planning", "in_progress"}
 TERMINAL = {"merged", "done", "cancelled"}
 FINISHED = {"merged", "done"}  # задача выполнена: зависимые могут стартовать
@@ -79,6 +79,8 @@ DEFAULT_CONFIG = {
     "permission_mode": "acceptEdits",
     "planner_model": {"complex": "opus", "simple": "sonnet"},
     "planner_effort": {"complex": "medium", "simple": "medium"},
+    "discuss_model": "opus",  # сессия обсуждения идеи (задача kind: discuss)
+    "discuss_effort": "high",
     "worker_model": "sonnet",
     "worker_effort": {"complex": "high", "simple": "medium", "trivial": "medium"},  # или одна строка на все задачи
     "worker_opus_effort": "medium",  # effort worker'а на Opus (worker_model: opus), без учёта сложности
@@ -477,12 +479,14 @@ class Store:
 
 
 def write_report(root: Path, tid: str, role: str, status: str, pr: int | None = None,
-                 summary: str = "", details: str = "") -> dict:
+                 summary: str = "", details: str = "", complexity: str | None = None) -> dict:
     store = Store(root)
     if not store.task(tid):
         raise AiflowError(f"задача {tid} не найдена в {store.runs}")
     rep = {"rid": uuid.uuid4().hex, "at": iso(), "role": role, "status": status,
            "pr": pr, "summary": summary.strip(), "details": details.strip()}
+    if complexity:
+        rep["complexity"] = complexity
     write_json(store.runs / tid / "report.json", rep)
     store.log(tid, {"report": rep})
     return rep
@@ -757,6 +761,8 @@ def amend_list(items: list[dict]) -> str:
 def amend_prompt(t: dict, role: str, state: str, items: list[dict], live: bool) -> str:
     """Дополнения пользователя к задаче. live — сессия сейчас работает (доставка хуком)."""
     head = f"Пользователь дополнил задачу {t['id']}:\n\n{amend_list(items)}\n\n"
+    if state == "discussing":
+        return head + "Учти это в обсуждении и ответь пользователю."
     if role == "planner":
         if not t.get("pr"):
             return head + ("Учти это в плане, который сейчас пишешь." if live else
@@ -847,6 +853,27 @@ def direct_prompt(store: Store, t: dict, cfg: dict) -> str:
     )
 
 
+def discuss_prompt(store: Store, t: dict, cfg: dict) -> str:
+    """Задача kind: discuss — обсуждение с пользователем в сессии, PR только по договорённости."""
+    tid = t["id"]
+    return (
+        f"aiflow discussion {tid}: {t.get('title', '')}\n"
+        f"Файл задачи: {store.task_path(tid)} — прочитай его целиком. Базовая ветка: {cfg['base_branch']}.\n"
+        "Режим обсуждения (раздел «Режим обсуждения» твоих инструкций). Пользователь хочет обсудить, как лучше "
+        "это сделать, а не получить план сразу. Изучи код и документацию в объёме, нужном для содержательного "
+        "разговора (сабагенты aiflow:explorer и aiflow:researcher). Затем напиши пользователю: как ты понял "
+        "задачу, 2–3 варианта с плюсами и минусами, свою рекомендацию и вопросы — и закончи ход: пользователь "
+        "ответит в этой сессии. Ветку, PR и файлы не создавай, пока пользователь явно не скажет, что договорились.\n"
+        "Чем закончить, когда договорились:\n"
+        f"— делаем одну задачу: оформи план по своим инструкциям (ветка ai/{tid}, draft PR) и выполни "
+        f"aiflow report {tid} --role planner --status plan_ready --pr <номер> --complexity simple|complex "
+        "--summary \"<одна строка>\";\n"
+        "— делаем несколько независимых задач: поставь их одной командой aiflow enqueue (формат — как в "
+        f"/aiflow:intake) и выполни aiflow report {tid} --role planner --status done --summary \"поставлены: <id>…\";\n"
+        f"— решили ничего не делать: aiflow report {tid} --role planner --status done --summary \"<итог обсуждения>\"."
+    )
+
+
 def review_prompt(t: dict, cfg: dict) -> str:
     return (
         f"Твоя очередь на ревью PR #{t['pr']} (задача {t['id']}). "
@@ -866,9 +893,11 @@ def ci_fix_prompt(t: dict, failed: list[str]) -> str:
 
 _BASE_SEEN: dict[tuple[str, str], tuple[float, bool]] = {}
 
-STAGE_ROLE = {"planning": "planner", "in_progress": "worker", "in_review": "worker"}
+STAGE_ROLE = {"planning": "planner", "discussing": "planner", "in_progress": "worker", "in_review": "worker"}
 
 RESUME_FINISH = {
+    "discussing": "Продолжи обсуждение с пользователем: PR — только когда договоритесь, итог — aiflow report {id} "
+                  "--role planner (plan_ready или done), как в первом сообщении этой сессии.",
     "planning": "Доведи план до конца и отчитайся aiflow report {id} --role planner --status plan_ready, как в твоих инструкциях.",
     "in_progress": "Доведи реализацию до конца и отчитайся aiflow report {id} --role worker --status ready_for_review "
                    "(или --status done, если это задача trivial без изменений в репозитории), как в твоих инструкциях.",
@@ -1282,6 +1311,38 @@ class Dispatcher:
                   key=f"amend_delivered:{pending[-1]['n']}")
         return True
 
+    def adv_discussing(self, t: dict) -> None:
+        rep = self.new_report(t, "planner")
+        if rep:
+            st = rep.get("status")
+            if st == "plan_ready" and rep.get("pr"):
+                t["pr"] = int(rep["pr"])
+                if rep.get("complexity") in ("simple", "complex"):
+                    t["complexity"] = rep["complexity"]
+                t["plan_seen_at"] = iso()
+                self.set_state(t, "plan_review", "обсуждение: договорились, план готов")
+                self.emit(t, "plan_ready", f"{t['id']}: обсуждение завершено, план готов — PR #{t['pr']}",
+                          key=f"plan:{rep['rid']}")
+                return
+            if st == "done":
+                self.set_state(t, "done", rep.get("summary") or "обсуждение завершено")
+                self.emit(t, "done", f"{t['id']}: обсуждение завершено — {rep.get('summary') or 'без задачи'}", key="done")
+                return
+            if st in ("error", "blocked"):
+                return self.to_human(t, rep.get("summary") or "сессия обсуждения сообщила о проблеме")
+        e = self.cur(t, "planner")
+        st = self.sstate(e)
+        if st in ("failed", "stopped"):
+            if not self.check_limit(e):
+                self.lost(t, "planner", "discussing", f"сессия {st}", "сессия обсуждения остановилась")
+        elif st in ("done", "blocked"):
+            # ход закончен — ждём ответа пользователя в сессии; напоминаем один раз на каждый ход
+            mark = (self.sess(e) or {}).get("updatedAt") or e["id"]
+            self.emit(t, "needs_input", f"{t['id']}: обсуждение ждёт вас — откройте сессию (панель или "
+                      f"claude attach {e['id']})", key=f"discuss:{e['id']}:{mark}")
+        elif e and st is None and age_minutes(e.get("resumed_at") or e.get("started_at")) > 10:
+            self.lost(t, "planner", "discussing", "сессия пропала", "сессия обсуждения пропала из claude agents")
+
     def adv_planning(self, t: dict) -> None:
         rep = self.new_report(t, "planner")
         if rep:
@@ -1530,7 +1591,7 @@ class Dispatcher:
             self.set_state(t, "ready", "повтор: ревью той же сессией")
             self.emit(t, "retry", f"{t['id']}: повтор — снова в очереди на ревью", key=f"retry:{iso()[:16]}")
             return
-        role = {"planning": "planner", "in_progress": "worker"}.get(prev or "")
+        role = {"planning": "planner", "discussing": "planner", "in_progress": "worker"}.get(prev or "")
         if role and self.try_resume(t, role, prev, f"повтор после «{reason}»", auto=False):
             self.set_state(t, prev, "повтор: та же сессия")
             return
@@ -1557,11 +1618,21 @@ class Dispatcher:
         conc = int(self.cfg["concurrency"])
         active = sum(1 for t in tasks if t.get("state") in IMPLEMENTING or t.get("launching"))
         for t in tasks:
-            if active >= conc:
-                break
+            if active >= conc and t.get("kind") != "discuss":
+                continue
             if t.get("launching"):
                 continue
             st = t.get("state")
+            if st == "new" and self.deps_ok(t, by_id) and t.get("kind") == "discuss":
+                # обсуждение ждёт человека, а не модель: слот concurrency не занимает
+                ok = self.launch(t, "planner", discuss_prompt(self.store, t, self.cfg) + launch_amendments(t),
+                                 model=self.cfg.get("discuss_model") or "opus",
+                                 effort=self.cfg.get("discuss_effort") or None)
+                if ok:
+                    mark_delivered(t, "launch")
+                    self.set_state(t, "discussing")
+                self.store.save_task(t)
+                continue
             if st == "new" and self.deps_ok(t, by_id) and t.get("complexity") == "trivial":
                 retry = bool(t.pop("retry_pending", False))
                 model, effort = worker_choice(self.cfg, t)
@@ -1677,7 +1748,7 @@ def plan_checklist(body: str, cfg: dict, t: dict) -> tuple[bool, list[str]]:
 # ---------------------------------------------------------------- status / state for UI
 
 STAGE_LABEL = {
-    "new": "в очереди", "planning": "планирование", "plan_review": "обсуждение плана",
+    "new": "в очереди", "discussing": "обсуждение идеи", "planning": "планирование", "plan_review": "обсуждение плана",
     "in_progress": "реализация", "ready": "ждёт ревью", "in_review": "ревью",
     "merged": "смержено", "done": "выполнено", "needs_human": "нужен человек", "cancelled": "снята",
 }
@@ -1704,6 +1775,8 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
             needs = "обсудить и одобрить план"
         elif st == "needs_human":
             needs = t.get("human_reason") or "нужен человек"
+        elif st == "discussing" and cur.get("state") != "working":
+            needs = "обсуждение ждёт вас — откройте сессию"
         elif cur.get("state") == "blocked":
             needs = f"сессия ждёт ответа ({cur.get('waiting') or 'вопрос'})"
         pr = t.get("pr")
@@ -1715,7 +1788,7 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
                     break
         out.append({
             "id": t["id"], "title": t.get("title", ""), "state": st, "label": STAGE_LABEL.get(st, st),
-            "stage": STAGES.index("merged") if st == "done" else STAGES.index(st) if st in STAGES else last_stage,
+            "stage": STAGES.index("planning") if st == "discussing" else STAGES.index("merged") if st == "done" else STAGES.index(st) if st in STAGES else last_stage,
             "complexity": t.get("complexity"), "pr": pr,
             "pr_url": f"{repo_url}/pull/{pr}" if pr and repo_url else None,
             "rounds": review.get("round"), "max_rounds": cfg["max_rounds"],
@@ -1908,7 +1981,10 @@ def normalize_task(raw: dict) -> dict:
     tid = str(raw.get("id", "")).strip().lower()
     if not TASK_ID_RE.match(tid):
         raise AiflowError(f"некорректный id задачи: {tid!r} (латиница, цифры, дефисы)")
-    cx = raw.get("complexity", "simple")
+    kind = raw.get("kind") or "task"
+    if kind not in ("task", "discuss"):
+        raise AiflowError(f"{tid}: kind должен быть task или discuss")
+    cx = raw.get("complexity", "complex" if kind == "discuss" else "simple")
     if cx not in COMPLEXITIES:
         raise AiflowError(f"{tid}: complexity должен быть одним из {', '.join(COMPLEXITIES)}")
     text = str(raw.get("text") or "").strip()
@@ -1918,9 +1994,9 @@ def normalize_task(raw: dict) -> dict:
     if effort is not None and effort not in EFFORTS:
         raise AiflowError(f"{tid}: worker_effort должен быть одним из {', '.join(EFFORTS)}")
     return {
-        "id": tid, "title": str(raw.get("title") or tid).strip(), "text": text, "complexity": cx,
+        "id": tid, "title": str(raw.get("title") or tid).strip(), "text": text, "complexity": cx, "kind": kind,
         "depends_on": [str(d) for d in raw.get("depends_on") or []],
-        "auto_approve_plan": bool(raw.get("auto_approve_plan")) and cx == "simple",
+        "auto_approve_plan": bool(raw.get("auto_approve_plan")) and cx == "simple" and kind == "task",
         "ui": raw.get("ui") or None,
         "planner_model": raw.get("planner_model") or None,
         "worker_model": raw.get("worker_model") or None,
@@ -1980,7 +2056,8 @@ def cmd_enqueue(args, root: Path) -> int:
 
 def cmd_report(args, root: Path) -> int:
     details = Path(args.details_file).read_text(encoding="utf-8") if args.details_file else ""
-    rep = write_report(root, args.id, args.role, args.status, args.pr, args.summary or "", details)
+    rep = write_report(root, args.id, args.role, args.status, args.pr, args.summary or "", details,
+                       getattr(args, "complexity", None))
     print(f"Отчёт записан: {args.id} {rep['role']} {rep['status']}")
     return 0
 
@@ -2183,7 +2260,8 @@ def cmd_amend(args, root: Path) -> int:
         raise AiflowError("пустое дополнение: передайте текст аргументом или --file")
     queue_or_apply(store, {"cmd": "amend", "id": args.id, "text": text, "source": "cli"})
     print(f"{args.id}: дополнение принято — его получит "
-          + ("планировщик" if t.get("state") in ("new", "planning", "plan_review") and not t.get("plan_approved")
+          + ("сессия обсуждения" if t.get("state") == "discussing" else
+             "планировщик" if t.get("state") in ("new", "planning", "plan_review") and not t.get("plan_approved")
              else "исполнитель") + ".")
     return 0
 
@@ -2504,6 +2582,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--status", required=True,
                    choices=["plan_ready", "ready_for_review", "done", "approved", "limit_reached", "error", "blocked"])
     r.add_argument("--pr", type=int)
+    r.add_argument("--complexity", choices=["simple", "complex"], help="оценка реализации (итог обсуждения)")
     r.add_argument("--summary")
     r.add_argument("--details-file")
     s = sub.add_parser("status", help="состояние очереди")
