@@ -40,7 +40,9 @@ VERSION = _plugin_version()
 STAGES = ["new", "planning", "plan_review", "in_progress", "ready", "in_review", "merged"]
 SIDE_STATES = ["needs_human", "cancelled"]
 IMPLEMENTING = {"planning", "in_progress"}
-TERMINAL = {"merged", "cancelled"}
+TERMINAL = {"merged", "done", "cancelled"}
+FINISHED = {"merged", "done"}  # задача выполнена: зависимые могут стартовать
+COMPLEXITIES = ("trivial", "simple", "complex")  # trivial — без плана, сразу исполнитель
 TASK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
 MARKERS = ("<!-- aiflow", "<!-- ai-review", "<!-- human")
 LIMIT_RE = re.compile(
@@ -74,7 +76,7 @@ DEFAULT_CONFIG = {
     "planner_model": {"complex": "opus", "simple": "sonnet"},
     "planner_effort": {"complex": "medium", "simple": "medium"},
     "worker_model": "sonnet",
-    "worker_effort": {"complex": "high", "simple": "medium"},  # или одна строка на все задачи
+    "worker_effort": {"complex": "high", "simple": "medium", "trivial": "medium"},  # или одна строка на все задачи
     "worker_opus_effort": "medium",  # effort worker'а на Opus (worker_model: opus), без учёта сложности
     "reviewer_model": "",
     "review_identity": "self",  # self — ревью и мерж от вашего gh; bot — от бота с токеном REVIEW_BOT_TOKEN
@@ -99,7 +101,7 @@ DEFAULT_CONFIG = {
 
 
 # события, о которых монитор сообщает оркестратору при notify: important
-NOTIFY_KINDS = {"plan_ready", "plan_updated", "needs_input", "needs_human", "merged", "paused", "unpaused", "error", "batch_done", "cancelled"}
+NOTIFY_KINDS = {"plan_ready", "plan_updated", "needs_input", "needs_human", "merged", "done", "paused", "unpaused", "error", "batch_done", "cancelled"}
 # Снятие задачи будит оркестратора (чтобы закрыть его вопрос по ней), но без системного уведомления.
 NO_TOAST_KINDS = {"cancelled"}
 
@@ -751,6 +753,21 @@ def worker_prompt(store: Store, t: dict, cfg: dict, retry: bool = False) -> str:
     return base
 
 
+def direct_prompt(store: Store, t: dict, cfg: dict) -> str:
+    """Задача trivial: без планировщика и плана, исполнитель делает её сразу."""
+    return (
+        f"aiflow task {t['id']}: {t.get('title', '')}\n"
+        f"Файл задачи: {store.task_path(t['id'])} — прочитай его целиком. Сложность: trivial — плана нет, "
+        "выполни задачу сразу по разделу «Задача без плана» твоих инструкций.\n"
+        f"Базовая ветка: {cfg['base_branch']}. Ветка задачи, если понадобится менять репозиторий: ai/{t['id']}.\n"
+        f"Если репозиторий менять не нужно, по готовности выполни: aiflow report {t['id']} --role worker "
+        "--status done --summary \"<что сделано и как проверено>\" и закончи ход.\n"
+        f"Если изменения в репозитории нужны: ветка, коммит, push, PR (gh pr create, не draft), затем "
+        f"aiflow report {t['id']} --role worker --status ready_for_review --pr <номер> --summary \"<1–2 строки>\" "
+        "и закончи ход. Ревью сам не запускай — тебя разбудят, когда подойдёт очередь."
+    )
+
+
 def review_prompt(t: dict, cfg: dict) -> str:
     return (
         f"Твоя очередь на ревью PR #{t['pr']} (задача {t['id']}). "
@@ -774,7 +791,8 @@ STAGE_ROLE = {"planning": "planner", "in_progress": "worker", "in_review": "work
 
 RESUME_FINISH = {
     "planning": "Доведи план до конца и отчитайся aiflow report {id} --role planner --status plan_ready, как в твоих инструкциях.",
-    "in_progress": "Доведи реализацию до конца и отчитайся aiflow report {id} --role worker --status ready_for_review, как в твоих инструкциях.",
+    "in_progress": "Доведи реализацию до конца и отчитайся aiflow report {id} --role worker --status ready_for_review "
+                   "(или --status done, если это задача trivial без изменений в репозитории), как в твоих инструкциях.",
     "in_review": "Продолжи цикл ревью PR #{pr} (aiflow review --pr {pr}) до терминального статуса, как в твоих инструкциях.",
 }
 
@@ -1145,7 +1163,16 @@ class Dispatcher:
     def adv_in_progress(self, t: dict) -> None:
         rep = self.new_report(t, "worker")
         if rep:
+            if rep.get("status") == "done" and not t.get("pr"):
+                self.set_state(t, "done", rep.get("summary") or "выполнено")
+                self.emit(t, "done", f"{t['id']}: выполнено — {rep.get('summary') or 'без изменений в репозитории'}",
+                          key="done")
+                return
             if rep.get("status") == "ready_for_review":
+                if rep.get("pr") and not t.get("pr"):
+                    t["pr"] = int(rep["pr"])
+                if not t.get("pr"):
+                    return self.to_human(t, "worker отчитался ready_for_review без номера PR")
                 t["ready_at"] = iso()
                 self.set_state(t, "ready", "реализация готова")
                 return
@@ -1237,6 +1264,8 @@ class Dispatcher:
                         self.claude.rm(e["id"])
             t["cleaned"] = True
 
+    adv_done = adv_merged  # задача trivial без PR: итог в событии и в report.json
+
     def adv_cancelled(self, t: dict) -> None:
         self.release_lock(t)
         t["cleaned"] = True
@@ -1297,7 +1326,9 @@ class Dispatcher:
             self.set_state(t, prev, "повтор: та же сессия")
             return
         t["retry_pending"] = True
-        if t.get("pr") and t.get("plan_approved"):
+        if t.get("complexity") == "trivial":
+            self.set_state(t, "new" if not t.get("pr") else "plan_review", "повтор")
+        elif t.get("pr") and t.get("plan_approved"):
             self.set_state(t, "plan_review", "повтор: новый worker")
         else:
             self.set_state(t, "new" if not t.get("pr") else "plan_review", "повтор")
@@ -1310,7 +1341,7 @@ class Dispatcher:
         self.adv_merged(t)
 
     def deps_ok(self, t: dict, by_id: dict[str, dict]) -> bool:
-        return all((by_id.get(d) or {}).get("state") == "merged" for d in t.get("depends_on") or [])
+        return all((by_id.get(d) or {}).get("state") in FINISHED for d in t.get("depends_on") or [])
 
     def schedule(self, tasks: list[dict]) -> None:
         by_id = {t["id"]: t for t in tasks}
@@ -1322,7 +1353,21 @@ class Dispatcher:
             if t.get("launching"):
                 continue
             st = t.get("state")
-            if st == "new" and self.deps_ok(t, by_id):
+            if st == "new" and self.deps_ok(t, by_id) and t.get("complexity") == "trivial":
+                retry = bool(t.pop("retry_pending", False))
+                model, effort = worker_choice(self.cfg, t)
+                prompt = direct_prompt(self.store, t, self.cfg)
+                if retry:
+                    prompt += ("\nЭто повторная попытка после остановки: последний отчёт — "
+                               + json.dumps(self.store.report(t["id"]) or {}, ensure_ascii=False))
+                ok = self.launch(t, "worker", prompt, model=model, effort=effort)
+                if ok:
+                    self.set_state(t, "in_progress")
+                    active += 1
+                elif retry:
+                    t["retry_pending"] = True
+                self.store.save_task(t)
+            elif st == "new" and self.deps_ok(t, by_id):
                 cx = t.get("complexity", "simple")
                 ok = self.launch(t, "planner", planner_prompt(self.store, t, self.cfg),
                                  model=t.get("planner_model") or by_complexity(self.cfg["planner_model"], cx),
@@ -1331,7 +1376,7 @@ class Dispatcher:
                     self.set_state(t, "planning")
                     active += 1
                 self.store.save_task(t)
-            elif st == "plan_review" and t.get("plan_approved"):
+            elif st == "plan_review" and (t.get("plan_approved") or t.get("complexity") == "trivial"):
                 retry = bool(t.pop("retry_pending", False))
                 model, effort = worker_choice(self.cfg, t)
                 ok = self.launch(t, "worker", worker_prompt(self.store, t, self.cfg, retry=retry),
@@ -1376,13 +1421,17 @@ class Dispatcher:
 
     def check_batch_done(self, tasks: list[dict]) -> None:
         live = [t for t in tasks if t.get("state") not in TERMINAL and t.get("state") != "needs_human"]
-        merged_unannounced = [t for t in tasks if t.get("state") == "merged" and not t.get("batch_announced")]
+        merged_unannounced = [t for t in tasks if t.get("state") in FINISHED and not t.get("batch_announced")]
         if not live and merged_unannounced:
             for t in merged_unannounced:
                 t["batch_announced"] = True
                 self.store.save_task(t)
             human = [t["id"] for t in tasks if t.get("state") == "needs_human"]
-            text = f"пачка завершена: смержено {len(merged_unannounced)}"
+            n_merged = sum(1 for t in merged_unannounced if t.get("state") == "merged")
+            parts = [f"смержено {n_merged}"] if n_merged else []
+            if len(merged_unannounced) > n_merged:
+                parts.append(f"выполнено без PR {len(merged_unannounced) - n_merged}")
+            text = "пачка завершена: " + ", ".join(parts)
             if human:
                 text += f", ждут вас: {', '.join(human)}"
             self.emit(None, "batch_done", text)
@@ -1415,7 +1464,7 @@ def plan_checklist(body: str, cfg: dict, t: dict) -> tuple[bool, list[str]]:
 STAGE_LABEL = {
     "new": "в очереди", "planning": "планирование", "plan_review": "обсуждение плана",
     "in_progress": "реализация", "ready": "ждёт ревью", "in_review": "ревью",
-    "merged": "смержено", "needs_human": "нужен человек", "cancelled": "снята",
+    "merged": "смержено", "done": "выполнено", "needs_human": "нужен человек", "cancelled": "снята",
 }
 
 
@@ -1451,7 +1500,7 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
                     break
         out.append({
             "id": t["id"], "title": t.get("title", ""), "state": st, "label": STAGE_LABEL.get(st, st),
-            "stage": STAGES.index(st) if st in STAGES else last_stage,
+            "stage": STAGES.index("merged") if st == "done" else STAGES.index(st) if st in STAGES else last_stage,
             "complexity": t.get("complexity"), "pr": pr,
             "pr_url": f"{repo_url}/pull/{pr}" if pr and repo_url else None,
             "rounds": review.get("round"), "max_rounds": cfg["max_rounds"],
@@ -1643,8 +1692,8 @@ def normalize_task(raw: dict) -> dict:
     if not TASK_ID_RE.match(tid):
         raise AiflowError(f"некорректный id задачи: {tid!r} (латиница, цифры, дефисы)")
     cx = raw.get("complexity", "simple")
-    if cx not in ("simple", "complex"):
-        raise AiflowError(f"{tid}: complexity должен быть simple или complex")
+    if cx not in COMPLEXITIES:
+        raise AiflowError(f"{tid}: complexity должен быть одним из {', '.join(COMPLEXITIES)}")
     text = str(raw.get("text") or "").strip()
     if not text:
         raise AiflowError(f"{tid}: пустой text")
@@ -2216,7 +2265,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("id")
     r.add_argument("--role", required=True, choices=["planner", "worker"])
     r.add_argument("--status", required=True,
-                   choices=["plan_ready", "ready_for_review", "approved", "limit_reached", "error", "blocked"])
+                   choices=["plan_ready", "ready_for_review", "done", "approved", "limit_reached", "error", "blocked"])
     r.add_argument("--pr", type=int)
     r.add_argument("--summary")
     r.add_argument("--details-file")

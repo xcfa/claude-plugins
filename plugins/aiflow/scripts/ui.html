@@ -352,7 +352,7 @@ function renderUsage() {
 }
 
 function tone(t) {
-  if (t.state === "merged") return "done";
+  if (t.state === "merged" || t.state === "done") return "done";
   if (t.state === "needs_human") return "fail";
   if (t.needs) return "waiting";
   if (t.state === "new" || t.state === "ready" || t.state === "cancelled") return "idle";
@@ -409,7 +409,7 @@ function renderBoard(p) {
     });
     const pr = t.pr ? (t.pr_url ? `<a href="${esc(t.pr_url)}" target="_blank" rel="noopener">#${esc(t.pr)}</a>` : "#" + esc(t.pr)) : "—";
     const rounds = t.rounds ? `раунд ${esc(t.rounds)}/${esc(t.max_rounds)}` : (t.review_lock ? "на ревью" : "");
-    const cancel = t.state === "merged" || t.state === "cancelled" ? ""
+    const cancel = t.state === "merged" || t.state === "done" || t.state === "cancelled" ? ""
       : `<button class="link danger" data-cancel="${id}" data-project="${k}" title="Остановить сессии задачи и закрыть её PR"${dis(p.key, t.id)}>Снять</button>`;
     html += `<div class="meta"><div class="num">${pr}${rounds ? ", " + rounds : ""}</div><div class="line2 num">${t.tokens ? tokens(t.tokens) + " токенов" : "—"}</div>${cancel}</div>`;
   }
