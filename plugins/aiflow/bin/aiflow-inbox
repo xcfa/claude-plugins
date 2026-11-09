@@ -1,0 +1,15 @@
+#!/usr/bin/env sh
+# Хук aiflow: дополнения пользователя для работающей сессии (scripts/inbox_hook.py).
+# Срабатывает на каждый вызов инструмента во всех сессиях, поэтому при пустых входящих
+# выходит сразу, не запуская Python.
+INBOX="${AIFLOW_HOME:-$HOME/.aiflow}/inbox"
+[ -d "$INBOX" ] && [ -n "$(ls -A "$INBOX" 2>/dev/null)" ] || { cat >/dev/null; exit 0; }
+export PYTHONUTF8=1
+DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+for p in python3 python py; do
+  if command -v "$p" >/dev/null 2>&1 && "$p" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; then
+    exec "$p" "$DIR/../scripts/inbox_hook.py"
+  fi
+done
+cat >/dev/null
+exit 0

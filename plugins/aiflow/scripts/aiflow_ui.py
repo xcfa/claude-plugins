@@ -286,6 +286,15 @@ def start_server(provider, port: int, wake: threading.Event, service: bool = Fal
                     warnings = aiflow.cancel_tasks(store, [tid], note="из панели")
                     wake.set()
                     return self._json(200, {"ok": True, "warnings": warnings})
+                elif action == "amend" and tid:
+                    text = str(body.get("value") or "").strip()
+                    t = store.task(tid)
+                    if not t or t.get("state") in aiflow.TERMINAL:
+                        return self._json(400, {"error": "задача уже завершена — поставьте новую"})
+                    if not text or len(text) > 20000:
+                        return self._json(400, {"error": "пустое или слишком длинное дополнение"})
+                    store.command({"cmd": "amend", "id": tid, "text": text, "source": "panel"})
+                    wake.set()
                 elif action == "allow_paths" and tid:
                     value = body.get("value")
                     paths = value if isinstance(value, list) else re.split(r"[,\n]+", str(value or ""))

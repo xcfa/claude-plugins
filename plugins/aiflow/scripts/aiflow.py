@@ -45,6 +45,10 @@ FINISHED = {"merged", "done"}  # задача выполнена: зависим
 COMPLEXITIES = ("trivial", "simple", "complex")  # trivial — без плана, сразу исполнитель
 TASK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
 MARKERS = ("<!-- aiflow", "<!-- ai-review", "<!-- human")
+HUMAN_MARKER = "<!-- human -->"
+AMEND_MARKER = "<!-- aiflow:amend -->"
+BOT_LOGINS = {"github-actions", "dependabot", "codecov", "vercel", "netlify", "sonarcloud", "coderabbitai", "copilot"}
+WORKER_STAGES = {"in_progress", "ready", "in_review"}
 LIMIT_RE = re.compile(
     r"(usage|rate)[ -]?limit|limit (reached|exceeded)|out of (usage|credits)|"
     r"resets? (at|in) |too many requests|\b429\b", re.I)
@@ -101,7 +105,7 @@ DEFAULT_CONFIG = {
 
 
 # события, о которых монитор сообщает оркестратору при notify: important
-NOTIFY_KINDS = {"plan_ready", "plan_updated", "needs_input", "needs_human", "merged", "done", "paused", "unpaused", "error", "batch_done", "cancelled"}
+NOTIFY_KINDS = {"plan_ready", "plan_updated", "needs_input", "needs_human", "merged", "done", "amend_lost", "paused", "unpaused", "error", "batch_done", "cancelled"}
 # Снятие задачи будит оркестратора (чтобы закрыть его вопрос по ней), но без системного уведомления.
 NO_TOAST_KINDS = {"cancelled"}
 
@@ -124,6 +128,31 @@ class AiflowError(Exception):
 
 class TickBusy(AiflowError):
     """Проход по проекту уже идёт в другом процессе."""
+
+
+def aiflow_home() -> Path:
+    return Path(os.environ.get("AIFLOW_HOME") or Path.home() / ".aiflow")
+
+
+def inbox_dirs() -> tuple[Path, Path]:
+    """Входящие для работающих сессий: файл <session_id>.json забирает хук плагина
+    (scripts/inbox_hook.py) и перекладывает в inbox-delivered — по нему монитор отмечает доставку."""
+    h = aiflow_home()
+    return h / "inbox", h / "inbox-delivered"
+
+
+def is_human_comment(c: dict) -> bool:
+    """Комментарий человека к PR: без служебных маркеров aiflow и не от бота."""
+    body = (c.get("body") or "").strip()
+    login = ((c.get("author") or {}).get("login") or "").lower()
+    return bool(body) and not any(m in body for m in MARKERS) and not login.endswith("[bot]") \
+        and login not in BOT_LOGINS
+
+
+def after(a: str | None, b: str | None) -> bool:
+    """a позже b (ISO-время); пустое b — всегда раньше."""
+    ta, tb = parse_iso(a), parse_iso(b)
+    return bool(ta) and (tb is None or ta > tb)
 
 
 def now() -> dt.datetime:
@@ -720,6 +749,56 @@ def planner_prompt(store: Store, t: dict, cfg: dict) -> str:
     )
 
 
+def amend_list(items: list[dict]) -> str:
+    return "\n\n".join(f"Дополнение №{a['n']} ({a.get('author') or 'пользователь'}, {a['at'][:16].replace('T', ' ')}):\n"
+                       f"{a['text'].strip()}" for a in items)
+
+
+def amend_prompt(t: dict, role: str, state: str, items: list[dict], live: bool) -> str:
+    """Дополнения пользователя к задаче. live — сессия сейчас работает (доставка хуком)."""
+    head = f"Пользователь дополнил задачу {t['id']}:\n\n{amend_list(items)}\n\n"
+    if role == "planner":
+        if not t.get("pr"):
+            return head + ("Учти это в плане, который сейчас пишешь." if live else
+                           f"Учти это в плане, доведи его до конца и отчитайся aiflow report {t['id']} --role planner "
+                           "--status plan_ready --pr <номер> --summary \"<одна строка>\", как в твоих инструкциях.")
+        tail = ("Учти дополнение в плане: обнови описание PR (gh pr edit --body-file), допиши «Историю изменений плана», "
+                "ответь в PR одним комментарием, первая строка которого <!-- aiflow:planner -->")
+        return head + tail + (", и продолжай по инструкциям." if live else
+                              f", затем выполни aiflow report {t['id']} --role planner --status plan_ready "
+                              f"--pr {t['pr']} --summary \"<что изменено>\".")
+    head += ("Это часть задачи наравне с планом. Учти дополнение в реализации; если уже сделанное ему противоречит — "
+             "переделай. По готовности ответь в PR комментарием, первая строка которого <!-- ai-review-reply -->: "
+             "что сделано по дополнению (или почему не сделано). ")
+    if live:
+        return head + ("Если ты сейчас в цикле ревью — внеси правку, прогони тесты, запушь, ответь и снова запусти "
+                       "aiflow review. Если то же дополнение уже вернул aiflow review как human_input, второй раз его "
+                       "не обрабатывай. Дальше продолжай по инструкциям.")
+    pr = t.get("pr")
+    if not pr:
+        return head + ("Дальше — как в разделе «Задача без плана» твоих инструкций: отчёт done или PR и "
+                       "ready_for_review.")
+    return head + ("Тесты, коммит, git push, затем выполни "
+                   f"aiflow report {t['id']} --role worker --status ready_for_review --pr {pr} --summary \"<1–2 строки>\" "
+                   "и закончи ход. Ревью сам не запускай — тебя разбудят, когда подойдёт очередь.")
+
+
+def launch_amendments(t: dict) -> str:
+    """Недоставленные дополнения — в промпт запуска новой сессии."""
+    items = [a for a in t.get("amendments") or [] if not a.get("delivered_at")]
+    if not items:
+        return ""
+    return ("\n\nДополнения пользователя к задаче (часть задачи наравне с текстом и планом):\n\n" + amend_list(items)
+            + "\n\nЕсли в задаче есть PR, после реализации ответь в нём комментарием, первая строка которого "
+              "<!-- ai-review-reply -->: что сделано по дополнениям.")
+
+
+def mark_delivered(t: dict, via: str) -> None:
+    for a in t.get("amendments") or []:
+        if not a.get("delivered_at"):
+            a["delivered_at"], a["via"] = iso(), via
+
+
 def revise_prompt(t: dict, comments: list[dict]) -> str:
     quoted = "\n\n".join(f"— {c.get('author', {}).get('login', '?')} ({c.get('createdAt', '')}):\n{c.get('body', '').strip()}"
                          for c in comments)
@@ -1028,6 +1107,17 @@ class Dispatcher:
                 self.emit(None, "paused", "очередь поставлена на паузу вручную")
             elif kind == "resume":
                 self.unpause("очередь возобновлена")
+            elif kind == "amend" and c.get("id") in by_id:
+                t = by_id[c["id"]]
+                if t.get("state") in TERMINAL:
+                    self.emit(t, "error", f"{t['id']}: задача уже завершена — дополнение не принято, поставьте новую задачу")
+                elif (c.get("text") or "").strip():
+                    item = self.add_amendment(t, c["text"], c.get("source") or "cli")
+                    try:
+                        self.post_amendment(t, item)
+                    except (AiflowError, OSError) as e:
+                        self.store.log(t["id"], {"amend_comment_failed": str(e)[:300]})
+                    self.store.save_task(t)
             elif kind == "retry" and c.get("id") in by_id:
                 t = by_id[c["id"]]
                 t["retry_requested"] = True
@@ -1076,7 +1166,121 @@ class Dispatcher:
         st = t.get("state", "new")
         if t.get("retry_requested") and st == "needs_human":
             return self.do_retry(t)
+        if self.handle_amendments(t):
+            return  # сессию только что разбудили с дополнением: её снимок в этом проходе устарел
         getattr(self, f"adv_{st}", lambda _t: None)(t)
+
+    # -- дополнения пользователя к идущей задаче
+    def add_amendment(self, t: dict, text: str, source: str, at: str | None = None, author: str | None = None) -> dict:
+        am = t.setdefault("amendments", [])
+        item = {"n": len(am) + 1, "at": at or iso(), "text": text.strip(), "source": source, "author": author,
+                "delivered_at": None}
+        am.append(item)
+        self.store.log(t["id"], {"amendment": item})
+        self.emit(t, "amended", f"{t['id']}: дополнение №{item['n']} принято"
+                  + (f" (комментарий {author} в PR #{t['pr']})" if source == "comment" else ""), key=f"amend:{item['n']}")
+        return item
+
+    def post_amendment(self, t: dict, item: dict) -> None:
+        """Дополнение из панели или CLI — ещё и комментарием в PR: для истории и для проверки в aiflow review."""
+        if not t.get("pr"):
+            return
+        tmp = self.store.runs / t["id"] / f"amend-{item['n']}.md"
+        tmp.write_text(f"{HUMAN_MARKER}\n{AMEND_MARKER}\n**Дополнение к задаче №{item['n']}**\n\n{item['text']}\n",
+                       encoding="utf-8")
+        self.gh.call("pr", "comment", str(t["pr"]), "--body-file", str(tmp))
+        tmp.unlink(missing_ok=True)
+
+    def scan_comments(self, t: dict) -> None:
+        """Комментарии человека в PR после начала реализации — дополнения к задаче."""
+        if not t.get("pr") or not (t.get("state") in WORKER_STAGES or t.get("plan_approved")):
+            return
+        seen = t.setdefault("comments_seen_at", t.get("plan_seen_at") or iso())
+        comments = self.gh.pr(t["pr"], "comments").get("comments") or []
+        fresh = sorted((c for c in comments if is_human_comment(c) and after(c.get("createdAt"), seen)),
+                       key=lambda c: parse_iso(c.get("createdAt")))
+        for c in fresh:
+            self.add_amendment(t, c.get("body") or "", "comment", at=c.get("createdAt"),
+                               author=(c.get("author") or {}).get("login"))
+        if fresh:
+            t["comments_seen_at"] = fresh[-1]["createdAt"]
+
+    def sync_inbox(self, t: dict) -> None:
+        """Отметить дополнения, которые хук уже отдал работающей сессии."""
+        _, done = inbox_dirs()
+        if not done.is_dir():
+            return
+        for f in done.glob("*.json"):
+            d = read_json(f, {}) or {}
+            if d.get("project") != str(self.root) or d.get("task") != t["id"]:
+                continue
+            ns = set(d.get("ns") or [])
+            for a in t.get("amendments") or []:
+                if a["n"] in ns and not a.get("delivered_at"):
+                    a["delivered_at"], a["via"] = d.get("at") or iso(), "hook"
+            f.unlink(missing_ok=True)
+
+    def session_uuid(self, e: dict | None) -> str | None:
+        return (e or {}).get("session_id") or (self.sess(e) or {}).get("sessionId")
+
+    def drop_inbox(self, t: dict) -> None:
+        inbox, _ = inbox_dirs()
+        if not inbox.is_dir():
+            return
+        for lst in (t.get("sessions") or {}).values():
+            for e in lst:
+                sid = self.session_uuid(e)
+                if sid:
+                    (inbox / f"{sid}.json").unlink(missing_ok=True)
+
+    def handle_amendments(self, t: dict) -> bool:
+        st = t.get("state")
+        if st in TERMINAL or st == "needs_human":
+            if t.get("amendments"):
+                self.drop_inbox(t)  # непустые входящие заставляют хук запускать Python в каждой сессии
+            return False
+        try:
+            self.scan_comments(t)
+        except AiflowError as e:
+            self.store.log(t["id"], {"scan_comments_failed": str(e)[:300]})
+        self.sync_inbox(t)
+        pending = [a for a in t.get("amendments") or [] if not a.get("delivered_at")]
+        if not pending and t.get("amendments"):
+            self.drop_inbox(t)
+        if not pending or st == "new" or (st == "plan_review" and t.get("plan_approved")):
+            return False  # уйдут в промпт запуска сессии
+        role = "worker" if st in WORKER_STAGES else "planner"
+        e = self.cur(t, role)
+        s = self.sstate(e)
+        inbox, _ = inbox_dirs()
+        sid = self.session_uuid(e)
+        if s in ("working", "blocked"):
+            if sid:
+                data = {"project": str(self.root), "task": t["id"], "ns": [a["n"] for a in pending],
+                        "text": amend_prompt(t, role, st, pending, live=True)}
+                f = inbox / f"{sid}.json"
+                if (read_json(f, {}) or {}).get("ns") != data["ns"]:
+                    write_json(f, data)
+            return False
+        if s != "done":
+            return False  # failed/stopped/пропала — доставим, когда сессию возобновят
+        if sid:
+            (inbox / f"{sid}.json").unlink(missing_ok=True)
+        if not self.wake(t, role, amend_prompt(t, role, st, pending, live=False)):
+            return False
+        mark_delivered(t, "wake")
+        if role == "planner":
+            t["revising"] = True
+        else:
+            if st == "in_review" and t.get("pr"):
+                self.gh.call("pr", "merge", str(t["pr"]), "--disable-auto")
+            t.pop("approved_sha", None)
+            self.release_lock(t)
+            self.set_state(t, "in_progress", "дополнение пользователя")
+        t["state_at"] = iso()  # отсчёт «закончил ход без отчёта» — заново: сессию только что разбудили
+        self.emit(t, "amend_delivered", f"{t['id']}: дополнение передано {'планировщику' if role == 'planner' else 'исполнителю'}",
+                  key=f"amend_delivered:{pending[-1]['n']}")
+        return True
 
     def adv_planning(self, t: dict) -> None:
         rep = self.new_report(t, "planner")
@@ -1257,6 +1461,11 @@ class Dispatcher:
             self.do_retry(t)
 
     def adv_merged(self, t: dict) -> None:
+        lost = [a for a in t.get("amendments") or [] if not a.get("delivered_at")]
+        if lost and not t.get("amend_lost_told"):
+            t["amend_lost_told"] = True
+            self.emit(t, "amend_lost", f"{t['id']}: смержено раньше, чем дошли дополнения "
+                      f"{', '.join('№' + str(a['n']) for a in lost)} — поставьте их новой задачей")
         if not t.get("cleaned"):
             for lst in (t.get("sessions") or {}).values():
                 for e in lst:
@@ -1356,12 +1565,15 @@ class Dispatcher:
             if st == "new" and self.deps_ok(t, by_id) and t.get("complexity") == "trivial":
                 retry = bool(t.pop("retry_pending", False))
                 model, effort = worker_choice(self.cfg, t)
-                prompt = direct_prompt(self.store, t, self.cfg)
+                prompt = direct_prompt(self.store, t, self.cfg) + launch_amendments(t)
+                t.setdefault("comments_seen_at", iso())
+                t.setdefault("comments_floor", iso())
                 if retry:
                     prompt += ("\nЭто повторная попытка после остановки: последний отчёт — "
                                + json.dumps(self.store.report(t["id"]) or {}, ensure_ascii=False))
                 ok = self.launch(t, "worker", prompt, model=model, effort=effort)
                 if ok:
+                    mark_delivered(t, "launch")
                     self.set_state(t, "in_progress")
                     active += 1
                 elif retry:
@@ -1369,19 +1581,22 @@ class Dispatcher:
                 self.store.save_task(t)
             elif st == "new" and self.deps_ok(t, by_id):
                 cx = t.get("complexity", "simple")
-                ok = self.launch(t, "planner", planner_prompt(self.store, t, self.cfg),
+                ok = self.launch(t, "planner", planner_prompt(self.store, t, self.cfg) + launch_amendments(t),
                                  model=t.get("planner_model") or by_complexity(self.cfg["planner_model"], cx),
                                  effort=by_complexity(self.cfg["planner_effort"], cx))
                 if ok:
+                    mark_delivered(t, "launch")
                     self.set_state(t, "planning")
                     active += 1
                 self.store.save_task(t)
             elif st == "plan_review" and (t.get("plan_approved") or t.get("complexity") == "trivial"):
                 retry = bool(t.pop("retry_pending", False))
                 model, effort = worker_choice(self.cfg, t)
-                ok = self.launch(t, "worker", worker_prompt(self.store, t, self.cfg, retry=retry),
+                t.setdefault("comments_floor", iso())
+                ok = self.launch(t, "worker", worker_prompt(self.store, t, self.cfg, retry=retry) + launch_amendments(t),
                                  model=model, effort=effort)
                 if ok:
+                    mark_delivered(t, "launch")
                     self.set_state(t, "in_progress")
                     active += 1
                 elif retry:
@@ -1508,6 +1723,8 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
             "tokens": task_tokens(t), "usage": task_usage(t), "session": cur, "needs": needs,
             "depends_on": t.get("depends_on") or [], "state_at": t.get("state_at"),
             "launching": bool(t.get("launching")), "review_lock": q.get("review_lock") == t["id"],
+            "amendments": len(t.get("amendments") or []),
+            "amend_pending": sum(1 for a in t.get("amendments") or [] if not a.get("delivered_at")),
         })
     return {
         "version": VERSION, "repo": store.root.name, "repo_url": repo_url, "base": cfg["base_branch"],
@@ -1951,6 +2168,26 @@ def cmd_allow_path(args, root: Path) -> int:
     return 0
 
 
+def cmd_amend(args, root: Path) -> int:
+    store = Store(root)
+    t = store.task(args.id)
+    if not t:
+        raise AiflowError(f"задача {args.id} не найдена")
+    if t.get("state") in TERMINAL:
+        raise AiflowError(f"задача {args.id} уже завершена ({STAGE_LABEL.get(t['state'], t['state'])}) — поставьте новую")
+    if args.file:
+        text = sys.stdin.read() if args.file == "-" else Path(args.file).read_text(encoding="utf-8")
+    else:
+        text = " ".join(args.text or [])
+    if not text.strip():
+        raise AiflowError("пустое дополнение: передайте текст аргументом или --file")
+    queue_or_apply(store, {"cmd": "amend", "id": args.id, "text": text, "source": "cli"})
+    print(f"{args.id}: дополнение принято — его получит "
+          + ("планировщик" if t.get("state") in ("new", "planning", "plan_review") and not t.get("plan_approved")
+             else "исполнитель") + ".")
+    return 0
+
+
 def cmd_approve(args, root: Path) -> int:
     store = Store(root)
     t = store.task(args.id)
@@ -2295,6 +2532,10 @@ def main(argv: list[str] | None = None) -> int:
     al = sub.add_parser("allow-path", help="разрешить задаче менять защищённые пути (только человек)")
     al.add_argument("id")
     al.add_argument("paths", nargs="+", help="glob относительно корня, например 'src/*/Migrations/**'")
+    am = sub.add_parser("amend", help="дополнить идущую задачу: правку получит её текущая сессия")
+    am.add_argument("id")
+    am.add_argument("text", nargs="*")
+    am.add_argument("--file", help="файл с текстом дополнения; - — stdin")
     cn = sub.add_parser("cancel", help="снять задачи: остановить их сессии и закрыть PR")
     cn.add_argument("ids", nargs="+")
     cn.add_argument("--keep-pr", action="store_true", help="не закрывать PR")
@@ -2329,7 +2570,7 @@ def main(argv: list[str] | None = None) -> int:
         handlers = {
             "init": cmd_init, "enqueue": cmd_enqueue, "report": cmd_report, "status": cmd_status,
             "tick": cmd_tick, "run": cmd_run, "pause": cmd_pause, "resume": cmd_resume,
-            "retry": cmd_retry, "cancel": cmd_cancel, "allow-path": cmd_allow_path, "approve": cmd_approve, "reply": cmd_reply, "review": cmd_review,
+            "retry": cmd_retry, "cancel": cmd_cancel, "allow-path": cmd_allow_path, "approve": cmd_approve, "amend": cmd_amend, "reply": cmd_reply, "review": cmd_review,
             "ui": cmd_ui, "stop": cmd_stop,
         }
         return handlers[args.cmd](args, root)

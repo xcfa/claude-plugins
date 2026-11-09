@@ -246,6 +246,15 @@ Glob относительно корня репозитория, через за
   await act("allow_paths", key, id, value);
 }
 
+async function amendTask(key, id) {
+  const t = findTask(key, id);
+  const who = t && ["new", "planning", "plan_review"].includes(t.state) ? "планировщик учтёт его в плане"
+    : "исполнитель получит его сразу после текущего шага";
+  const value = prompt(`Дополнить задачу ${id}: ${who}. Текст дополнения:`, "");
+  if (value === null || !value.trim()) return;
+  await act("amend", key, id, value);
+}
+
 async function cancelTask(key, id) {
   const t = findTask(key, id);
   const parts = [`Снять задачу ${id}?`];
@@ -303,7 +312,7 @@ async function act(action, key, id, value) {
     if (!r.ok) throw new Error(d.error || r.statusText);
     if (action === "open_session") return toast(d.where === "уже открытом окне" ? "Окно сессии уже открыто — вывел его на передний план" : `Сессия открыта в новом окне (${d.where})`);
     if (action === "cancel" && d.warnings && d.warnings.length) { toast("Снята, но: " + d.warnings.join("; ")); setTimeout(load, 600); return; }
-    toast({ allow_paths: "Пути разрешены, задача продолжит работу", cancel: "Задача снята", approve: "План одобрен", retry: "Повтор поставлен", pause: "Очередь на паузе", resume: "Очередь продолжает", forget: "Проект убран из службы" }[action] || "Готово");
+    toast({ amend: "Дополнение принято — его получит сессия задачи", allow_paths: "Пути разрешены, задача продолжит работу", cancel: "Задача снята", approve: "План одобрен", retry: "Повтор поставлен", pause: "Очередь на паузе", resume: "Очередь продолжает", forget: "Проект убран из службы" }[action] || "Готово");
     setTimeout(load, 600);
   } catch (e) {
     if (queued) { busy.delete(bk); if (last) render(last); }
@@ -409,8 +418,10 @@ function renderBoard(p) {
     });
     const pr = t.pr ? (t.pr_url ? `<a href="${esc(t.pr_url)}" target="_blank" rel="noopener">#${esc(t.pr)}</a>` : "#" + esc(t.pr)) : "—";
     const rounds = t.rounds ? `раунд ${esc(t.rounds)}/${esc(t.max_rounds)}` : (t.review_lock ? "на ревью" : "");
-    const cancel = t.state === "merged" || t.state === "done" || t.state === "cancelled" ? ""
-      : `<button class="link danger" data-cancel="${id}" data-project="${k}" title="Остановить сессии задачи и закрыть её PR"${dis(p.key, t.id)}>Снять</button>`;
+    const ended = t.state === "merged" || t.state === "done" || t.state === "cancelled";
+    const cancel = ended ? ""
+      : `<button class="link" data-amend="${id}" data-project="${k}" title="Добавить правку к идущей задаче">Дополнить${t.amend_pending ? " (" + esc(t.amend_pending) + " ждёт)" : ""}</button> `
+      + `<button class="link danger" data-cancel="${id}" data-project="${k}" title="Остановить сессии задачи и закрыть её PR"${dis(p.key, t.id)}>Снять</button>`;
     html += `<div class="meta"><div class="num">${pr}${rounds ? ", " + rounds : ""}</div><div class="line2 num">${t.tokens ? tokens(t.tokens) + " токенов" : "—"}</div>${cancel}</div>`;
   }
   const note = cancelled
@@ -505,6 +516,8 @@ document.addEventListener("click", (e) => {
   if (fg) return forgetProject(fg.dataset.forget);
   const cn = e.target.closest("[data-cancel]");
   if (cn) return cancelTask(cn.dataset.project, cn.dataset.cancel);
+  const amd = e.target.closest("[data-amend]");
+  if (amd) return amendTask(amd.dataset.project, amd.dataset.amend);
   const al = e.target.closest("[data-allow]");
   if (al) return allowPaths(al.dataset.project, al.dataset.allow);
   const b = e.target.closest("[data-act]");

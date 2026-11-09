@@ -261,6 +261,29 @@ def diff_lines(diff: str) -> dict[str, set[int]]:
     return out
 
 
+def human_comments(comments: list[dict], reviews: list[dict], floor: str | None) -> list[dict]:
+    """Комментарии человека (с маркером <!-- human --> или обычные, не от бота), на которые worker ещё не
+    ответил: позже последнего раунда ревью, последнего ответа worker'а и начала реализации."""
+    marks = [rv.get("submitted_at") or "" for rv in reviews]
+    marks += [c.get("createdAt") or "" for c in comments if REPLY_MARKER in (c.get("body") or "")]
+    if floor:
+        marks.append(floor)
+    watermark = max(marks, key=lambda m: aiflow.parse_iso(m) or aiflow.dt.datetime.min.replace(tzinfo=aiflow.dt.timezone.utc)) if marks else ""
+    return [{"author": (c.get("author") or {}).get("login"), "text": strip_markers(c.get("body") or ""),
+             "at": c.get("createdAt")}
+            for c in comments
+            if ((c.get("body") or "").lstrip().startswith(HUMAN_MARKER) or aiflow.is_human_comment(c))
+            and aiflow.after(c.get("createdAt"), watermark)]
+
+
+def format_amendments(task: dict | None) -> str:
+    items = (task or {}).get("amendments") or []
+    if not items:
+        return ""
+    return ("# Дополнения пользователя к задаче\n\nЭто часть задачи наравне с планом: изменения по ним — не работа "
+            "вне плана. Проверь, что они выполнены.\n\n" + aiflow.amend_list(items) + "\n")
+
+
 def build_context(plan: str, pr: dict, history: str, diff: str, max_chars: int) -> tuple[str, bool]:
     truncated = len(diff) > max_chars
     if truncated:
@@ -541,15 +564,10 @@ def main(argv: list[str] | None = None) -> int:
                    message="лимит раундов исчерпан, PR помечен needs-human")
         rnd = CTX["round"] = done + 1
 
-        # комментарии человека с маркером <!-- human -->, на которые worker ещё не ответил
+        # комментарии и дополнения человека, на которые worker ещё не ответил
         comments = pr.get("comments") or []
-        marks = [rv.get("submitted_at") or "" for rv in reviews]
-        marks += [c.get("createdAt") or "" for c in comments if REPLY_MARKER in (c.get("body") or "")]
-        watermark = max(marks) if marks else ""
-        human = [{"author": (c.get("author") or {}).get("login"), "text": strip_markers(c.get("body") or ""),
-                  "at": c.get("createdAt")}
-                 for c in comments if (c.get("body") or "").lstrip().startswith(HUMAN_MARKER)
-                 and (c.get("createdAt") or "") > watermark]
+        floor = (task or {}).get("comments_floor")
+        human = human_comments(comments, reviews, floor)
         if human:
             CTX["round"] = done
             finish("human_input", comments=human,
@@ -584,7 +602,7 @@ def main(argv: list[str] | None = None) -> int:
         history = build_history(reviews, thread_comments, comments)
         pending = open_threads(thread_comments, review_threads(r, args.pr), login) if reviews else []
         ctx, truncated = build_context(pr.get("body") or "", pr, history, diff, int(cfg["max_diff_chars"]))
-        ctx += "\n" + format_open_threads(pending)
+        ctx += "\n" + format_amendments(store.task(task["id"]) if task else None) + "\n" + format_open_threads(pending)
         ctx_path = tmp / "review-context.md"
         ctx_path.write_text(ctx, encoding="utf-8")
 
@@ -595,6 +613,15 @@ def main(argv: list[str] | None = None) -> int:
             verdict = "changes"
         elif verdict == "changes" and rnd >= max_rounds and not any(c["severity"] == "blocking" for c in cs):
             verdict = "approve"  # последний раунд: оставшиеся nit не повод для needs-human, они видны в PR
+        if verdict == "approve":
+            # пока работал ревьюер, человек мог дописать правку: не одобряем и не мержим мимо неё
+            late = human_comments(r.gh_json("pr", "view", str(args.pr), "--json", "comments").get("comments") or [],
+                                  reviews, floor)
+            if late:
+                CTX["round"] = done
+                finish("human_input", comments=late,
+                       message="во время ревью пришли комментарии человека: учти их, ответь комментарием с "
+                               "<!-- ai-review-reply --> и снова запусти ревью (раунд не израсходован)")
         posted = publish(r, args.pr, head, verdict, rnd, max_rounds, summary, cs, lines, tmp, identity)
         result = {"round": rnd, "max_rounds": max_rounds, "summary": summary, "comments": posted,
                   "open_threads": [{"comment_id": t["comment_id"], "file": t["path"], "line": t["line"],
