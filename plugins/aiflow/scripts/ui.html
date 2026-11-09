@@ -71,7 +71,7 @@ button:disabled:hover { border-color: var(--rule); }
 .head { color: var(--muted); font-size: 12.5px; padding: 0 4px 8px; text-align: center; border-bottom: 1px solid var(--rule); }
 .head.left { text-align: left; padding-left: 0; }
 .head.right { text-align: right; }
-.cell { position: relative; height: 58px; border-bottom: 1px solid var(--rule); }
+.cell { position: relative; min-height: 58px; border-bottom: 1px solid var(--rule); }
 .cell::before { content: ""; position: absolute; left: 0; right: 0; top: 50%; height: 2px; background: var(--track); transform: translateY(-50%); }
 .cell.first::before { left: 50%; }
 .cell.last::before { right: 50%; }
@@ -90,14 +90,16 @@ button:disabled:hover { border-color: var(--rule); }
   .here.moving.live { animation: pulse 2.4s ease-in-out infinite; }
   @keyframes pulse { 50% { box-shadow: 0 0 0 6px color-mix(in srgb, currentColor 25%, transparent); } }
 }
-.task { padding: 9px 12px 9px 0; border-bottom: 1px solid var(--rule); height: 58px; display: flex; flex-direction: column; justify-content: center; }
+.task { padding: 9px 12px 9px 0; border-bottom: 1px solid var(--rule); min-height: 58px; display: flex; flex-direction: column; justify-content: center; }
 .task .id { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .task .title { color: var(--muted); font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .task .open { all: unset; display: block; min-width: 0; cursor: pointer; border-radius: 4px; }
 .task .open:hover .id { text-decoration: underline; text-underline-offset: 3px; }
 .task .open:focus-visible { outline: 2px solid var(--move); outline-offset: 2px; }
-.meta { border-bottom: 1px solid var(--rule); height: 58px; display: flex; flex-direction: column; justify-content: center; align-items: flex-end; font-size: 13.5px; padding-left: 12px; }
+.meta { border-bottom: 1px solid var(--rule); min-height: 58px; padding-top: 6px; padding-bottom: 6px; display: flex; flex-direction: column; justify-content: center; align-items: flex-end; font-size: 13.5px; padding-left: 12px; }
 .meta .line2 { color: var(--muted); }
+.meta .acts-row { display: flex; gap: 12px; justify-content: flex-end; }
+.meta .acts-row button.link { margin-top: 2px; }
 .state-label { display: none; }
 .empty { padding: 28px 0; color: var(--muted); border-bottom: 1px solid var(--rule); }
 .empty code { color: var(--ink); }
@@ -420,8 +422,8 @@ function renderBoard(p) {
     const rounds = t.rounds ? `раунд ${esc(t.rounds)}/${esc(t.max_rounds)}` : (t.review_lock ? "на ревью" : "");
     const ended = t.state === "merged" || t.state === "done" || t.state === "cancelled";
     const cancel = ended ? ""
-      : `<button class="link" data-amend="${id}" data-project="${k}" title="Добавить правку к идущей задаче">Дополнить${t.amend_pending ? " (" + esc(t.amend_pending) + " ждёт)" : ""}</button> `
-      + `<button class="link danger" data-cancel="${id}" data-project="${k}" title="Остановить сессии задачи и закрыть её PR"${dis(p.key, t.id)}>Снять</button>`;
+      : `<div class="acts-row"><button class="link" data-amend="${id}" data-project="${k}" title="Добавить правку к идущей задаче">Дополнить${t.amend_pending ? " (" + esc(t.amend_pending) + " ждёт)" : ""}</button> `
+      + `<button class="link danger" data-cancel="${id}" data-project="${k}" title="Остановить сессии задачи и закрыть её PR"${dis(p.key, t.id)}>Снять</button></div>`;
     html += `<div class="meta"><div class="num">${pr}${rounds ? ", " + rounds : ""}</div><div class="line2 num">${t.tokens ? tokens(t.tokens) + " токенов" : "—"}</div>${cancel}</div>`;
   }
   const note = cancelled
