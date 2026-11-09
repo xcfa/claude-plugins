@@ -648,8 +648,13 @@ class Claude:
         m = re.search(r"backgrounded\W+([0-9A-Za-z]{6,})", out)
         return m.group(1) if m else None
 
-    def launch(self, agent: str, name: str, prompt: str, *, model=None, effort=None, mode=None) -> tuple[str | None, str]:
+    def launch(self, agent: str, name: str, prompt: str, *, model=None, effort=None, mode=None,
+               worktree: str | None = None) -> tuple[str | None, str]:
         cmd = [self.bin, "--bg", "--agent", agent, "--name", name]
+        if worktree:
+            # своя рабочая копия на задачу (.claude/worktrees/<id>): сессии не трогают основную папку и
+            # друг друга; повторный запуск с тем же именем подхватывает существующий worktree
+            cmd += ["--worktree", worktree]
         if mode:
             cmd += ["--permission-mode", mode]
         if model:
@@ -661,11 +666,13 @@ class Claude:
         out = (p.stdout or "") + (p.stderr or "")
         return (self._short_id(out) if p.returncode == 0 else None), out.strip()
 
-    def resume(self, session_id: str, prompt: str, mode=None) -> tuple[str | None, str]:
+    def resume(self, session_id: str, prompt: str, mode=None, cwd: str | None = None) -> tuple[str | None, str]:
+        """cwd — папка сессии: --resume работает там, откуда вызван, а не там, где сессия жила."""
         cmd = [self.bin, "--resume", session_id, "--bg"]
         if mode:
             cmd += ["--permission-mode", mode]
-        p = run(cmd + [prompt], cwd=self.root, timeout=180, env=self.env)
+        where = Path(cwd) if cwd and Path(cwd).is_dir() else self.root
+        p = run(cmd + [prompt], cwd=where, timeout=180, env=self.env)
         out = (p.stdout or "") + (p.stderr or "")
         return (self._short_id(out) if p.returncode == 0 else None), out.strip()
 
@@ -1125,7 +1132,7 @@ class Dispatcher:
         name = f"{role}: {t['id']}"
         t["launching"] = {"role": role, "name": name, "at": iso()}
         self.store.save_task(t)
-        sid, out = self.claude.launch(f"aiflow:{role}", name, prompt, model=model, effort=effort,
+        sid, out = self.claude.launch(f"aiflow:{role}", name, prompt, model=model, effort=effort, worktree=t["id"],
                                       mode=self.cfg.get("permission_mode"))
         if not sid:
             low = out.lower()
@@ -1152,9 +1159,12 @@ class Dispatcher:
             sid_full = (self.sess(entry) or {}).get("sessionId")
         if not sid_full:
             return False
-        new_id, out = self.claude.resume(sid_full, prompt, mode=self.cfg.get("permission_mode"))
+        cwd = entry.get("cwd") or (self.sess(entry) or {}).get("cwd") if entry else None
+        new_id, out = self.claude.resume(sid_full, prompt, mode=self.cfg.get("permission_mode"), cwd=cwd)
         if new_id and new_id != entry["id"]:
             self.adopt(t, role, new_id, entry.get("name", f"{role}: {t['id']}"))
+            if cwd:
+                self.cur(t, role)["cwd"] = cwd
         elif not new_id:
             self.store.log(t["id"], {"resume_failed": out[-800:]})
             return False
@@ -1211,10 +1221,11 @@ class Dispatcher:
     def fill_session_ids(self, t: dict) -> None:
         for lst in (t.get("sessions") or {}).values():
             for e in lst:
-                if not e.get("session_id"):
-                    s = self.sessions.get(e["id"])
-                    if s and s.get("sessionId"):
-                        e["session_id"] = s["sessionId"]
+                s = self.sessions.get(e["id"])
+                if s and not e.get("session_id") and s.get("sessionId"):
+                    e["session_id"] = s["sessionId"]
+                if s and s.get("cwd") and e.get("cwd") != s["cwd"]:
+                    e["cwd"] = s["cwd"]  # для пробуждения в той же рабочей копии
 
     def process_commands(self, by_id: dict[str, dict]) -> None:
         for c in self.store.take_commands():

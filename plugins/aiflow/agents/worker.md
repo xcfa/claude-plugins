@@ -31,7 +31,9 @@ color: green
 
 ## Ход 1: реализация
 
-1. Работай в изолированном worktree на ветке задачи:
+1. Сессия запущена в своём worktree задачи (`.claude/worktrees/<id>`): работай только
+   в нём, в основную папку репозитория не переходи и не создавай свои worktree.
+   Переключись на ветку задачи:
    ```
    git fetch origin
    git switch ai/<id>        # или: git switch -c ai/<id> --track origin/ai/<id>
