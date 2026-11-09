@@ -38,7 +38,8 @@ def _plugin_version() -> str:
 VERSION = _plugin_version()
 
 STAGES = ["new", "planning", "plan_review", "in_progress", "ready", "in_review", "merged"]
-SIDE_STATES = ["needs_human", "cancelled", "discussing"]
+SIDE_STATES = ["needs_human", "cancelled", "discussing", "answered"]
+TALK_KINDS = ("discuss", "ask")  # разговор в сессии планировщика: PR только по договорённости
 IMPLEMENTING = {"planning", "in_progress"}
 TERMINAL = {"merged", "done", "cancelled"}
 FINISHED = {"merged", "done"}  # задача выполнена: зависимые могут стартовать
@@ -81,6 +82,9 @@ DEFAULT_CONFIG = {
     "planner_effort": {"complex": "medium", "simple": "medium"},
     "discuss_model": "opus",  # сессия обсуждения идеи (задача kind: discuss)
     "discuss_effort": "high",
+    "ask_model": "sonnet",  # вопрос о коде (задача kind: ask)
+    "ask_effort": "medium",
+    "answered_ttl_hours": 24,  # вопрос с ответом без продолжения закрывается сам
     "worker_model": "sonnet",
     "worker_effort": {"complex": "high", "simple": "medium", "trivial": "medium"},  # или одна строка на все задачи
     "worker_opus_effort": "medium",  # effort worker'а на Opus (worker_model: opus), без учёта сложности
@@ -107,7 +111,7 @@ DEFAULT_CONFIG = {
 
 
 # события, о которых монитор сообщает оркестратору при notify: important
-NOTIFY_KINDS = {"plan_ready", "plan_updated", "needs_input", "needs_human", "merged", "done", "amend_lost", "paused", "unpaused", "error", "batch_done", "cancelled"}
+NOTIFY_KINDS = {"answered", "plan_ready", "plan_updated", "needs_input", "needs_human", "merged", "done", "amend_lost", "paused", "unpaused", "error", "batch_done", "cancelled"}
 # Снятие задачи будит оркестратора (чтобы закрыть его вопрос по ней), но без системного уведомления.
 NO_TOAST_KINDS = {"cancelled"}
 
@@ -784,6 +788,12 @@ def amend_prompt(t: dict, role: str, state: str, items: list[dict], live: bool) 
     head = f"Пользователь дополнил задачу {t['id']}:\n\n{amend_list(items)}\n\n"
     if state == "discussing":
         return head + "Учти это в обсуждении и ответь пользователю."
+    if state == "answered":
+        return head + ("Это продолжение твоего ответа на вопрос. Просят изменить код — составь план по своим "
+                       f"инструкциям (ветка ai/{t['id']}, draft PR) и выполни aiflow report {t['id']} --role planner "
+                       "--status plan_ready --pr <номер> --complexity simple|complex --summary \"<одна строка>\". "
+                       f"Новый вопрос — ответь и выполни aiflow report {t['id']} --role planner --status answered "
+                       "--summary \"<ответ в 1–3 строки>\". Хотят обсудить — обсуждай и закончи ход.")
     if role == "planner":
         if not t.get("pr"):
             return head + ("Учти это в плане, который сейчас пишешь." if live else
@@ -895,6 +905,24 @@ def discuss_prompt(store: Store, t: dict, cfg: dict) -> str:
     )
 
 
+def ask_prompt(store: Store, t: dict, cfg: dict) -> str:
+    """Задача kind: ask — вопрос о коде. Ответ, а план — только если пользователь попросит изменение."""
+    tid = t["id"]
+    return (
+        f"aiflow question {tid}: {t.get('title', '')}\n"
+        f"Файл задачи: {store.task_path(tid)} — прочитай его целиком. Базовая ветка: {cfg['base_branch']}.\n"
+        "Это вопрос, а не задача (раздел «Вопросы» твоих инструкций). Найди ответ в коде и документации "
+        "(сабагенты aiflow:explorer и aiflow:researcher) и ответь пользователю здесь: по существу, с путями "
+        "и номерами строк. Ветку, PR и файлы не создавай. Затем выполни "
+        f"aiflow report {tid} --role planner --status answered --summary \"<ответ в 1–3 строки>\" "
+        "--details-file <файл с полным ответом в $CLAUDE_JOB_DIR/tmp/> и закончи ход.\n"
+        "Если потом пользователь попросит что-то изменить — составь план по своим инструкциям "
+        f"(ветка ai/{tid}, draft PR) и выполни aiflow report {tid} --role planner --status plan_ready "
+        "--pr <номер> --complexity simple|complex --summary \"<одна строка>\". Новый вопрос — снова ответ и "
+        "--status answered."
+    )
+
+
 def review_prompt(t: dict, cfg: dict) -> str:
     return (
         f"Твоя очередь на ревью PR #{t['pr']} (задача {t['id']}). "
@@ -914,7 +942,7 @@ def ci_fix_prompt(t: dict, failed: list[str]) -> str:
 
 _BASE_SEEN: dict[tuple[str, str], tuple[float, bool]] = {}
 
-STAGE_ROLE = {"planning": "planner", "discussing": "planner", "in_progress": "worker", "in_review": "worker"}
+STAGE_ROLE = {"planning": "planner", "discussing": "planner", "answered": "planner", "in_progress": "worker", "in_review": "worker"}
 
 RESUME_FINISH = {
     "discussing": "Продолжи обсуждение с пользователем: PR — только когда договоритесь, итог — aiflow report {id} "
@@ -1321,6 +1349,8 @@ class Dispatcher:
         mark_delivered(t, "wake")
         if role == "planner":
             t["revising"] = True
+            if st == "answered":
+                self.set_state(t, "discussing", "продолжение вопроса")
         else:
             if st == "in_review" and t.get("pr"):
                 self.gh.call("pr", "merge", str(t["pr"]), "--disable-auto")
@@ -1345,6 +1375,12 @@ class Dispatcher:
                 self.emit(t, "plan_ready", f"{t['id']}: обсуждение завершено, план готов — PR #{t['pr']}",
                           key=f"plan:{rep['rid']}")
                 return
+            if st == "answered":
+                t["answer"] = {"summary": rep.get("summary") or "", "details": rep.get("details") or "", "at": iso()}
+                self.set_state(t, "answered", "ответ дан")
+                t["state_at"] = iso()
+                self.emit(t, "answered", f"{t['id']}: {rep.get('summary') or 'ответ в сессии'}", key=f"answered:{rep['rid']}")
+                return
             if st == "done":
                 self.set_state(t, "done", rep.get("summary") or "обсуждение завершено")
                 self.emit(t, "done", f"{t['id']}: обсуждение завершено — {rep.get('summary') or 'без задачи'}", key="done")
@@ -1359,10 +1395,28 @@ class Dispatcher:
         elif st in ("done", "blocked"):
             # ход закончен — ждём ответа пользователя в сессии; напоминаем один раз на каждый ход
             mark = (self.sess(e) or {}).get("updatedAt") or e["id"]
-            self.emit(t, "needs_input", f"{t['id']}: обсуждение ждёт вас — откройте сессию (панель или "
+            what = "вопрос" if t.get("kind") == "ask" else "обсуждение"
+            self.emit(t, "needs_input", f"{t['id']}: {what} ждёт вас — откройте сессию (панель или "
                       f"claude attach {e['id']})", key=f"discuss:{e['id']}:{mark}")
         elif e and st is None and age_minutes(e.get("resumed_at") or e.get("started_at")) > 10:
             self.lost(t, "planner", "discussing", "сессия пропала", "сессия обсуждения пропала из claude agents")
+
+    def adv_answered(self, t: dict) -> None:
+        """Ответ дан. Пользователь может продолжить в сессии (тогда она отчитается план или новый ответ)
+        или промолчать — тогда вопрос закрывается без плана."""
+        rep = self.new_report(t, "planner")
+        if rep:
+            t["report_seen"] = None  # пусть adv_discussing разберёт тот же отчёт
+            self.set_state(t, "discussing", "продолжение вопроса")
+            return self.adv_discussing(t)
+        e = self.cur(t, "planner")
+        if self.sstate(e) == "working":
+            self.set_state(t, "discussing", "продолжение вопроса")
+            return
+        ttl = float(self.cfg.get("answered_ttl_hours") or 24)
+        if age_minutes(t.get("state_at")) > ttl * 60:
+            self.set_state(t, "done", "вопрос закрыт: продолжения не было")
+            self.adv_merged(t)
 
     def adv_planning(self, t: dict) -> None:
         rep = self.new_report(t, "planner")
@@ -1639,16 +1693,18 @@ class Dispatcher:
         conc = int(self.cfg["concurrency"])
         active = sum(1 for t in tasks if t.get("state") in IMPLEMENTING or t.get("launching"))
         for t in tasks:
-            if active >= conc and t.get("kind") != "discuss":
+            if active >= conc and t.get("kind") not in TALK_KINDS:
                 continue
             if t.get("launching"):
                 continue
             st = t.get("state")
-            if st == "new" and self.deps_ok(t, by_id) and t.get("kind") == "discuss":
-                # обсуждение ждёт человека, а не модель: слот concurrency не занимает
-                ok = self.launch(t, "planner", discuss_prompt(self.store, t, self.cfg) + launch_amendments(t),
-                                 model=self.cfg.get("discuss_model") or "opus",
-                                 effort=self.cfg.get("discuss_effort") or None)
+            if st == "new" and self.deps_ok(t, by_id) and t.get("kind") in TALK_KINDS:
+                # разговор ждёт человека, а не модель: слот concurrency не занимает
+                ask = t.get("kind") == "ask"
+                prompt = (ask_prompt if ask else discuss_prompt)(self.store, t, self.cfg) + launch_amendments(t)
+                ok = self.launch(t, "planner", prompt,
+                                 model=self.cfg.get("ask_model" if ask else "discuss_model") or ("sonnet" if ask else "opus"),
+                                 effort=self.cfg.get("ask_effort" if ask else "discuss_effort") or None)
                 if ok:
                     mark_delivered(t, "launch")
                     self.set_state(t, "discussing")
@@ -1727,7 +1783,8 @@ class Dispatcher:
             self.store.save_task(t)
 
     def check_batch_done(self, tasks: list[dict]) -> None:
-        live = [t for t in tasks if t.get("state") not in TERMINAL and t.get("state") != "needs_human"]
+        live = [t for t in tasks if t.get("state") not in TERMINAL and t.get("state") not in ("needs_human", "answered")
+                and t.get("kind") not in TALK_KINDS]
         merged_unannounced = [t for t in tasks if t.get("state") in FINISHED and not t.get("batch_announced")]
         if not live and merged_unannounced:
             for t in merged_unannounced:
@@ -1769,7 +1826,7 @@ def plan_checklist(body: str, cfg: dict, t: dict) -> tuple[bool, list[str]]:
 # ---------------------------------------------------------------- status / state for UI
 
 STAGE_LABEL = {
-    "new": "в очереди", "discussing": "обсуждение идеи", "planning": "планирование", "plan_review": "обсуждение плана",
+    "new": "в очереди", "discussing": "обсуждение идеи", "answered": "ответ дан", "planning": "планирование", "plan_review": "обсуждение плана",
     "in_progress": "реализация", "ready": "ждёт ревью", "in_review": "ревью",
     "merged": "смержено", "done": "выполнено", "needs_human": "нужен человек", "cancelled": "снята",
 }
@@ -1797,7 +1854,8 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
         elif st == "needs_human":
             needs = t.get("human_reason") or "нужен человек"
         elif st == "discussing" and cur.get("state") != "working":
-            needs = "обсуждение ждёт вас — откройте сессию"
+            needs = ("вопрос ждёт вас — откройте сессию" if t.get("kind") == "ask"
+                     else "обсуждение ждёт вас — откройте сессию")
         elif cur.get("state") == "blocked":
             needs = f"сессия ждёт ответа ({cur.get('waiting') or 'вопрос'})"
         pr = t.get("pr")
@@ -1808,8 +1866,10 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
                     last_stage = STAGES.index(h["from"])
                     break
         out.append({
-            "id": t["id"], "title": t.get("title", ""), "state": st, "label": STAGE_LABEL.get(st, st),
-            "stage": STAGES.index("planning") if st == "discussing" else STAGES.index("merged") if st == "done" else STAGES.index(st) if st in STAGES else last_stage,
+            "id": t["id"], "title": t.get("title", ""), "state": st,
+            "label": "вопрос" if st == "discussing" and t.get("kind") == "ask" else STAGE_LABEL.get(st, st),
+            "kind": t.get("kind") or "task", "answer": (t.get("answer") or {}).get("summary") if st == "answered" else None,
+            "stage": STAGES.index("planning") if st in ("discussing", "answered") else STAGES.index("merged") if st == "done" else STAGES.index(st) if st in STAGES else last_stage,
             "complexity": t.get("complexity"), "pr": pr,
             "pr_url": f"{repo_url}/pull/{pr}" if pr and repo_url else None,
             "rounds": review.get("round"), "max_rounds": cfg["max_rounds"],
@@ -2007,8 +2067,8 @@ def normalize_task(raw: dict) -> dict:
     if not TASK_ID_RE.match(tid):
         raise AiflowError(f"некорректный id задачи: {tid!r} (латиница, цифры, дефисы)")
     kind = raw.get("kind") or "task"
-    if kind not in ("task", "discuss"):
-        raise AiflowError(f"{tid}: kind должен быть task или discuss")
+    if kind not in ("task",) + TALK_KINDS:
+        raise AiflowError(f"{tid}: kind должен быть task, discuss или ask")
     cx = raw.get("complexity", "complex" if kind == "discuss" else "simple")
     if cx not in COMPLEXITIES:
         raise AiflowError(f"{tid}: complexity должен быть одним из {', '.join(COMPLEXITIES)}")
@@ -2021,7 +2081,7 @@ def normalize_task(raw: dict) -> dict:
     return {
         "id": tid, "title": str(raw.get("title") or tid).strip(), "text": text, "complexity": cx, "kind": kind,
         "depends_on": [str(d) for d in raw.get("depends_on") or []],
-        "auto_approve_plan": bool(raw.get("auto_approve_plan")) and cx == "simple" and kind == "task",
+        "auto_approve_plan": bool(raw.get("auto_approve_plan")) and cx == "simple" and kind in ("task", "ask"),
         "ui": raw.get("ui") or None,
         "planner_model": raw.get("planner_model") or None,
         "worker_model": raw.get("worker_model") or None,
@@ -2285,7 +2345,7 @@ def cmd_amend(args, root: Path) -> int:
         raise AiflowError("пустое дополнение: передайте текст аргументом или --file")
     queue_or_apply(store, {"cmd": "amend", "id": args.id, "text": text, "source": "cli"})
     print(f"{args.id}: дополнение принято — его получит "
-          + ("сессия обсуждения" if t.get("state") == "discussing" else
+          + ("сессия вопроса или обсуждения" if t.get("state") in ("discussing", "answered") else
              "планировщик" if t.get("state") in ("new", "planning", "plan_review") and not t.get("plan_approved")
              else "исполнитель") + ".")
     return 0
@@ -2605,7 +2665,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("id")
     r.add_argument("--role", required=True, choices=["planner", "worker"])
     r.add_argument("--status", required=True,
-                   choices=["plan_ready", "ready_for_review", "done", "approved", "limit_reached", "error", "blocked"])
+                   choices=["plan_ready", "answered", "ready_for_review", "done", "approved", "limit_reached", "error", "blocked"])
     r.add_argument("--pr", type=int)
     r.add_argument("--complexity", choices=["simple", "complex"], help="оценка реализации (итог обсуждения)")
     r.add_argument("--summary")

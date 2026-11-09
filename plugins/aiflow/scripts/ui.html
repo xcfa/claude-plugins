@@ -361,7 +361,7 @@ function renderUsage() {
 }
 
 function tone(t) {
-  if (t.state === "merged" || t.state === "done") return "done";
+  if (t.state === "merged" || t.state === "done" || t.state === "answered") return "done";
   if (t.state === "needs_human") return "fail";
   if (t.needs) return "waiting";
   if (t.state === "new" || t.state === "ready" || t.state === "cancelled") return "idle";
@@ -405,7 +405,7 @@ function renderBoard(p) {
     const head = t.session && t.session.id
       ? `<button class="open" data-act="open_session" data-project="${k}" data-id="${id}" title="Открыть сессию ${esc(t.session.role || "")} в терминале">${name}</button>`
       : name;
-    html += `<div class="task">${head}<div class="state-label here ${tn}">${esc(t.label)}${t.needs ? " — " + esc(t.needs) : ""}</div></div>`;
+    html += `<div class="task">${head}<div class="state-label here ${tn}">${esc(t.label)}${t.needs ? " — " + esc(t.needs) : ""}</div>${t.answer ? `<div class="why" title="${esc(t.answer)}">${esc(t.answer)}</div>` : ""}</div>`;
     STATIONS.forEach((_, i) => {
       const pos = i < stage ? "passed" : i === stage ? "half" : "";
       const edge = i === 0 ? "first" : i === STATIONS.length - 1 ? "last" : "";
