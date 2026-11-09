@@ -1224,8 +1224,8 @@ class Dispatcher:
                 s = self.sessions.get(e["id"])
                 if s and not e.get("session_id") and s.get("sessionId"):
                     e["session_id"] = s["sessionId"]
-                if s and s.get("cwd") and e.get("cwd") != s["cwd"]:
-                    e["cwd"] = s["cwd"]  # для пробуждения в той же рабочей копии
+                if s and s.get("cwd") and not e.get("cwd"):
+                    e["cwd"] = s["cwd"]  # для пробуждения в той же рабочей копии (запоминается один раз)
 
     def process_commands(self, by_id: dict[str, dict]) -> None:
         for c in self.store.take_commands():

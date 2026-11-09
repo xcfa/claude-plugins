@@ -1,7 +1,7 @@
 {
   "name": "aiflow",
   "displayName": "aiflow",
-  "version": "0.2.26",
+  "version": "0.2.27",
   "description": "Очередь задач для фоновых сессий Claude Code: оркестратор, планировщик, исполнитель, AI-ревью DeepSeek и мерж в master. Состояние в runs/, очередь ведёт монитор.",
   "author": { "name": "aiflow" },
   "license": "MIT",
