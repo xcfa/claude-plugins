@@ -573,6 +573,8 @@ async function load() {
     const s = await r.json();
     if (selecting()) { pendingState = s; return; }
     render(s);
+    // сессии подтягиваются в фоне: пока их нет, спросить ещё раз через секунду
+    if ((s.projects || []).some(p => p.sessions_loading)) setTimeout(load, 1000);
   } catch (e) {
     $("sub").innerHTML = `<span class="offline">Панель не отвечает: служба остановлена (aiflow up) или порт занят.</span>`;
   }

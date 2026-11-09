@@ -144,29 +144,76 @@ def open_terminal(root: Path, sid: str) -> str:
 
 
 class _Cache:
-    """Сессии и адрес репозитория одного проекта: `claude agents` и `gh repo view` дорогие."""
+    """Сессии и адрес репозитория одного проекта. `claude agents` и `gh repo view` дорогие (после
+    загрузки системы — секунды), поэтому запрос панели их не ждёт: отдаёт задачи сразу, а сессии и
+    адрес обновляет фоновый поток. Адрес репозитория хранится на диске между перезапусками."""
+
+    SESSIONS_TTL = 15
 
     def __init__(self, store: aiflow.Store):
         self.store = store
         self.lock = threading.Lock()
         self.sessions: dict = {}
         self.sessions_at = 0.0
-        self.repo_url: str | None = None
+        self.loaded = False
+        self.refreshing = False
+        self.repo_url: str | None = _repo_urls().get(str(store.root))
+
+    def refresh(self) -> None:
+        """Обновить в фоне, если устарело; не больше одного обновления за раз."""
+        with self.lock:
+            if self.refreshing or time.time() - self.sessions_at <= self.SESSIONS_TTL:
+                return
+            self.refreshing = True
+        threading.Thread(target=self._refresh, daemon=True).start()
+
+    def _refresh(self) -> None:
+        try:
+            try:
+                sessions = aiflow.Claude(self.store.root).agents()
+            except aiflow.AiflowError:
+                sessions = self.sessions
+            with self.lock:
+                self.sessions, self.loaded = sessions, True
+            if not self.repo_url:
+                try:
+                    url = aiflow.GH(self.store.root).repo_url()
+                except aiflow.AiflowError:
+                    url = ""
+                if url:
+                    self.repo_url = url
+                    _save_repo_url(str(self.store.root), url)
+        finally:
+            with self.lock:
+                self.sessions_at = time.time()
+                self.refreshing = False
 
     def state(self) -> dict:
+        self.refresh()
         with self.lock:
-            if time.time() - self.sessions_at > 15:
-                try:
-                    self.sessions = aiflow.Claude(self.store.root).agents()
-                except aiflow.AiflowError:
-                    self.sessions = {}
-                self.sessions_at = time.time()
-            if self.repo_url is None:
-                try:
-                    self.repo_url = aiflow.GH(self.store.root).repo_url()
-                except aiflow.AiflowError:
-                    self.repo_url = ""
-            return aiflow.build_state(self.store, self.sessions, self.repo_url or "")
+            sessions, loaded = self.sessions, self.loaded
+        st = aiflow.build_state(self.store, sessions, self.repo_url or "")
+        st["sessions_loading"] = not loaded
+        return st
+
+
+def _repo_urls_path() -> Path:
+    return aiflow.aiflow_home() / "repo_urls.json"
+
+
+def _repo_urls() -> dict:
+    return aiflow.read_json(_repo_urls_path(), {}) or {}
+
+
+_REPO_URLS_LOCK = threading.Lock()
+
+
+def _save_repo_url(root: str, url: str) -> None:
+    with _REPO_URLS_LOCK:
+        data = _repo_urls()
+        if data.get(root) != url:
+            data[root] = url
+            aiflow.write_json(_repo_urls_path(), data)
 
 
 def start_server(provider, port: int, wake: threading.Event, service: bool = False):
@@ -185,6 +232,16 @@ def start_server(provider, port: int, wake: threading.Event, service: bool = Fal
             if key not in caches:
                 caches[key] = _Cache(store)
             return caches[key]
+
+    def warm() -> None:
+        try:
+            for k, st in stores().items():
+                if st.initialized:
+                    cache(k, st).refresh()
+        except Exception:
+            pass
+
+    threading.Thread(target=warm, daemon=True).start()
 
     def project_state(key: str, store: aiflow.Store) -> dict:
         base = {"key": key, "name": store.root.name, "root": str(store.root)}
