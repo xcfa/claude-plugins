@@ -91,7 +91,10 @@ class Runner:
         return self._repo
 
     def gh_run(self, *args, check=True, timeout=180):
-        return self.run([self.gh, *args], env=self.gh_env, check=check, timeout=timeout)
+        p = aiflow.gh_with_retry(lambda: self.run([self.gh, *args], env=self.gh_env, check=False, timeout=timeout), args)
+        if check and p.returncode != 0:
+            raise RuntimeError(f"gh {' '.join(map(str, args[:2]))}: {(p.stderr or p.stdout).strip()[:500]}")
+        return p
 
     def gh_json(self, *args):
         return json.loads(self.gh_run(*args).stdout or "null")

@@ -201,6 +201,40 @@ def run(cmd: list[str], *, cwd=None, timeout: int = 120, env=None, input: str | 
         raise AiflowError(f"таймаут {timeout} с: {' '.join(cmd[:3])}")
 
 
+# Сбой сети до отправки запроса: повторять безопасно всегда.
+GH_NET_SAFE = re.compile(r"TLS handshake timeout|dial tcp|no such host|connection refused|could not resolve|"
+                         r"network is unreachable", re.I)
+# Сбой после отправки: запрос мог дойти — повторяем только чтение.
+GH_NET_ANY = re.compile(r"i/o timeout|connection reset|unexpected EOF|\bEOF\b|context deadline exceeded|"
+                        r"timeout awaiting|HTTP 50[234]|HTTP 429|was submitted too quickly|secondary rate limit", re.I)
+GH_RETRY_DELAYS = (3, 10, 30)
+
+
+def gh_is_read(args) -> bool:
+    a = [str(x) for x in args]
+    if a[:1] == ["api"]:
+        if "--method" in a or "-X" in a:
+            i = a.index("--method") if "--method" in a else a.index("-X")
+            return i + 1 < len(a) and a[i + 1].upper() == "GET"
+        return not any(x.lstrip().startswith("query=mutation") or "mutation" in x.split("{", 1)[0]
+                       for x in a if x.startswith("query="))
+    return a[:2] in (["pr", "view"], ["pr", "diff"], ["pr", "checks"], ["pr", "list"], ["run", "view"],
+                     ["run", "list"], ["repo", "view"])
+
+
+def gh_with_retry(call, args):
+    """Выполнить gh с повтором при сетевых сбоях GitHub (TLS timeout и т. п.): иначе разовый сбой
+    сети уводит задачу в «нужен человек». call() → CompletedProcess."""
+    p = call()
+    for delay in GH_RETRY_DELAYS:
+        out = (p.stderr or "") + (p.stdout or "")
+        if p.returncode == 0 or not (GH_NET_SAFE.search(out) or (gh_is_read(args) and GH_NET_ANY.search(out))):
+            return p
+        time.sleep(delay)
+        p = call()
+    return p
+
+
 def need(name: str) -> str:
     path = shutil.which(name)
     if not path:
@@ -653,7 +687,7 @@ class GH:
         self._repo_url = None
 
     def call(self, *args: str, timeout: int = 60):
-        return run([self.bin, *args], cwd=self.root, timeout=timeout)
+        return gh_with_retry(lambda: run([self.bin, *args], cwd=self.root, timeout=timeout), args)
 
     def json(self, *args: str):
         p = self.call(*args)
@@ -2370,7 +2404,8 @@ def gh_repo(cwd, env=None) -> str:
     """owner/name репозитория по версии GitHub. После переименования или переноса remote ещё
     указывает на старый адрес: gh подставляет его в {owner}/{repo}, а запросы с методом
     (POST/PATCH) редирект 307 не проходят. gh repo view редирект проходит и даёт новый адрес."""
-    p = run([need("gh"), "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"], cwd=cwd, env=env, timeout=60)
+    p = gh_with_retry(lambda: run([need("gh"), "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+                                  cwd=cwd, env=env, timeout=60), ["repo", "view"])
     name = (p.stdout or "").strip()
     return name if p.returncode == 0 and re.fullmatch(r"[\w.-]+/[\w.-]+", name) else "{owner}/{repo}"
 
