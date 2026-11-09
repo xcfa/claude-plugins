@@ -68,7 +68,7 @@ button:disabled:hover { border-color: var(--rule); }
 #usage { margin-bottom: 36px; }
 .grid { display: grid; grid-template-columns: minmax(200px, 280px) repeat(7, minmax(64px, 1fr)) minmax(150px, 190px); }
 .grid > div { min-width: 0; }
-.head { color: var(--muted); font-size: 12.5px; padding: 0 4px 8px; text-align: center; border-bottom: 1px solid var(--rule); }
+.head { color: var(--muted); font-size: 12.5px; padding: 0 4px 8px; text-align: center; border-bottom: 1px solid var(--rule); hyphens: auto; overflow-wrap: anywhere; }
 .head.left { text-align: left; padding-left: 0; }
 .head.right { text-align: right; }
 .cell { position: relative; min-height: 58px; border-bottom: 1px solid var(--rule); }
@@ -87,8 +87,11 @@ button:disabled:hover { border-color: var(--rule); }
 .here.idle { color: var(--muted); }
 .here.fail { color: var(--fail); background: var(--surface); }
 @media (prefers-reduced-motion: no-preference) {
-  .here.moving.live { animation: pulse 2.4s ease-in-out infinite; }
-  @keyframes pulse { 50% { box-shadow: 0 0 0 6px color-mix(in srgb, currentColor 25%, transparent); } }
+  /* кольцо на transform/opacity — анимируется на GPU, без перерисовки каждого кадра */
+  .dot.here.moving.live::after { content: ""; position: absolute; inset: -5px; border-radius: 50%;
+    background: currentColor; opacity: 0; will-change: transform, opacity; pointer-events: none;
+    animation: ring 2.4s ease-out infinite; }
+  @keyframes ring { 0% { transform: scale(.55); opacity: .4; } 100% { transform: scale(1.35); opacity: 0; } }
 }
 .task { padding: 9px 12px 9px 0; border-bottom: 1px solid var(--rule); min-height: 58px; display: flex; flex-direction: column; justify-content: center; }
 .task .id { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -487,7 +490,7 @@ function selecting() {
 }
 let pendingState = null;
 document.addEventListener("selectionchange", () => {
-  if (pendingState && !selecting()) { const s = pendingState; pendingState = null; render(s); }
+  if (pendingState && !selecting()) { const s = pendingState; pendingState = null; render(s); syncPulse(); }
 });
 
 function render(s) {
@@ -569,12 +572,20 @@ $("rmform").addEventListener("submit", async (e) => {
   finally { btn.disabled = false; }
 });
 
+// Перерисовка доски создаёт точки заново, и анимация начиналась бы с нуля каждые 5 с.
+// Привязываем все кольца к началу таймлайна документа: фаза непрерывна при любой перерисовке.
+function syncPulse() {
+  if (!document.getAnimations) return;
+  for (const a of document.getAnimations()) if (a.animationName === "ring") a.startTime = 0;
+}
+
 async function load() {
   try {
     const r = await fetch("/api/state", { cache: "no-store" });
     const s = await r.json();
     if (selecting()) { pendingState = s; return; }
     render(s);
+    syncPulse();
     // сессии подтягиваются в фоне: пока их нет, спросить ещё раз через секунду
     if ((s.projects || []).some(p => p.sessions_loading)) setTimeout(load, 1000);
   } catch (e) {
