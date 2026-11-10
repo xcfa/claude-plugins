@@ -718,12 +718,26 @@ class GH:
         return self._repo_url
 
     def last_push_run(self, branch: str) -> dict | None:
-        p = self.call("run", "list", "--branch", branch, "--event", "push", "--limit", "1",
-                      "--json", "conclusion,status,url,headSha")
+        """Состояние CI ветки: для каждого workflow, который запускается на push, — его самый свежий
+        завершённый прогон, push или ручной перезапуск (workflow_dispatch). Красный, если красный хоть
+        один такой workflow. Ручной зелёный перезапуск снимает паузу integration_red."""
+        p = self.call("run", "list", "--branch", branch, "--limit", "40",
+                      "--json", "conclusion,status,url,headSha,event,workflowName,createdAt")
         if p.returncode != 0:
             return None
-        data = json.loads(p.stdout or "[]")
-        return data[0] if data else None
+        runs = json.loads(p.stdout or "[]")
+        on_push = {r.get("workflowName") for r in runs if r.get("event") == "push"}
+        latest: dict[str, dict] = {}
+        for r in runs:  # gh отдаёт от новых к старым
+            wf = r.get("workflowName")
+            if wf in on_push and r.get("event") in ("push", "workflow_dispatch") and wf not in latest:
+                latest[wf] = r
+        if not latest:
+            return None
+        if any(r.get("status") != "completed" for r in latest.values()):
+            return {"status": "in_progress"}
+        red = [r for r in latest.values() if r.get("conclusion") in ("failure", "timed_out", "startup_failure")]
+        return red[0] if red else max(latest.values(), key=lambda r: r.get("createdAt") or "")
 
 
 # ---------------------------------------------------------------- usage
