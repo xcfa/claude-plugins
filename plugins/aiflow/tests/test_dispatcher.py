@@ -788,8 +788,7 @@ class Cost(ProjectCase):
         folder = self.tmp / "claude" / "projects" / "p"
         folder.mkdir(parents=True)
         msg = {"message": {"id": "m1", "model": "claude-opus-5-5", "usage": {"input_tokens": 1000, "output_tokens": 500}}}
-        (folder / "uuid-s1.jsonl").write_text(json.dumps(msg) + "
-", encoding="utf-8")
+        (folder / "uuid-s1.jsonl").write_text(json.dumps(msg), encoding="utf-8")
         self.add("a")
         self.tick()
         self.gh.add_pr(7, "a", body="Что сделано")
