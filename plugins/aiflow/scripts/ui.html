@@ -496,6 +496,14 @@ function renderBoard(p) {
   return `<div class="grid">${html}</div>${tail}`;
 }
 
+// что сказать про очередь без паузы: «идёт» — только когда в ней есть незавершённые задачи
+function queueLabel(p) {
+  const open = (p.tasks || []).filter(t => !["merged", "done", "cancelled"].includes(t.state));
+  if (!open.length) return "Задач в работе нет";
+  const waiting = open.filter(t => t.needs).length;
+  return waiting === open.length ? "Очередь ждёт вас" : "Очередь идёт";
+}
+
 function renderProject(p) {
   const k = esc(p.key);
   const forget = last.service ? `<button class="link" data-forget="${k}" title="Убрать проект из службы">Убрать</button>` : "";
@@ -507,7 +515,7 @@ function renderProject(p) {
   const pz = p.paused;
   const why = r => r === "integration_red" ? "ветка " + p.base + " красная" : REASONS[r] || r;
   const reason = pz ? (pz.reasons || [pz.reason]).map(why).join(", ") : "";
-  const qstate = pz ? `<span class="state paused">Пауза: ${esc(reason)}${pz.until ? ", до " + time(pz.until) : ""}</span>` : `<span class="state">Очередь идёт</span>`;
+  const qstate = pz ? `<span class="state paused">Пауза: ${esc(reason)}${pz.until ? ", до " + time(pz.until) : ""}</span>` : `<span class="state">${queueLabel(p)}</span>`;
   const give = `<button class="primary" data-act="open_orchestrator" data-project="${k}" title="Открыть чат с координатором проекта: задачи пишутся там через /aiflow:intake">Дать задачу</button> `;
   const qbtn = give + `<button data-act="${pz ? "resume" : "pause"}" data-project="${k}"${dis(p.key, null)}>${pz ? "Продолжить очередь" : "Поставить на паузу"}</button>`;
   return `<section class="project">
