@@ -1018,6 +1018,43 @@ class AutoReview(ProjectCase):
         self.assertEqual(self.state("a"), "in_review")
 
 
+class PlannerInstructions(ProjectCase):
+    """Правила плана и разговора вынесены из planner.md в файлы, которые планировщик читает по надобности."""
+
+    def test_parts_exist_and_launch_prompts_point_at_them(self):
+        self.assertTrue(aiflow.PLANNER_PLAN_MD.is_file())
+        self.assertTrue(aiflow.PLANNER_TALK_MD.is_file())
+        t = self.add("a")
+        cfg = self.store.config()
+        task_prompt = aiflow.planner_prompt(self.store, t, cfg)
+        self.assertIn(str(aiflow.PLANNER_PLAN_MD), task_prompt)
+        self.assertIn(str(aiflow.WORKER_MD), task_prompt)
+        self.assertNotIn(str(aiflow.PLANNER_TALK_MD), task_prompt)  # обычной задаче правила разговора не нужны
+        for build in (aiflow.ask_prompt, aiflow.discuss_prompt):
+            text = build(self.store, t, cfg)
+            self.assertIn(str(aiflow.PLANNER_TALK_MD), text)
+            self.assertIn(str(aiflow.PLANNER_PLAN_MD), text)
+
+    def test_core_file_has_no_plan_template_and_parts_have_it(self):
+        core = (aiflow.PLUGIN_ROOT / "agents" / "planner.md").read_text(encoding="utf-8")
+        plan = aiflow.PLANNER_PLAN_MD.read_text(encoding="utf-8")
+        talk = aiflow.PLANNER_TALK_MD.read_text(encoding="utf-8")
+        self.assertNotIn("<!-- ai-plan v1 -->", core)
+        self.assertNotIn("aiflow discussion`, пользователь хочет", core)
+        for needed in ("<!-- ai-plan v1 -->", "gh pr create --draft", "git switch --detach", "<!-- aiflow:planner -->"):
+            self.assertIn(needed, plan)
+        for needed in ("--status answered", "aiflow discussion", "aiflow enqueue"):
+            self.assertIn(needed, talk)
+        for needed in ("self_execute", "--status delegate", "Оценка задачи"):
+            self.assertIn(needed, core)
+        self.assertLess(len(core), 0.7 * (len(core) + len(plan) + len(talk)))
+
+    def test_task_sessions_cannot_create_worktrees(self):
+        for name in ("planner.md", "worker.md"):
+            head = (aiflow.PLUGIN_ROOT / "agents" / name).read_text(encoding="utf-8").split("---")[1]
+            self.assertIn("EnterWorktree", head, name)
+
+
 class Models(ProjectCase):
     def test_model_named_at_intake_is_used_for_the_planner(self):
         t = aiflow.normalize_task({"id": "a", "text": "t", "planner_model": "fable", "planner_effort": "high"})

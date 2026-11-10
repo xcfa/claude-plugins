@@ -46,6 +46,9 @@ TERMINAL = {"merged", "done", "cancelled"}
 FINISHED = {"merged", "done"}  # задача выполнена: зависимые могут стартовать
 COMPLEXITIES = ("trivial", "simple", "complex")  # оценивает планировщик; trivial вручную — сразу исполнитель
 WORKER_MD = Path(__file__).resolve().parent.parent / "agents" / "worker.md"
+# Части инструкций планировщика, которые он читает по надобности, а не носит в контексте каждой сессии.
+PLANNER_PLAN_MD = PLUGIN_ROOT / "prompts" / "planner-plan.md"  # сложная задача: draft PR, шаблон плана, UI, доработка
+PLANNER_TALK_MD = PLUGIN_ROOT / "prompts" / "planner-talk.md"  # вопрос о коде и обсуждение идеи
 TASK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
 MARKERS = ("<!-- aiflow", "<!-- ai-review", "<!-- human")
 HUMAN_MARKER = "<!-- human -->"
@@ -1238,7 +1241,8 @@ def planner_prompt(store: Store, t: dict, cfg: dict) -> str:
         f"Файл задачи: {store.task_path(tid)} — прочитай его целиком.\n"
         f"Базовая ветка: {cfg['base_branch']}. Ветка задачи: ai/{tid}.\n"
         "Сначала оцени задачу (раздел «Оценка задачи» твоих инструкций) и выбери один путь:\n"
-        f"— сложная: draft PR с планом, затем aiflow report {tid} --role planner --status plan_ready "
+        f"— сложная: прочитай правила плана ({PLANNER_PLAN_MD}) и сделай draft PR с планом, затем "
+        f"aiflow report {tid} --role planner --status plan_ready "
         "--pr <номер> --complexity complex --summary \"<одна строка>\";\n"
         f"— простая, поручить исполнителю (Sonnet): aiflow report {tid} --role planner --status delegate "
         "--summary \"<одна строка>\" --details-file <указания исполнителю в $CLAUDE_JOB_DIR/tmp/>;\n"
@@ -1263,8 +1267,8 @@ def amend_prompt(t: dict, role: str, state: str, items: list[dict], live: bool) 
     if state == "discussing":
         return head + "Учти это в обсуждении и ответь пользователю."
     if state == "answered":
-        return head + ("Это продолжение твоего ответа на вопрос. Просят изменить код — составь план по своим "
-                       f"инструкциям (ветка ai/{t['id']}, draft PR) и выполни aiflow report {t['id']} --role planner "
+        return head + ("Это продолжение твоего ответа на вопрос. Просят изменить код — составь план по правилам "
+                       f"плана ({PLANNER_PLAN_MD}; ветка ai/{t['id']}, draft PR) и выполни aiflow report {t['id']} --role planner "
                        "--status plan_ready --pr <номер> --complexity simple|complex --summary \"<одна строка>\". "
                        f"Новый вопрос — ответь и выполни aiflow report {t['id']} --role planner --status answered "
                        "--summary \"<ответ в 1–3 строки>\". Хотят обсудить — обсуждай и закончи ход.")
@@ -1367,13 +1371,14 @@ def discuss_prompt(store: Store, t: dict, cfg: dict) -> str:
     return (
         f"aiflow discussion {tid}: {t.get('title', '')}\n"
         f"Файл задачи: {store.task_path(tid)} — прочитай его целиком. Базовая ветка: {cfg['base_branch']}.\n"
-        "Режим обсуждения (раздел «Режим обсуждения» твоих инструкций). Пользователь хочет обсудить, как лучше "
+        f"Режим обсуждения: прочитай правила разговора ({PLANNER_TALK_MD}); когда дойдёт до плана — правила плана "
+        f"({PLANNER_PLAN_MD}). Пользователь хочет обсудить, как лучше "
         "это сделать, а не получить план сразу. Изучи код и документацию в объёме, нужном для содержательного "
         "разговора (сабагенты aiflow:explorer и aiflow:researcher). Затем напиши пользователю: как ты понял "
         "задачу, 2–3 варианта с плюсами и минусами, свою рекомендацию и вопросы — и закончи ход: пользователь "
         "ответит в этой сессии. Ветку, PR и файлы не создавай, пока пользователь явно не скажет, что договорились.\n"
         "Чем закончить, когда договорились:\n"
-        f"— делаем одну задачу: оформи план по своим инструкциям (ветка ai/{tid}, draft PR) и выполни "
+        f"— делаем одну задачу: оформи план по правилам плана (ветка ai/{tid}, draft PR) и выполни "
         f"aiflow report {tid} --role planner --status plan_ready --pr <номер> --complexity simple|complex "
         "--summary \"<одна строка>\";\n"
         "— делаем несколько независимых задач: поставь их одной командой aiflow enqueue (формат — как в "
@@ -1388,13 +1393,13 @@ def ask_prompt(store: Store, t: dict, cfg: dict) -> str:
     return (
         f"aiflow question {tid}: {t.get('title', '')}\n"
         f"Файл задачи: {store.task_path(tid)} — прочитай его целиком. Базовая ветка: {cfg['base_branch']}.\n"
-        "Это вопрос, а не задача (раздел «Вопросы» твоих инструкций). Найди ответ в коде и документации "
+        f"Это вопрос, а не задача: прочитай правила разговора ({PLANNER_TALK_MD}). Найди ответ в коде и документации "
         "(сабагенты aiflow:explorer и aiflow:researcher) и ответь пользователю здесь: по существу, с путями "
         "и номерами строк. Ветку, PR и файлы не создавай. Затем выполни "
         f"aiflow report {tid} --role planner --status answered --summary \"<ответ в 1–3 строки>\" "
         "--details-file <файл с полным ответом в $CLAUDE_JOB_DIR/tmp/> и закончи ход.\n"
-        "Если потом пользователь попросит что-то изменить — составь план по своим инструкциям "
-        f"(ветка ai/{tid}, draft PR) и выполни aiflow report {tid} --role planner --status plan_ready "
+        f"Если потом пользователь попросит что-то изменить — составь план по правилам плана ({PLANNER_PLAN_MD}; "
+        f"ветка ai/{tid}, draft PR) и выполни aiflow report {tid} --role planner --status plan_ready "
         "--pr <номер> --complexity simple|complex --summary \"<одна строка>\". Новый вопрос — снова ответ и "
         "--status answered."
     )

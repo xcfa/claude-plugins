@@ -12,7 +12,7 @@ AI-ревью DeepSeek → мерж в `master`» в фоновых сессия
 | Компонент | Что делает |
 | --- | --- |
 | `agents/orchestrator.md` | Интерфейс: принимает задачи, отвечает о состоянии, реагирует на события |
-| `agents/planner.md` | Opus/Sonnet: draft PR с планом, доработка плана по замечаниям |
+| `agents/planner.md` | Opus: оценка задачи, поручение исполнителю или «сделаю сам». Правила плана и разговора вынесены в `prompts/planner-plan.md` и `prompts/planner-talk.md` — планировщик читает их, только когда они нужны |
 | `agents/worker.md` | Sonnet: реализация по плану, цикл ревью в свою очередь |
 | `agents/explorer.md`, `agents/researcher.md` | Haiku: ответы на конкретные вопросы к коду и документации |
 | `skills/intake` | `/aiflow:intake <задачи>` — разбор и постановка в очередь, запуск монитора |
