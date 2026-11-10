@@ -97,6 +97,7 @@ button:disabled:hover { border-color: var(--rule); }
 .task { padding: 9px 12px 9px 0; border-bottom: 1px solid var(--rule); min-height: 58px; display: flex; flex-direction: column; justify-content: center; }
 .task .id { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .task .title { color: var(--muted); font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.task .phase { color: var(--move); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .task .open { all: unset; display: block; min-width: 0; cursor: pointer; border-radius: 4px; }
 .task .open:hover .id { text-decoration: underline; text-underline-offset: 3px; }
 .task .open:focus-visible { outline: 2px solid var(--move); outline-offset: 2px; }
@@ -453,7 +454,8 @@ function renderBoard(p) {
     let html = "";
     const tn = tone(t), id = esc(t.id);
     const stage = t.stage ?? 0;
-    const name = `<div class="id">${id}</div><div class="title" title="${esc(t.title)}">${esc(t.title)}</div>`;
+    const phase = t.activity ? `<div class="phase" title="${esc(t.activity)}">${esc(t.activity)}</div>` : "";
+    const name = `<div class="id">${id}</div><div class="title" title="${esc(t.title)}">${esc(t.title)}</div>${phase}`;
     const head = t.session && t.session.id
       ? `<button class="open" data-act="open_session" data-project="${k}" data-id="${id}" title="Открыть сессию ${esc(t.session.role || "")} в терминале">${name}</button>`
       : name;

@@ -91,6 +91,56 @@ REVIEW_ACTIONS = {"error": "tool", "no_ci": "noci", "limit_reached": "rounds", "
                   "blocked": "asks"}
 
 
+CI_PASS = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+CI_FAIL = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"}
+
+
+def ci_summary(rollup: list | None, sha: str | None = None) -> dict:
+    """Проверки CI коммита одним словарём: сколько прошло, упало, ещё идёт."""
+    out = {"sha": sha, "total": 0, "passed": 0, "failed": 0, "pending": 0}
+    for c in rollup or []:
+        v = str(c.get("conclusion") or c.get("state") or "").upper()
+        out["total"] += 1
+        out["passed" if v in CI_PASS else "failed" if v in CI_FAIL else "pending"] += 1
+    return out
+
+
+def ci_text(ci: dict | None) -> str:
+    if not ci or not ci.get("total"):
+        return ""
+    text = f"прошло {ci['passed']} из {ci['total']}"
+    return text + (f", упало {ci['failed']}" if ci.get("failed") else "")
+
+
+def review_activity(store: "Store", t: dict, session_state: str | None, max_rounds: int) -> str | None:
+    """Чем сейчас занято ревью задачи: ожидание CI, ревьюер opencode, мерж или работа исполнителя.
+    Фазу пишет сам aiflow review (runs/<id>/phase.json), пока работает; сводку CI — проход очереди."""
+    st = t.get("state")
+    ci = ci_text(t.get("ci"))
+    if st == "ready":
+        return "в очереди на ревью" + (f"; CI: {ci}" if ci else "")
+    if st != "in_review":
+        return None
+    ph = read_json(store.runs / t["id"] / "phase.json", {}) or {}
+    if ph and owner_alive(ph):
+        mins = int(age_minutes(ph.get("at")))
+        took = f" ({mins} мин)" if mins >= 1 else ""
+        kind = ph.get("phase")
+        if kind == "ci_appear":
+            return "ждёт, пока GitHub запустит CI" + took
+        if kind == "ci":
+            return "ждёт CI" + (f": {ci}" if ci else "") + took
+        if kind == "reviewer":
+            return f"ревьюер opencode, раунд {ph.get('round') or '?'}/{max_rounds}" + took
+        if kind == "merge":
+            return "мерж" + took
+    if t.get("approved_sha"):
+        return "одобрен, ждёт мержа" + (f"; CI: {ci}" if ci else "")
+    if session_state == "working":
+        return "исполнитель: rebase, тесты или правки"
+    return None
+
+
 def short_reason(text: str, limit: int = 220) -> str:
     """Причина для панели и уведомлений: первая содержательная строка. Полный текст — в report.json."""
     line = next((x.strip() for x in str(text or "").splitlines() if x.strip()), "")
@@ -2004,7 +2054,8 @@ class Dispatcher:
             self.lost(t, role, t.get("state", "in_progress"), "сессия пропала", f"сессия {role} пропала из claude agents")
 
     def adv_ready(self, t: dict) -> None:
-        pr = self.gh.pr(t["pr"], "state")
+        pr = self.gh.pr(t["pr"], "state,headRefOid,statusCheckRollup")
+        t["ci"] = ci_summary(pr.get("statusCheckRollup"), pr.get("headRefOid"))
         if pr.get("state") == "MERGED":
             self.finish_merged(t)
         elif pr.get("state") == "CLOSED":
@@ -2013,6 +2064,7 @@ class Dispatcher:
 
     def adv_in_review(self, t: dict) -> None:
         pr = self.gh.pr(t["pr"], "state,labels,headRefOid,statusCheckRollup")
+        t["ci"] = ci_summary(pr.get("statusCheckRollup"), pr.get("headRefOid"))
         if pr.get("state") == "MERGED":
             return self.finish_merged(t)
         if pr.get("state") == "CLOSED":
@@ -2438,6 +2490,8 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
             "allowed_paths": t.get("allowed_protected_paths") or [],
             "tokens": task_tokens(t), "usage": usage, "cost": round(cost, 4), "session": cur, "needs": needs,
             "action": t.get("human_action") if st == "needs_human" else None,
+            "activity": review_activity(store, t, cur.get("state"), int(cfg["max_rounds"])),
+            "ci": t.get("ci") if st in ("ready", "in_review") else None,
             "depends_on": t.get("depends_on") or [], "state_at": t.get("state_at"),
             "launching": bool(t.get("launching")), "review_lock": t["id"] in (q.get("review_locks") or []),
             "amendments": len(t.get("amendments") or []),
@@ -2469,7 +2523,8 @@ def print_status(state: dict) -> None:
     rows = [("задача", "состояние", "PR", "раунды", "токены", "цена", "сессия")]
     for t in state["tasks"]:
         s = t["session"]
-        rows.append((t["id"], t["label"] + (" 🔒" if t["review_lock"] else ""),
+        rows.append((t["id"], t["label"] + (" 🔒" if t["review_lock"] else "")
+                     + (f" · {t['activity']}" if t.get("activity") and t["state"] == "in_review" else ""),
                      f"#{t['pr']}" if t["pr"] else "—",
                      f"{t['rounds']}/{t['max_rounds']}" if t["rounds"] else "—",
                      fmt_tokens(t["tokens"]), f"${t['cost']:.2f}" if t.get("cost") else "—",

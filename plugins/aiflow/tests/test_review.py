@@ -289,6 +289,41 @@ class ReviewMain(ProjectCase):
         self.assertEqual(res["status"], "approved")
         self.assertIn("необязательны", self.r.published[-1]["body"])
 
+    def test_phase_is_written_while_the_round_runs_and_removed_after(self):
+        phase_file = self.root / "runs" / "a" / "phase.json"
+        seen = []
+
+        def reviewer(r, pr, rnd, max_rounds, model, brief, tmp):
+            seen.append(aiflow.read_json(phase_file))
+            return self.answer
+
+        real_gh = self.r.gh_run
+
+        def gh_run(*args, **kw):
+            if "--watch" in args:
+                seen.append(aiflow.read_json(phase_file))
+            if args[:2] == ("pr", "merge"):
+                seen.append(aiflow.read_json(phase_file))
+            return real_gh(*args, **kw)
+
+        self.r.gh_run = gh_run
+        with mock.patch.object(review, "call_reviewer", reviewer):
+            self.assertEqual(self.run_review()["status"], "approved")
+        self.assertEqual([p["phase"] for p in seen][:3], ["ci", "reviewer", "merge"])
+        self.assertEqual(seen[1]["round"], 1)
+        self.assertEqual(seen[0]["pid"], review.os.getpid())
+        self.assertFalse(phase_file.exists())
+
+    def test_phase_says_when_github_has_not_started_ci_yet(self):
+        (self.root / ".github" / "workflows").mkdir(parents=True)
+        (self.root / ".github" / "workflows" / "ci.yml").write_text("name: CI\n", encoding="utf-8")
+        phase_file = self.root / "runs" / "a" / "phase.json"
+        seen = []
+        self.r.checks = [[], [], [{"name": "build", "bucket": "pass"}]]
+        with mock.patch.object(review.time, "sleep", lambda s: seen.append(aiflow.read_json(phase_file)["phase"])):
+            self.assertEqual(self.run_review()["status"], "approved")
+        self.assertEqual(seen, ["ci_appear", "ci_appear"])
+
     def test_closed_pr(self):
         self.r.pr["state"] = "MERGED"
         self.assertEqual(self.run_review()["status"], "already_closed")

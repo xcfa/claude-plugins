@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import unittest
+from unittest import mock
 
 from helpers import PLAN, ProjectCase, ago, aiflow
 
@@ -298,6 +299,55 @@ class InReview(ProjectCase):
         self.tick()
         self.assertTrue(self.task("a")["size_ok"])
         self.assertEqual(self.state("a"), "in_review")
+
+    def activity(self, tid: str = "a") -> str | None:
+        sessions = self.claude.agents()
+        # фаза в тестах «записана» раньше, чем стартовал сам тест: не считаем её из-за этого чужой
+        with mock.patch.object(aiflow, "process_start", lambda pid: None):
+            return self._activity(tid, sessions)
+
+    def _activity(self, tid: str, sessions: dict) -> str | None:
+        return next(t for t in aiflow.build_state(self.store, sessions)["tasks"] if t["id"] == tid)["activity"]
+
+    def phase(self, kind: str, minutes_ago: float = 0, **detail) -> None:
+        import os
+        aiflow.write_json(self.root / "runs" / "a" / "phase.json",
+                          {"pid": os.getpid(), "at": ago(minutes_ago), "phase": kind, **detail})
+
+    def test_activity_tells_ci_from_the_reviewer(self):
+        self.to_ready("a", 1, files=["a.py"])
+        self.gh.prs[1]["statusCheckRollup"] = [{"name": "backend", "conclusion": "SUCCESS"},
+                                               {"name": "frontend", "conclusion": "SUCCESS"},
+                                               {"name": "analysis", "status": "IN_PROGRESS", "conclusion": None}]
+        self.tick()
+        self.assertEqual(self.state("a"), "in_review")
+        self.assertEqual(self.task("a")["ci"]["passed"], 2)
+        self.assertEqual(self.activity(), "исполнитель: rebase, тесты или правки")  # aiflow review ещё не запущен
+        self.phase("ci_appear")
+        self.assertEqual(self.activity(), "ждёт, пока GitHub запустит CI")
+        self.phase("ci", minutes_ago=4)
+        self.assertEqual(self.activity(), "ждёт CI: прошло 2 из 3 (4 мин)")
+        self.phase("reviewer", minutes_ago=7, round=2)
+        self.assertEqual(self.activity(), "ревьюер opencode, раунд 2/5 (7 мин)")
+        self.phase("merge")
+        self.assertEqual(self.activity(), "мерж")
+
+    def test_phase_of_a_dead_review_process_is_ignored(self):
+        self.start()
+        aiflow.write_json(self.root / "runs" / "a" / "phase.json", {"pid": 0, "at": ago(1), "phase": "reviewer", "round": 1})
+        self.assertEqual(self.activity(), "исполнитель: rebase, тесты или правки")
+
+    def test_activity_for_failed_ci_and_for_the_queue(self):
+        self.to_ready("a", 1, files=["a.py"])
+        self.to_ready("b", 2, files=["a.py"])
+        self.gh.prs[1]["statusCheckRollup"] = [{"name": "backend", "conclusion": "FAILURE"}, {"context": "lint", "state": "SUCCESS"}]
+        self.gh.prs[2]["statusCheckRollup"] = [{"name": "backend", "conclusion": "SUCCESS"}]
+        self.tick()
+        self.tick()
+        self.phase("ci")
+        self.assertEqual(self.activity("a"), "ждёт CI: прошло 1 из 2, упало 1")
+        self.assertEqual(self.activity("b"), "в очереди на ревью; CI: прошло 1 из 1")
+        self.assertEqual(aiflow.ci_summary(None)["total"], 0)
 
     def test_missing_ci_gets_its_own_advice(self):
         self.start()

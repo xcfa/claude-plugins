@@ -41,9 +41,26 @@ HUMAN_INPUT_REPEATS = 3  # столько раз подряд возвращае
 CTX: dict = {"root": None, "task": None, "pr": None, "round": None}
 
 
+def set_phase(phase: str | None, **detail) -> None:
+    """Чем сейчас занят раунд — для панели: ожидание CI, ревьюер, мерж. None — раунд закончен."""
+    root, task = CTX["root"], CTX["task"]
+    if not (root and task) or CTX.get("phase") == (phase, detail):
+        return
+    CTX["phase"] = (phase, detail)
+    path = root / "runs" / task["id"] / "phase.json"
+    try:
+        if phase is None:
+            path.unlink(missing_ok=True)
+        else:
+            aiflow.write_json(path, {"pid": os.getpid(), "at": aiflow.iso(), "phase": phase, "pr": CTX["pr"], **detail})
+    except OSError:
+        pass  # подсказка для панели не должна ломать ревью
+
+
 def finish(status: str, code: int = 0, **data) -> None:
     out = {"status": status, **data}
     root, task = CTX["root"], CTX["task"]
+    set_phase(None)
     if root and task:
         try:
             aiflow.write_json(root / "runs" / task["id"] / "review.json",
@@ -520,12 +537,15 @@ def wait_checks(r: Runner, pr: int, timeout_min: int, required: bool = False, ap
     нагрузкой — через несколько минут. Если проверки обязательны, ждём их появления appear_seconds,
     и «проверок нет» — не «прошло», а отдельный исход none."""
     deadline = time.time() + appear_seconds
-    while True:
+    checks = read_checks(r, pr)
+    while not checks and required and time.time() < deadline:
+        set_phase("ci_appear")
+        (sleep or time.sleep)(15)
+        checks = read_checks(r, pr)
+    if checks:
+        set_phase("ci")
         r.gh_run("pr", "checks", str(pr), "--watch", "--interval", "30", check=False, timeout=timeout_min * 60 + 60)
         checks = read_checks(r, pr)
-        if checks or not required or time.time() >= deadline:
-            break
-        (sleep or time.sleep)(15)
     if not checks:
         return "none", []
     if any(c.get("bucket") == "pending" for c in checks):
@@ -783,6 +803,7 @@ def main(argv: list[str] | None = None) -> int:
                       + format_open_threads(pending))
             (tmp / "review-brief.md").write_text(brief, encoding="utf-8")  # для разбора, ревьюеру не нужен
 
+            set_phase("reviewer", round=rnd)
             data = call_reviewer(r, args.pr, rnd, max_rounds, cfg.get("reviewer_model") or "", brief, tmp)
             verdict, cs, summary = normalize(data, truncated)
             still_open = answer_threads(r, args.pr, pending, thread_verdicts(data), tmp) if pending else []
@@ -806,6 +827,7 @@ def main(argv: list[str] | None = None) -> int:
                 aiflow.write_json(approved_file, {"patch_id": pid, "round": rnd, "head": head, "at": aiflow.iso()})
 
         # Мерж — по одному: под общим lock проверяем паузу и то, что ветка не отстала от базовой.
+        set_phase("merge")
         gate = aiflow.FileLock(root / "runs" / "merge.lock")
         if not gate.acquire(wait_seconds=180):
             raise RuntimeError("мерж занят другим PR дольше 3 минут")
