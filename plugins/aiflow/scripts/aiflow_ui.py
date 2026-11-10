@@ -106,23 +106,40 @@ def _win_focus(title: str, wait: float = 0.0) -> bool:
     return True
 
 
-def open_terminal(root: Path, sid: str) -> str:
-    """Открыть `claude attach <sid>` в окне терминала; если окно этой сессии уже открыто —
-    вывести его на передний план. Возвращает, где открыли."""
+WT_WINDOW = "aiflow"  # имя окна Windows Terminal: все сессии открываются в нём вкладками
+
+
+def session_title(t: dict | None, sid: str) -> str:
+    """Заголовок вкладки сессии: id задачи и её название. Без символов, которые терминал или
+    командная строка поймут по-своему (`;` в wt разделяет команды)."""
+    t = t or {}
+    tid, name = str(t.get("id") or ""), str(t.get("title") or "")
+    text = tid + (f": {name}" if name and name != tid else "") if tid else f"aiflow {sid}"
+    text = re.sub(r"[^\w .,:()#№+\-—]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return (text if len(text) <= 60 else text[:59].rstrip() + "…") or f"aiflow {sid}"
+
+
+def open_terminal(root: Path, sid: str, title: str | None = None) -> str:
+    """Открыть `claude attach <sid>` в терминале: в Windows Terminal — вкладкой общего окна aiflow с
+    заголовком задачи. Если вкладка этой сессии уже на виду — вывести её окно на передний план.
+    Возвращает, где открыли."""
     if not re.fullmatch(r"[A-Za-z0-9][\w\-]{0,100}", sid):
         raise aiflow.AiflowError("некорректный id сессии")
     claude = shutil.which("claude") or "claude"
-    title = f"aiflow {sid}"
+    title = title or f"aiflow {sid}"
     if os.name == "nt":
         if _win_focus(title):
-            return "уже открытом окне"
+            return "уже открытой вкладке"
         flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         wt = shutil.which("wt.exe") or shutil.which("wt")
         if wt:
-            # --suppressApplicationTitle: Claude Code меняет заголовок, а по нему окно ищется в следующий раз.
-            subprocess.Popen([wt, "-w", "new", "new-tab", "-d", str(root), "--title", title, "--suppressApplicationTitle",
-                              claude, "attach", sid], cwd=root, creationflags=flags, env=aiflow.claude_env())
-            where = "Windows Terminal"
+            # -w aiflow: вкладка в окне с этим именем (нет окна — оно создаётся).
+            # --suppressApplicationTitle: Claude Code меняет заголовок, а по нему вкладка ищется в следующий раз.
+            subprocess.Popen([wt, "-w", WT_WINDOW, "new-tab", "-d", str(root), "--title", title,
+                              "--suppressApplicationTitle", claude, "attach", sid],
+                             cwd=root, creationflags=flags, env=aiflow.claude_env())
+            where = "вкладке Windows Terminal"
         else:
             subprocess.Popen(["cmd", "/c", "start", title, "/D", str(root), claude, "attach", sid],
                              cwd=root, creationflags=flags, env=aiflow.claude_env())
@@ -337,7 +354,7 @@ def start_server(provider, port: int, wake: threading.Event, service: bool = Fal
                     sid = _task_session(t) if t else None
                     if not sid:
                         return self._json(400, {"error": "у задачи ещё нет сессии"})
-                    where = open_terminal(store.root, sid)
+                    where = open_terminal(store.root, sid, session_title(t, sid))
                     return self._json(200, {"ok": True, "where": where, "command": f"claude attach {sid}"})
                 elif action == "cancel" and tid:
                     warnings = aiflow.cancel_tasks(store, [tid], note="из панели")

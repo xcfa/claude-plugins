@@ -107,6 +107,7 @@ button:disabled:hover { border-color: var(--rule); }
 .state-label { display: none; }
 .empty { padding: 28px 0; color: var(--muted); border-bottom: 1px solid var(--rule); }
 .empty code { color: var(--ink); }
+.wait-item .todo { margin-top: 4px; font-size: 13.5px; }
 .ended-toggle { margin-top: 10px; padding: 4px 0; border: 0; background: none; color: var(--muted); font: inherit; font-size: 13px; cursor: pointer; }
 .ended-toggle:hover { color: inherit; }
 .ended-toggle .chev { display: inline-block; width: 1em; transition: transform .15s; }
@@ -392,7 +393,7 @@ function renderWaiting() {
     acts.push(`<button class="danger" data-cancel="${id}" data-project="${k}"${d}>Снять</button>`);
     const proj = many() ? `<span class="proj">${esc(p.name)}</span> ` : "";
     items.push(`<div class="wait-item ${t.state === "needs_human" ? "fail" : ""}">
-      <div><div class="what">${proj}${id} <span class="why">— ${esc(t.title)}</span></div><div class="why">${esc(t.needs)}</div>${d ? `<div class="busy-note">Принято, ждёт прохода очереди…</div>` : ""}</div>
+      <div><div class="what">${proj}${id} <span class="why">— ${esc(t.title)}</span></div><div class="why">${esc(t.needs)}</div>${t.action ? `<div class="todo"><b>Что сделать:</b> ${esc(t.action)}</div>` : ""}${d ? `<div class="busy-note">Принято, ждёт прохода очереди…</div>` : ""}</div>
       <div class="acts">${acts.join("")}</div></div>`);
   }
   $("waiting").hidden = items.length === 0;

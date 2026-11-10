@@ -363,6 +363,92 @@ class Retry(ProjectCase):
         self.assertEqual(len(self.claude.resumed), 1)
 
 
+class NeedsHuman(ProjectCase):
+    def test_report_written_while_waiting_does_not_fire_after_retry(self):
+        """Сессия отчиталась об ошибке, пока задача ждала человека: после «Повторить» это не новость."""
+        self.to_ready("a", 1, files=["a.py"])
+        self.tick()
+        self.report("a", "worker", "error", 1, summary="ревьюер не вернул валидный JSON")
+        self.claude.finish_turn("w-a")
+        self.tick()
+        self.assertEqual(self.state("a"), "needs_human")
+        self.report("a", "worker", "error", 1, summary="та же ошибка ещё раз")  # задача уже ждёт человека
+        self.patch("a", human_watch=None)  # человек сессии не отвечал
+        self.store.command({"cmd": "retry", "id": "a"})
+        self.tick()
+        self.assertEqual(self.state("a"), "in_review")
+        self.tick()
+        self.assertEqual(self.state("a"), "in_review")  # старый отчёт не вернул задачу к человеку
+        self.report("a", "worker", "error", 1, summary="новая ошибка")
+        self.tick()
+        self.assertEqual(self.state("a"), "needs_human")
+        self.assertEqual(self.task("a")["human_reason"], "новая ошибка")
+
+    def test_reason_is_one_line_and_says_what_to_do(self):
+        self.to_ready("a", 1, files=["a.py"])
+        self.tick()
+        self.report("a", "worker", "error", 1, summary="ревьюер не вернул валидный JSON. Конец вывода:\n(пусто)\n"
+                                                       "stderr opencode: ! permission requested " + "x" * 400)
+        events = self.tick()
+        t = self.task("a")
+        self.assertEqual(t["human_reason"], "ревьюер не вернул валидный JSON. Конец вывода:")
+        self.assertIn("сбой инструмента", t["human_action"])
+        text = next(e["text"] for e in events if e["kind"] == "needs_human")
+        self.assertIn("Что сделать:", text)
+        self.assertNotIn("permission requested", text)
+        row = aiflow.build_state(self.store)["tasks"][0]
+        self.assertEqual(row["action"], t["human_action"])
+
+    def test_each_cause_has_its_own_advice(self):
+        advice = {}
+        for status, summary in (("limit_reached", "лимит раундов исчерпан"), ("limit_reached", "CI красный 5 раз подряд"),
+                                ("too_large", "9 файлов"), ("blocked", "нужен доступ к базе")):
+            tid = f"t{len(advice)}"
+            self.to_ready(tid, 10 + len(advice), files=[f"{tid}.py"])
+            self.tick()
+            self.report(tid, "worker", status, 10 + len(advice), summary=summary)
+            self.tick()
+            advice[summary] = self.task(tid)["human_action"]
+        self.assertEqual(len(set(advice.values())), 4)
+        self.assertIn("не договорились", advice["лимит раундов исчерпан"])
+        self.assertIn("CI", advice["CI красный 5 раз подряд"])
+        self.assertIn("ответьте ей", advice["нужен доступ к базе"])
+
+    def test_protected_path_reason_points_to_the_button(self):
+        self.add("a")
+        self.tick()
+        self.report("a", "planner", "blocked", summary="нужно менять защищённый путь .github/workflows/ci.yml")
+        self.tick()
+        self.assertIn("Разрешить пути", self.task("a")["human_action"])
+
+    def test_retry_clears_the_advice(self):
+        self.add("a")
+        self.tick()
+        self.report("a", "planner", "blocked", summary="нет доступа")
+        self.tick()
+        self.assertTrue(self.task("a")["human_action"])
+        self.store.command({"cmd": "retry", "id": "a"})
+        self.tick()
+        self.assertNotIn("human_action", self.task("a"))
+
+    def test_short_reason(self):
+        self.assertEqual(aiflow.short_reason("\n\n  первая строка \nвторая"), "первая строка")
+        self.assertEqual(len(aiflow.short_reason("я" * 500)), 220)
+        self.assertEqual(aiflow.short_reason(None), "")
+
+
+class SessionTab(unittest.TestCase):
+    def test_title_is_the_task_name_and_safe_for_the_terminal(self):
+        import aiflow_ui
+        title = aiflow_ui.session_title({"id": "csv-export", "title": "Экспорт; в \"CSV\" & <b>"}, "abc123")
+        self.assertTrue(title.startswith("csv-export: Экспорт"))
+        for ch in ';"&<>|':
+            self.assertNotIn(ch, title)
+        self.assertEqual(aiflow_ui.session_title({"id": "a", "title": "a"}, "s1"), "a")
+        self.assertEqual(aiflow_ui.session_title(None, "s1"), "aiflow s1")
+        self.assertLessEqual(len(aiflow_ui.session_title({"id": "a", "title": "я" * 200}, "s1")), 60)
+
+
 class Pauses(ProjectCase):
     def pauses(self) -> list[str]:
         return sorted(self.store.queue()["pauses"])

@@ -60,6 +60,37 @@ LIMIT_HITS_MAX = 3  # столько пауз подряд по одной се�
 # причины паузы, которые снимает человек командой aiflow resume; остальные снимает их же условие
 MANUAL_PAUSES = ("manual", "rate_limit", "trust")
 
+# «Нужен человек»: что именно от него нужно. Причина говорит, что случилось; это — что сделать.
+WHAT_TO_DO = {
+    "tool": "Это сбой инструмента, а не кода. Нажмите «Повторить»; если повторится — проверьте opencode и модель "
+            "ревьюера (раздел «Настройки»).",
+    "rounds": "Ревьюер и исполнитель не договорились за отведённые раунды. Откройте PR и решите спор: комментарий "
+              "уйдёт исполнителю, затем «Повторить»; либо смержите PR или снимите задачу сами.",
+    "ci": "CI не удаётся починить. Посмотрите упавшие проверки в PR; подскажите комментарием, что делать, и "
+          "нажмите «Повторить».",
+    "size": "Посмотрите изменение в PR. Устраивает — «Повторить» (разрешит ревью и мерж), нет — «Снять».",
+    "session": "Сессия остановилась и сама не продолжила. «Повторить» возобновит её с того же места; «Открыть "
+               "сессию» покажет, на чём она встала.",
+    "silent": "Сессия закончила ход и не сообщила результат. «Открыть сессию» — прочитайте её последний ответ и "
+              "ответьте ей; либо «Повторить», чтобы она продолжила.",
+    "asks": "Сессия просит вашего решения. «Открыть сессию» и ответьте ей в чате: задача продолжится сама, "
+            "«Повторить» не нужен.",
+    "merge": "Смержите PR сами либо проверьте автомерж и требования защиты ветки. После мержа задача закроется сама.",
+    "report": "Сессия называет не тот PR. «Открыть сессию» и поправьте её; либо «Повторить».",
+    "deps": "«Снять» эту задачу либо поставьте зависимость заново через /aiflow:intake и нажмите «Повторить».",
+    "label": "На PR стоит метка needs-human. Разберитесь в PR и нажмите «Повторить» — метка снимется.",
+    "closed": "PR уже закрыт. Если задача не нужна — «Снять»; если нужна — откройте PR заново и «Повторить».",
+    "paths": "Задаче нужен защищённый путь: «Разрешить пути…», либо попросите убрать эту правку комментарием в PR.",
+}
+REVIEW_ACTIONS = {"error": "tool", "limit_reached": "rounds", "too_large": "size", "already_closed": "closed",
+                  "blocked": "asks"}
+
+
+def short_reason(text: str, limit: int = 220) -> str:
+    """Причина для панели и уведомлений: первая содержательная строка. Полный текст — в report.json."""
+    line = next((x.strip() for x in str(text or "").splitlines() if x.strip()), "")
+    return line if len(line) <= limit else line[:limit - 1].rstrip() + "…"
+
 def by_complexity(value, cx: str):
     """Настройка модели/effort: словарь {"simple": …, "complex": …} или одно значение на все задачи."""
     if isinstance(value, dict):
@@ -1236,7 +1267,7 @@ class Dispatcher:
         text = (f"Отчёт {rep.get('status')} по задаче {t['id']} не принят: {problem}. Исправь и отчитайся снова "
                 f"командой aiflow report {t['id']} --role {role} с верным номером PR.")
         if counts[role] > 2 or not self.wake(t, role, text):
-            self.to_human(t, f"отчёт {role} не принят: {problem}")
+            self.to_human(t, f"отчёт {role} не принят: {problem}", "report")
             return False
         self.touch(t, role)
         self.emit(t, "report_rejected", f"{t['id']}: отчёт {role} не принят — {problem}", key=f"rejected:{rep.get('rid')}")
@@ -1268,7 +1299,7 @@ class Dispatcher:
                 self.touch(t, role)
                 self.emit(t, "nudged", f"{t['id']}: {role} закончил ход без отчёта — напомнили", key=f"nudge:{role}:{iso()}")
                 return
-        self.to_human(t, reason)
+        self.to_human(t, reason, "silent")
 
     def blocked(self, t: dict, role: str, e: dict) -> None:
         """Сессия ждёт ответа: сказать человеку всегда; заодно проверить, не лимит ли это."""
@@ -1301,7 +1332,7 @@ class Dispatcher:
         if self.fresh(e):
             return  # только что возобновили: claude agents ещё может показывать старое состояние
         if not self.try_resume(t, role, state, why, auto=True):
-            self.to_human(t, reason)
+            self.to_human(t, reason, "session")
 
     def release_lock(self, t: dict) -> None:
         self.q["review_locks"] = [i for i in self.q.get("review_locks") or [] if i != t["id"]]
@@ -1350,9 +1381,14 @@ class Dispatcher:
         self.pause("rate_limit", mins, f"лимит использования: очередь на паузе на {mins} мин")
         return True
 
-    def to_human(self, t: dict, reason: str) -> None:
+    def to_human(self, t: dict, reason: str, action: str = "") -> None:
+        """Задача ждёт человека. reason — что случилось, action — ключ WHAT_TO_DO: что от него нужно."""
         self.release_lock(t)
+        full, reason = str(reason or ""), short_reason(reason) or "нужен человек"
+        if "защищ" in full.lower() or "protected" in full.lower():
+            action = "paths"
         t["human_reason"] = reason
+        t["human_action"] = WHAT_TO_DO.get(action, "")
         role = STAGE_ROLE.get(t.get("state", ""))
         # Запоминаем, в каком состоянии была сессия: если человек ответит ей сам и она
         # снова заработает, задача вернётся в свою стадию (см. adv_needs_human).
@@ -1361,7 +1397,8 @@ class Dispatcher:
         self.set_state(t, "needs_human", reason)
         if t.get("pr"):
             self.gh.add_label(t["pr"], self.cfg["labels"]["needs_human"])
-        self.emit(t, "needs_human", f"{t['id']}: нужен человек — {reason}", key=f"human:{iso()[:16]}:{reason[:40]}")
+        todo = f" Что сделать: {t['human_action']}" if t["human_action"] else ""
+        self.emit(t, "needs_human", f"{t['id']}: нужен человек — {reason}.{todo}", key=f"human:{iso()[:16]}:{reason[:40]}")
 
     # -- launching
     def launch(self, t: dict, role: str, prompt: str, model=None, effort=None) -> bool:
@@ -1675,7 +1712,7 @@ class Dispatcher:
                 self.emit(t, "done", f"{t['id']}: обсуждение завершено — {rep.get('summary') or 'без задачи'}", key="done")
                 return
             if st in ("error", "blocked"):
-                return self.to_human(t, rep.get("summary") or "сессия обсуждения сообщила о проблеме")
+                return self.to_human(t, rep.get("summary") or "сессия обсуждения сообщила о проблеме", "asks")
         e = self.cur(t, "planner")
         st = self.sstate(e)
         if st in ("failed", "stopped"):
@@ -1722,7 +1759,7 @@ class Dispatcher:
                 return
             if st == "ready_for_review":
                 if not rep.get("pr"):
-                    return self.to_human(t, "планировщик отчитался ready_for_review без номера PR")
+                    return self.to_human(t, "планировщик отчитался ready_for_review без номера PR", "report")
                 if not self.verify_pr(t, "planner", rep, plan=False):
                     return
                 # планировщик сделал задачу сам: его сессия становится сессией исполнителя для ревью
@@ -1754,7 +1791,7 @@ class Dispatcher:
                           key=f"plan:{rep['rid']}")
                 return
             if rep.get("status") in ("error", "blocked"):
-                return self.to_human(t, rep.get("summary") or "планировщик сообщил о проблеме")
+                return self.to_human(t, rep.get("summary") or "планировщик сообщил о проблеме", "asks")
         e = self.cur(t, "planner")
         st = self.sstate(e)
         if st in ("failed", "stopped"):
@@ -1771,8 +1808,7 @@ class Dispatcher:
         """Задача в очереди: зависимость, которую сняли, сама не выполнится — сказать об этом."""
         gone = [d for d in t.get("depends_on") or [] if (self.by_id.get(d) or {}).get("state") in (None, "cancelled")]
         if gone:
-            self.to_human(t, f"зависимость снята или не найдена: {', '.join(gone)} — снимите задачу или поставьте "
-                             "зависимость заново")
+            self.to_human(t, f"зависимость снята или не найдена: {', '.join(gone)}", "deps")
 
     def adv_plan_review(self, t: dict) -> None:
         pr = self.gh.pr(t["pr"], "state,labels,comments")
@@ -1823,7 +1859,7 @@ class Dispatcher:
             if rep.get("status") == "ready_for_review":
                 n = t.get("pr") or rep.get("pr")
                 if not n:
-                    return self.to_human(t, "worker отчитался ready_for_review без номера PR")
+                    return self.to_human(t, "worker отчитался ready_for_review без номера PR", "report")
                 if not self.verify_pr(t, "worker", {**rep, "pr": n}, plan=False):
                     return
                 t["pr"] = int(n)
@@ -1831,7 +1867,7 @@ class Dispatcher:
                 self.set_state(t, "ready", "реализация готова")
                 return
             if rep.get("status") in ("error", "blocked", "limit_reached"):
-                return self.to_human(t, rep.get("summary") or f"worker: {rep.get('status')}")
+                return self.to_human(t, rep.get("summary") or f"worker: {rep.get('status')}", "asks")
         self.watch_session(t, "worker", "сессия worker'а завершилась до готовности PR")
 
     def watch_session(self, t: dict, role: str, dead_reason: str) -> None:
@@ -1881,24 +1917,25 @@ class Dispatcher:
                 return
             elif st == "too_large":
                 t["size_hold"] = True  # «Повторить» от человека снимет предел для этой задачи
-                return self.to_human(t, rep.get("summary") or "изменение больше предела для задачи без плана")
+                return self.to_human(t, rep.get("summary") or "изменение больше предела для задачи без плана", "size")
             elif st in ("limit_reached", "error", "already_closed", "blocked"):
-                return self.to_human(t, rep.get("summary") or f"ревью: {st}")
+                action = "ci" if st == "limit_reached" and "CI" in (rep.get("summary") or "") else REVIEW_ACTIONS[st]
+                return self.to_human(t, rep.get("summary") or f"ревью: {st}", action)
         if self.cfg["labels"]["needs_human"] in labels:
-            return self.to_human(t, t.get("human_reason") or "PR помечен needs-human")
+            return self.to_human(t, "PR помечен needs-human", "label")
         if t.get("approved_sha") and t["approved_sha"] == pr.get("headRefOid"):
             failed = [c.get("name") or c.get("context") for c in pr.get("statusCheckRollup") or []
                       if (c.get("conclusion") or c.get("state") or "").upper() in ("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED")]
             if failed and t.get("ci_wake") != pr.get("headRefOid"):
                 t["ci_wake"] = pr.get("headRefOid")
                 if not self.wake(t, "worker", ci_fix_prompt(t, failed)):
-                    self.to_human(t, "после одобрения упал CI, а сессию worker'а не удалось разбудить")
+                    self.to_human(t, "после одобрения упал CI, а сессию worker'а не удалось разбудить", "session")
             elif age_minutes(t.get("approved_at") or t.get("state_at")) > float(
                     self.cfg.get("merge_wait_minutes") or 60):
                 # одобрен, но не мержится (автомерж выключен, защита ветки ждёт одобрения): не держим очередь
                 # ревью. Когда PR смержат, задача закроется сама из «нужен человек».
-                self.to_human(t, f"PR #{t['pr']} одобрен, но не смержен за {self.cfg.get('merge_wait_minutes') or 60} мин: "
-                                 "смержите его сами или проверьте автомерж и защиту ветки")
+                self.to_human(t, f"PR #{t['pr']} одобрен, но не смержен за {self.cfg.get('merge_wait_minutes') or 60} мин",
+                              "merge")
             return
         e = self.cur(t, "worker")
         last_review = (self.store.review(t["id"]) or {}).get("at") or t.get("state_at")
@@ -1968,6 +2005,7 @@ class Dispatcher:
                     return False  # ревью занято — вернём, когда освободится
                 locks.append(t["id"])
         t["human_reason"] = None
+        t.pop("human_action", None)
         t.pop("human_watch", None)
         t.pop("auto_resumed", None)
         if t.get("pr"):
@@ -1979,11 +2017,17 @@ class Dispatcher:
 
     def do_retry(self, t: dict) -> None:
         t["retry_requested"] = False
+        # Всё, что сессия сообщила до этого момента, человек уже видел. Иначе отчёт об ошибке, записанный,
+        # пока задача ждала человека, сработал бы как новый и сразу вернул её в «нужен человек».
+        stale = self.store.report(t["id"])
+        if stale:
+            t["report_seen"] = stale.get("rid")
         reason = t.get("human_reason") or "нужен человек"
         note = t.pop("retry_note", None)
         if note:
             reason += f"»; {note}; «продолжай"
         t["human_reason"] = None
+        t.pop("human_action", None)
         t.pop("human_watch", None)
         if t.get("pr"):
             self.gh.remove_label(t["pr"], self.cfg["labels"]["needs_human"])
@@ -2227,7 +2271,7 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
         if st == "plan_review" and not t.get("plan_approved"):
             needs = "обсудить и одобрить план"
         elif st == "needs_human":
-            needs = t.get("human_reason") or "нужен человек"
+            needs = short_reason(t.get("human_reason")) or "нужен человек"
         elif st == "discussing" and cur.get("state") != "working":
             needs = ("вопрос ждёт вас — откройте сессию" if t.get("kind") == "ask"
                      else "обсуждение ждёт вас — откройте сессию")
@@ -2250,6 +2294,7 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
             "rounds": review.get("round"), "max_rounds": cfg["max_rounds"],
             "allowed_paths": t.get("allowed_protected_paths") or [],
             "tokens": task_tokens(t), "usage": task_usage(t), "session": cur, "needs": needs,
+            "action": t.get("human_action") if st == "needs_human" else None,
             "depends_on": t.get("depends_on") or [], "state_at": t.get("state_at"),
             "launching": bool(t.get("launching")), "review_lock": t["id"] in (q.get("review_locks") or []),
             "amendments": len(t.get("amendments") or []),
@@ -2292,6 +2337,8 @@ def print_status(state: dict) -> None:
         print("\nЖдут вас:")
         for t in waiting:
             print(f"  {t['id']}: {t['needs']}" + (f" — {t['pr_url']}" if t["pr_url"] else ""))
+            if t.get("action"):
+                print(f"    что сделать: {t['action']}")
 
 
 # ---------------------------------------------------------------- commands
