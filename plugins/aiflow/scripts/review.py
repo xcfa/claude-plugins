@@ -2,8 +2,10 @@
 """
 Один раунд AI-ревью pull request'а (вызывается как `aiflow review --pr N`).
 
-Порядок: PR открыт → лимит раундов → комментарии человека → CI → защищённые пути →
-ревьюер DeepSeek через opencode → inline-ревью → автомерж.
+Порядок: PR открыт → пауза очереди → лимит раундов → комментарии человека → CI → защищённые пути →
+размер изменения (задачи без плана) → ревьюер DeepSeek через opencode → inline-ревью → мерж.
+Дифф, который ревьюер уже одобрил, после rebase повторно не ревьюится (сверка по git patch-id).
+Перед мержем: очередь не на паузе, ветка PR не отстаёт от базовой, мержится ровно проверенный коммит.
 Ревью публикуется от вашего аккаунта gh (review_identity: self, событие COMMENT — GitHub не даёт
 одобрить свой PR) или от бота с отдельным токеном (review_identity: bot, APPROVE/REQUEST_CHANGES).
 Печатает JSON для worker'а. Итоговые статусы записываются в runs/<task>/report.json сами.
@@ -32,6 +34,9 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 PARSE_ATTEMPTS = 3
 OPENCODE_TIMEOUT = 15 * 60
 TERMINAL = {"approved", "limit_reached", "already_closed", "error"}
+# статусы, о которых узнаёт очередь (runs/<task>/report.json): итоговые и те, где решает не worker
+REPORTED = TERMINAL | {"paused", "too_large"}
+HUMAN_INPUT_REPEATS = 3  # столько раз подряд возвращаем один и тот же комментарий человека
 
 CTX: dict = {"root": None, "task": None, "pr": None, "round": None}
 
@@ -43,7 +48,7 @@ def finish(status: str, code: int = 0, **data) -> None:
         try:
             aiflow.write_json(root / "runs" / task["id"] / "review.json",
                               {"at": aiflow.iso(), "pr": CTX["pr"], "round": CTX["round"], **out})
-            if status in TERMINAL:
+            if status in REPORTED:
                 aiflow.write_report(root, task["id"], "worker", status, CTX["pr"],
                                     data.get("message") or data.get("summary") or status)
         except Exception as e:  # отчёт не должен ломать вывод для worker'а
@@ -431,7 +436,9 @@ def normalize(data: dict, truncated: bool) -> tuple[str, list[dict], str]:
 
 
 def format_body(rnd: int, max_rounds: int, verdict: str, summary: str, off_diff: list[dict], inline_count: int) -> str:
-    head = "✅ замечаний нет" if verdict == "approve" else "❌ требуются исправления"
+    left = inline_count or off_diff
+    head = ("❌ требуются исправления" if verdict != "approve" else
+            "✅ одобрено, оставшиеся замечания необязательны" if left else "✅ замечаний нет")
     parts = [REVIEW_MARKER, f"**AI-ревью, раунд {rnd}/{max_rounds}**: {head}", ""]
     if summary:
         parts += [summary, ""]
@@ -485,15 +492,38 @@ def publish(r: Runner, pr: int, head_sha: str, verdict: str, rnd: int, max_round
     return ids + [{**c, "comment_id": None} for c in off]
 
 
-def wait_checks(r: Runner, pr: int, timeout_min: int) -> tuple[str, list[dict]]:
-    r.gh_run("pr", "checks", str(pr), "--watch", "--interval", "30", check=False, timeout=timeout_min * 60 + 60)
+def ci_required(cfg: dict, cwd: Path) -> bool:
+    """Обязательны ли проверки CI на PR: require_ci true/false, auto — если в репозитории есть workflow."""
+    v = cfg.get("require_ci", "auto")
+    if isinstance(v, bool):
+        return v
+    if str(v).lower() in ("true", "false"):
+        return str(v).lower() == "true"
+    wf = cwd / ".github" / "workflows"
+    return wf.is_dir() and any(wf.glob("*.y*ml"))
+
+
+def read_checks(r: Runner, pr: int) -> list[dict]:
     proc = r.gh_run("pr", "checks", str(pr), "--json", "name,state,bucket,link,workflow", check=False)
     text = (proc.stdout or "").strip()
     if not text.startswith("["):
-        if "no checks" in (proc.stderr + proc.stdout).lower():
-            return "none", []
+        if "no checks" in ((proc.stderr or "") + (proc.stdout or "")).lower():
+            return []
         raise RuntimeError("gh pr checks: " + (proc.stderr or proc.stdout).strip()[:300])
-    checks = json.loads(text)
+    return json.loads(text)
+
+
+def wait_checks(r: Runner, pr: int, timeout_min: int, required: bool = False, appear_seconds: float = 0,
+                sleep=None) -> tuple[str, list[dict]]:
+    """Дождаться проверок CI. Сразу после push их ещё может не быть: если проверки обязательны,
+    ждём их появления appear_seconds, и «проверок нет» — не «прошло», а отдельный исход none."""
+    deadline = time.time() + appear_seconds
+    while True:
+        r.gh_run("pr", "checks", str(pr), "--watch", "--interval", "30", check=False, timeout=timeout_min * 60 + 60)
+        checks = read_checks(r, pr)
+        if checks or not required or time.time() >= deadline:
+            break
+        (sleep or time.sleep)(10)
     if not checks:
         return "none", []
     if any(c.get("bucket") == "pending" for c in checks):
@@ -516,17 +546,103 @@ def failed_logs(r: Runner, failed: list[dict], budget: int = 3000) -> str:
     return text[-budget:]
 
 
-def try_merge(r: Runner, pr: int) -> str:
+def try_merge(r: Runner, pr: int, head: str | None = None) -> str:
+    """Смержить PR. head — проверенный коммит: если в ветке уже другой, GitHub мерж отклонит."""
+    pin = ["--match-head-commit", head] if head else []
     if r.gh_json("pr", "view", str(pr), "--json", "mergeable").get("mergeable") == "CONFLICTING":
         return "conflict"
-    if r.gh_run("pr", "merge", str(pr), "--auto", "--squash", check=False).returncode == 0:
+    if r.gh_run("pr", "merge", str(pr), "--auto", "--squash", *pin, check=False).returncode == 0:
         return "auto_merge_enabled"
-    direct = r.gh_run("pr", "merge", str(pr), "--squash", check=False)
+    direct = r.gh_run("pr", "merge", str(pr), "--squash", *pin, check=False)
     if direct.returncode == 0:
         return "merged"
     if r.gh_json("pr", "view", str(pr), "--json", "mergeable").get("mergeable") == "CONFLICTING":
         return "conflict"
     raise RuntimeError("не удалось смержить: " + (direct.stderr or "").strip()[:300])
+
+
+def behind_base(r: Runner, base: str, head: str) -> int:
+    """На сколько коммитов ветка PR отстаёт от базовой. Отстаёт — CI и ревью видели не то, что получится
+    после мержа: сначала rebase."""
+    out = r.gh_run("api", f"repos/{r.repo}/compare/{base}...{head}", "--jq", ".behind_by").stdout.strip()
+    return int(out or 0)
+
+
+def patch_id(r: Runner, diff: str) -> str | None:
+    """Отпечаток диффа, не зависящий от номеров строк и базового коммита (git patch-id --stable)."""
+    git = shutil.which("git")
+    if not git or not diff.strip():
+        return None
+    proc = r.run([git, "patch-id", "--stable"], env=r.plain_env, check=False, input=diff)
+    parts = (proc.stdout or "").split()
+    return parts[0] if proc.returncode == 0 and parts else None
+
+
+def no_plan(task: dict | None) -> bool:
+    """Задача шла без плана: её поручил или сделал сам планировщик (либо trivial вручную)."""
+    return bool(task) and (aiflow.is_direct(task) or bool(task.get("self_executed")))
+
+
+def task_contract(task: dict | None) -> str:
+    """Для задачи без плана контракт — её текст и указания планировщика: в PR их нет."""
+    if not no_plan(task):
+        return ""
+    out = ("# Задача без плана\n\nПлана в описании PR нет: контракт — текст задачи ниже. Проверь, что изменения "
+           "делают именно это и ничего сверх.\n\n" + str(task.get("text") or "").strip() + "\n")
+    brief = str(task.get("brief") or "").strip()
+    if brief:
+        out += "\n## Указания планировщика исполнителю\n\n" + brief + "\n"
+    return out
+
+
+def diff_size(diff: str) -> int:
+    """Число изменённых строк диффа (добавленные и удалённые)."""
+    return sum(1 for ln in diff.splitlines()
+               if (ln.startswith("+") and not ln.startswith("+++ ")) or (ln.startswith("-") and not ln.startswith("--- ")))
+
+
+def too_large(task: dict | None, cfg: dict, files: list[str], diff: str) -> str:
+    """Задача без плана обходится без одобрения человека, поэтому её размер ограничивает код, а не
+    оценка модели. Возвращает причину или пустую строку. size_ok ставит человек («Повторить»)."""
+    if not no_plan(task) or task.get("size_ok"):
+        return ""
+    max_files, max_lines = int(cfg.get("direct_max_files") or 0), int(cfg.get("direct_max_lines") or 0)
+    lines = diff_size(diff)
+    if (max_files and len(files) > max_files) or (max_lines and lines > max_lines):
+        return (f"задача шла без плана, а изменение — {len(files)} файлов и {lines} строк (предел: {max_files} файлов, "
+                f"{max_lines} строк). Посмотрите PR сами: «Повторить» разрешит ревью и мерж этого изменения")
+    return ""
+
+
+def final_verdict(verdict: str, comments: list[dict], still_open: list[dict], rnd: int, max_rounds: int,
+                  nit_rounds: int) -> str:
+    """Итог раунда. Открытые треды блокируют всегда. Одни nit блокируют только первые nit_rounds раундов
+    (и никогда — последний): дальше они остаются в PR необязательными."""
+    if still_open:
+        return "changes"
+    if verdict == "changes" and not any(c["severity"] == "blocking" for c in comments) \
+            and rnd > min(max(0, nit_rounds), max_rounds - 1):
+        return "approve"
+    return verdict
+
+
+def bump_streak(root: Path, tid: str, status: str, key: str = "") -> int:
+    """Сколько раз подряд раунд заканчивается одним и тем же (ci_failed; human_input по тому же
+    комментарию). Счётчик ведёт код: такие исходы не тратят раунд ревью и иначе не ограничены."""
+    path = root / "runs" / tid / "review_state.json"
+    st = aiflow.read_json(path, {}) or {}
+    n = int(st.get("n") or 0) + 1 if (st.get("status"), st.get("key")) == (status, key) else 1
+    aiflow.write_json(path, {"status": status, "key": key, "n": n})
+    return n
+
+
+def clear_streak(root: Path, tid: str) -> None:
+    (root / "runs" / tid / "review_state.json").unlink(missing_ok=True)
+
+
+def pause_message(reasons: list[str]) -> str:
+    return (f"очередь aiflow на паузе ({', '.join(reasons)}): ревью и мерж отложены. Закончи ход одной строкой — "
+            "тебя разбудят, когда очередь продолжит")
 
 
 # ------------------------------------------------------------------ main
@@ -568,15 +684,37 @@ def main(argv: list[str] | None = None) -> int:
             finish("error", 1, message="PR создан ботом — бот не может его одобрить. "
                                        "Создавайте PR своим аккаунтом или переключите review_identity на self")
 
-        reviews = bot_reviews(r, args.pr, login)
-        done = len(reviews)
-        if done >= max_rounds:
+        tid = task["id"] if task else None
+
+        def needs_human_label() -> None:
             label = cfg["labels"]["needs_human"]
             r.gh_run("label", "create", label, "--color", "D93F0B", "--force", check=False)
             r.gh_run("pr", "edit", str(args.pr), "--add-label", label, check=False)
+
+        # очередь на паузе (вручную, красная базовая ветка, лимит): ни ревью, ни мержа
+        reasons = sorted(store.queue().get("pauses") or {})
+        if reasons:
+            finish("paused", reasons=reasons, message=pause_message(reasons))
+
+        reviews = bot_reviews(r, args.pr, login)
+        done = len(reviews)
+        head = pr.get("headRefOid")
+        diff = r.gh_run("pr", "diff", str(args.pr)).stdout
+        lines = diff_lines(diff)
+        files = [f for f in r.gh_run("pr", "diff", str(args.pr), "--name-only").stdout.splitlines() if f.strip()]
+
+        # тот же дифф, что ревьюер уже одобрил (после rebase на ушедшую вперёд базу): второй раз не ревьюим
+        pid = patch_id(r, diff)
+        approved_file = store.approved_path(tid) if tid else None
+        reuse = bool(pid and approved_file and (aiflow.read_json(approved_file, {}) or {}).get("patch_id") == pid)
+        if approved_file and not reuse:
+            approved_file.unlink(missing_ok=True)
+
+        if done >= max_rounds and not reuse:
+            needs_human_label()
             finish("limit_reached", rounds_done=done, max_rounds=max_rounds,
                    message="лимит раундов исчерпан, PR помечен needs-human")
-        rnd = CTX["round"] = done + 1
+        rnd = CTX["round"] = done if reuse else done + 1
 
         # комментарии и дополнения человека, на которые worker ещё не ответил
         comments = pr.get("comments") or []
@@ -584,24 +722,35 @@ def main(argv: list[str] | None = None) -> int:
         human = human_comments(comments, reviews, floor)
         if human:
             CTX["round"] = done
+            if tid and bump_streak(root, tid, "human_input", str(human[-1].get("at") or "")) > HUMAN_INPUT_REPEATS:
+                finish("error", 1, message="комментарий человека возвращается исполнителю уже "
+                                           f"{HUMAN_INPUT_REPEATS} раза, а ответа с <!-- ai-review-reply --> нет")
             finish("human_input", comments=human,
                    message="учти комментарии человека, ответь комментарием с <!-- ai-review-reply --> и снова запусти ревью")
 
         # CI до ревью: раунд не расходуется
-        state, failed = wait_checks(r, args.pr, int(cfg["ci_timeout_minutes"]))
+        required = ci_required(cfg, r.cwd)
+        state, failed = wait_checks(r, args.pr, int(cfg["ci_timeout_minutes"]), required,
+                                    float(cfg.get("ci_appear_seconds") or 0))
+        if state == "none" and required:
+            CTX["round"] = done
+            finish("error", 1, message="на PR нет ни одной проверки CI, а без неё мержить нельзя: настройте workflow "
+                                       "на pull_request или поставьте require_ci: false в runs/config.json")
         if state == "pending":
             CTX["round"] = done
             finish("error", 1, message=f"CI не завершился за {cfg['ci_timeout_minutes']} мин")
         if state == "fail":
             CTX["round"] = done
+            limit = int(cfg.get("max_ci_fixes") or 0)
+            if tid and limit and bump_streak(root, tid, "ci_failed") > limit:
+                needs_human_label()
+                finish("limit_reached", failed=[c.get("name") for c in failed],
+                       message=f"CI красный {limit} раз подряд: починить не удаётся, PR помечен needs-human")
             finish("ci_failed", failed=[c.get("name") for c in failed], logs=failed_logs(r, failed))
-
-        head = pr.get("headRefOid")
-        diff = r.gh_run("pr", "diff", str(args.pr)).stdout
-        lines = diff_lines(diff)
+        if tid:
+            clear_streak(root, tid)
 
         # защищённые пути — без вызова модели
-        files = [f for f in r.gh_run("pr", "diff", str(args.pr), "--name-only").stdout.splitlines() if f.strip()]
         allowed = (task or {}).get("allowed_protected_paths") or []
         viol = [f for f in files if aiflow.path_matches(f, cfg["protected_paths"]) and not aiflow.path_matches(f, allowed)]
         if viol:
@@ -612,38 +761,63 @@ def main(argv: list[str] | None = None) -> int:
                              identity)
             finish("changes_requested", round=rnd, max_rounds=max_rounds, summary="защищённые пути", comments=posted)
 
-        thread_comments = review_comments(r, args.pr)
-        history = build_history(reviews, thread_comments, comments)
-        pending = open_threads(thread_comments, review_threads(r, args.pr), login) if reviews else []
-        truncated = len(diff) > BIG_DIFF_CHARS  # ревьюер должен подтвердить, что дочитал
-        brief = build_brief(args.pr, pr, cfg["base_branch"], history, truncated)
-        brief += "\n" + format_amendments(store.task(task["id"]) if task else None) + "\n" + format_open_threads(pending)
-        (tmp / "review-brief.md").write_text(brief, encoding="utf-8")  # для разбора, ревьюеру не нужен
+        # задача без плана: размер изменения ограничен кодом
+        big = too_large(task, cfg, files, diff)
+        if big:
+            CTX["round"] = done
+            finish("too_large", files=len(files), lines=diff_size(diff), message=big)
 
-        data = call_reviewer(r, args.pr, rnd, max_rounds, cfg.get("reviewer_model") or "", brief, tmp)
-        verdict, cs, summary = normalize(data, truncated)
-        still_open = answer_threads(r, args.pr, pending, thread_verdicts(data), tmp) if pending else []
-        if still_open:
-            verdict = "changes"
-        elif verdict == "changes" and rnd >= max_rounds and not any(c["severity"] == "blocking" for c in cs):
-            verdict = "approve"  # последний раунд: оставшиеся nit не повод для needs-human, они видны в PR
-        if verdict == "approve":
-            # пока работал ревьюер, человек мог дописать правку: не одобряем и не мержим мимо неё
-            late = human_comments(r.gh_json("pr", "view", str(args.pr), "--json", "comments").get("comments") or [],
-                                  reviews, floor)
-            if late:
-                CTX["round"] = done
-                finish("human_input", comments=late,
-                       message="во время ревью пришли комментарии человека: учти их, ответь комментарием с "
-                               "<!-- ai-review-reply --> и снова запусти ревью (раунд не израсходован)")
-        posted = publish(r, args.pr, head, verdict, rnd, max_rounds, summary, cs, lines, tmp, identity)
-        result = {"round": rnd, "max_rounds": max_rounds, "summary": summary, "comments": posted,
-                  "open_threads": [{"comment_id": t["comment_id"], "file": t["path"], "line": t["line"],
-                                    "reason": t["reason"]} for t in still_open]}
-        if verdict != "approve":
-            finish("changes_requested", **result)
+        if reuse:
+            result = {"round": done, "max_rounds": max_rounds, "comments": [], "open_threads": [], "reused_approval": True,
+                      "summary": "изменения те же, что ревьюер уже одобрил: повторного ревью нет"}
+        else:
+            thread_comments = review_comments(r, args.pr)
+            history = build_history(reviews, thread_comments, comments)
+            pending = open_threads(thread_comments, review_threads(r, args.pr), login) if reviews else []
+            truncated = len(diff) > BIG_DIFF_CHARS  # ревьюер должен подтвердить, что дочитал
+            fresh_task = store.task(tid) if tid else None
+            brief = build_brief(args.pr, pr, cfg["base_branch"], history, truncated)
+            brief += ("\n" + task_contract(fresh_task) + "\n" + format_amendments(fresh_task) + "\n"
+                      + format_open_threads(pending))
+            (tmp / "review-brief.md").write_text(brief, encoding="utf-8")  # для разбора, ревьюеру не нужен
 
-        merge = try_merge(r, args.pr)
+            data = call_reviewer(r, args.pr, rnd, max_rounds, cfg.get("reviewer_model") or "", brief, tmp)
+            verdict, cs, summary = normalize(data, truncated)
+            still_open = answer_threads(r, args.pr, pending, thread_verdicts(data), tmp) if pending else []
+            verdict = final_verdict(verdict, cs, still_open, rnd, max_rounds, int(cfg.get("nit_rounds", 1) or 0))
+            if verdict == "approve":
+                # пока работал ревьюер, человек мог дописать правку: не одобряем и не мержим мимо неё
+                late = human_comments(r.gh_json("pr", "view", str(args.pr), "--json", "comments").get("comments") or [],
+                                      reviews, floor)
+                if late:
+                    CTX["round"] = done
+                    finish("human_input", comments=late,
+                           message="во время ревью пришли комментарии человека: учти их, ответь комментарием с "
+                                   "<!-- ai-review-reply --> и снова запусти ревью (раунд не израсходован)")
+            posted = publish(r, args.pr, head, verdict, rnd, max_rounds, summary, cs, lines, tmp, identity)
+            result = {"round": rnd, "max_rounds": max_rounds, "summary": summary, "comments": posted,
+                      "open_threads": [{"comment_id": t["comment_id"], "file": t["path"], "line": t["line"],
+                                        "reason": t["reason"]} for t in still_open]}
+            if verdict != "approve":
+                finish("changes_requested", **result)
+            if approved_file and pid:
+                aiflow.write_json(approved_file, {"patch_id": pid, "round": rnd, "head": head, "at": aiflow.iso()})
+
+        # Мерж — по одному: под общим lock проверяем паузу и то, что ветка не отстала от базовой.
+        gate = aiflow.FileLock(root / "runs" / "merge.lock")
+        if not gate.acquire(wait_seconds=180):
+            raise RuntimeError("мерж занят другим PR дольше 3 минут")
+        try:
+            reasons = sorted(store.queue().get("pauses") or {})
+            if reasons:
+                finish("paused", **result, reasons=reasons, message="одобрено, но " + pause_message(reasons))
+            if behind_base(r, cfg["base_branch"], head) > 0:
+                finish("merge_conflict", **result,
+                       message="одобрено, но базовая ветка ушла вперёд: git fetch, rebase, тесты, push и снова "
+                               "aiflow review — те же изменения повторно ревьюиться не будут")
+            merge = try_merge(r, args.pr, head)
+        finally:
+            gate.release()
         if merge == "conflict":
             finish("merge_conflict", **result, message="одобрено, но конфликт с базовой веткой: нужен rebase")
         finish("approved", merge=merge, **result)

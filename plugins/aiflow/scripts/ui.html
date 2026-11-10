@@ -107,8 +107,11 @@ button:disabled:hover { border-color: var(--rule); }
 .state-label { display: none; }
 .empty { padding: 28px 0; color: var(--muted); border-bottom: 1px solid var(--rule); }
 .empty code { color: var(--ink); }
-.hidden-note { margin-top: 10px; color: var(--muted); font-size: 13px; }
-.hidden-note button { margin-left: 8px; }
+.ended-toggle { margin-top: 10px; padding: 4px 0; border: 0; background: none; color: var(--muted); font: inherit; font-size: 13px; cursor: pointer; }
+.ended-toggle:hover { color: inherit; }
+.ended-toggle .chev { display: inline-block; width: 1em; transition: transform .15s; }
+.ended-toggle[aria-expanded="true"] .chev { transform: rotate(90deg); }
+.grid.ended { margin-top: 4px; opacity: .75; }
 
 #usage .wrap { overflow-x: auto; max-width: 980px; }
 #usage table { border-collapse: collapse; width: 100%; font-size: 13.5px; font-variant-numeric: tabular-nums; }
@@ -219,7 +222,7 @@ const STATIONS = ["В очереди", "План", "Обсуждение", "Ре
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 let last = null;
-const showCancelled = new Set();
+const showEnded = new Set();  // проекты, у которых список завершённых развёрнут
 
 function toast(text) {
   const t = $("toast"); t.textContent = text; t.classList.add("on");
@@ -370,11 +373,11 @@ function tone(t) {
   if (t.state === "merged" || t.state === "done" || t.state === "answered") return "done";
   if (t.state === "needs_human") return "fail";
   if (t.needs) return "waiting";
-  if (t.state === "new" || t.state === "ready" || t.state === "cancelled") return "idle";
+  if (t.state === "new" || t.state === "approved" || t.state === "ready" || t.state === "cancelled") return "idle";
   return "moving";
 }
 
-const REASONS = { manual: "вручную", rate_limit: "лимит использования", trust: "нет доверия к папке" };
+const REASONS = { manual: "вручную", rate_limit: "лимит использования", trust: "нет доверия к папке", base_missing: "нет базовой ветки" };
 
 function renderWaiting() {
   const items = [];
@@ -399,12 +402,16 @@ function renderWaiting() {
 function renderBoard(p) {
   const k = esc(p.key);
   let html = `<div class="head left">Задача</div>` + STATIONS.map(n => `<div class="head">${n}</div>`).join("") + `<div class="head right">PR, раунды, токены</div>`;
-  const cancelled = p.tasks.filter(t => t.state === "cancelled").length;
-  const shown = showCancelled.has(p.key) ? p.tasks : p.tasks.filter(t => t.state !== "cancelled");
-  if (!shown.length) {
+  // завершённые задачи (смержено, выполнено, снято) — свёрнутым списком под активными
+  const isEnded = t => t.state === "merged" || t.state === "done" || t.state === "cancelled";
+  const active = p.tasks.filter(t => !isEnded(t)), ended = p.tasks.filter(isEnded);
+  if (!p.tasks.length) {
     html += `<div class="empty" style="grid-column: 1 / -1">Задач нет. Напишите их в сессии оркестратора этого проекта: <code>/aiflow:intake …</code></div>`;
+  } else if (!active.length) {
+    html += `<div class="empty" style="grid-column: 1 / -1">Активных задач нет.</div>`;
   }
-  for (const t of shown) {
+  const row = (t) => {
+    let html = "";
     const tn = tone(t), id = esc(t.id);
     const stage = t.stage ?? 0;
     const name = `<div class="id">${id}</div><div class="title" title="${esc(t.title)}">${esc(t.title)}</div>`;
@@ -424,15 +431,23 @@ function renderBoard(p) {
     });
     const pr = t.pr ? (t.pr_url ? `<a href="${esc(t.pr_url)}" target="_blank" rel="noopener">#${esc(t.pr)}</a>` : "#" + esc(t.pr)) : "—";
     const rounds = t.rounds ? `раунд ${esc(t.rounds)}/${esc(t.max_rounds)}` : (t.review_lock ? "на ревью" : "");
-    const ended = t.state === "merged" || t.state === "done" || t.state === "cancelled";
-    const cancel = ended ? ""
+    const cancel = isEnded(t) ? ""
       : `<div class="acts-row"><button class="link" data-amend="${id}" data-project="${k}" title="Добавить правку к идущей задаче">Дополнить${t.amend_pending ? " (" + esc(t.amend_pending) + " ждёт)" : ""}</button> `
       + `<button class="link danger" data-cancel="${id}" data-project="${k}" title="Остановить сессии задачи и закрыть её PR"${dis(p.key, t.id)}>Снять</button></div>`;
     html += `<div class="meta"><div class="num">${pr}${rounds ? ", " + rounds : ""}</div><div class="line2 num">${t.tokens ? tokens(t.tokens) + " токенов" : "—"}</div>${cancel}</div>`;
+    return html;
+  };
+  html += active.map(row).join("");
+  let tail = "";
+  if (ended.length) {
+    const open = showEnded.has(p.key);
+    const count = (state) => ended.filter(t => t.state === state).length;
+    const parts = [["merged", "смержено"], ["done", "выполнено"], ["cancelled", "снято"]]
+      .filter(([st]) => count(st)).map(([st, name]) => `${name} ${count(st)}`).join(", ");
+    tail = `<button class="ended-toggle" data-toggle-ended="${k}" aria-expanded="${open}"><span class="chev">▸</span> Завершённые задачи: ${ended.length} (${parts})</button>`
+      + (open ? `<div class="grid ended">${ended.map(row).join("")}</div>` : "");
   }
-  const note = cancelled
-    ? `<div class="hidden-note">Снятых задач: ${cancelled}<button data-toggle-cancelled="${k}">${showCancelled.has(p.key) ? "Скрыть" : "Показать"}</button></div>` : "";
-  return `<div class="grid">${html}</div>${note}`;
+  return `<div class="grid">${html}</div>${tail}`;
 }
 
 function renderProject(p) {
@@ -444,7 +459,8 @@ function renderProject(p) {
   }
   const mon = p.monitor_pid ? "" : `, <span class="offline">очередь не обрабатывается — выполните aiflow up</span>`;
   const pz = p.paused;
-  const reason = pz ? (pz.reason === "integration_red" ? "ветка " + p.base + " красная" : REASONS[pz.reason] || pz.reason) : "";
+  const why = r => r === "integration_red" ? "ветка " + p.base + " красная" : REASONS[r] || r;
+  const reason = pz ? (pz.reasons || [pz.reason]).map(why).join(", ") : "";
   const qstate = pz ? `<span class="state paused">Пауза: ${esc(reason)}${pz.until ? ", до " + time(pz.until) : ""}</span>` : `<span class="state">Очередь идёт</span>`;
   const qbtn = `<button data-act="${pz ? "resume" : "pause"}" data-project="${k}"${dis(p.key, null)}>${pz ? "Продолжить очередь" : "Поставить на паузу"}</button>`;
   return `<section class="project">
@@ -512,10 +528,10 @@ function render(s) {
 }
 
 document.addEventListener("click", (e) => {
-  const tg = e.target.closest("[data-toggle-cancelled]");
+  const tg = e.target.closest("[data-toggle-ended]");
   if (tg) {
-    const k = tg.dataset.toggleCancelled;
-    showCancelled.has(k) ? showCancelled.delete(k) : showCancelled.add(k);
+    const k = tg.dataset.toggleEnded;
+    showEnded.has(k) ? showEnded.delete(k) : showEnded.add(k);
     return last && render(last);
   }
   const fg = e.target.closest("[data-forget]");

@@ -38,7 +38,8 @@ def _plugin_version() -> str:
 VERSION = _plugin_version()
 
 STAGES = ["new", "planning", "plan_review", "in_progress", "ready", "in_review", "merged"]
-SIDE_STATES = ["needs_human", "cancelled", "discussing", "answered"]
+# approved — план одобрен (или повтор с готовым PR), задача ждёт слот исполнителя
+SIDE_STATES = ["needs_human", "cancelled", "discussing", "answered", "approved"]
 TALK_KINDS = ("discuss", "ask")  # разговор в сессии планировщика: PR только по договорённости
 IMPLEMENTING = {"planning", "in_progress"}
 TERMINAL = {"merged", "done", "cancelled"}
@@ -53,7 +54,11 @@ BOT_LOGINS = {"github-actions", "dependabot", "codecov", "vercel", "netlify", "s
 WORKER_STAGES = {"in_progress", "ready", "in_review"}
 LIMIT_RE = re.compile(
     r"(usage|rate)[ -]?limit|limit (reached|exceeded)|out of (usage|credits)|"
-    r"resets? (at|in) |too many requests|\b429\b", re.I)
+    r"resets? (at|in) |too many requests|(error|status|http)\W{0,3}429\b", re.I)
+LIMIT_LOG_TAIL = 2000  # лимит ищем только в самом конце лога: выше — текст самой задачи
+LIMIT_HITS_MAX = 3  # столько пауз подряд по одной сессии без её продвижения; дальше — не лимит
+# причины паузы, которые снимает человек командой aiflow resume; остальные снимает их же условие
+MANUAL_PAUSES = ("manual", "rate_limit", "trust")
 
 def by_complexity(value, cx: str):
     """Настройка модели/effort: словарь {"simple": …, "complex": …} или одно значение на все задачи."""
@@ -106,6 +111,14 @@ DEFAULT_CONFIG = {
     "reviewer_model": "",
     "review_identity": "self",  # self — ревью и мерж от вашего gh; bot — от бота с токеном REVIEW_BOT_TOKEN
     "max_rounds": 5,
+    "nit_rounds": 1,  # в скольких первых раундах nit блокирует одобрение; дальше одобряется, если blocking нет
+    "max_ci_fixes": 5,  # сколько раз подряд aiflow review возвращает ci_failed, прежде чем звать человека
+    "review_concurrency": 2,  # сколько PR на ревью сразу; параллельно — только PR без общих файлов
+    "merge_wait_minutes": 60,  # одобренный PR не смержился за это время — к человеку, очередь ревью идёт дальше
+    "require_ci": "auto",  # auto — проверки CI обязательны, если в репозитории есть workflow; true; false
+    "ci_appear_seconds": 90,  # сколько ждать появления проверок на свежем коммите
+    "direct_max_files": 6,  # предел изменения для задачи без плана; больше — решает человек
+    "direct_max_lines": 300,
     "notify": "important",
     "desktop_notify": True,  # системные уведомления о том, что ждёт вас (те же события, что notify: important)  # что монитор пишет оркестратору: important — только то, что ждёт вас; all — всё; none — ничего
     "auto_resume": 1,  # сколько раз подряд монитор сам возобновляет остановленную/пропавшую сессию; 0 — никогда
@@ -420,6 +433,20 @@ def repo_root(start: Path | None = None) -> Path:
 
 # ---------------------------------------------------------------- storage
 
+def sync_queue(q: dict) -> dict:
+    """Пересчитать производные поля очереди: paused — главная из причин паузы (сначала бессрочные),
+    review_lock — первый PR на ревью."""
+    pauses = q.get("pauses") or {}
+    if pauses:
+        reason = sorted(pauses, key=lambda r: (bool(pauses[r].get("until")), pauses[r].get("at") or ""))[0]
+        q["paused"] = {**pauses[reason], "reason": reason, "reasons": sorted(pauses)}
+    else:
+        q["paused"] = None
+    locks = q.get("review_locks") or []
+    q["review_lock"] = locks[0] if locks else None
+    return q
+
+
 class Store:
     def __init__(self, root: Path):
         self.root = root
@@ -470,13 +497,22 @@ class Store:
         write_json(path, user)
 
     def queue(self) -> dict:
+        """pauses — причины паузы {причина: {at, until, note}}: очередь стоит, пока есть хоть одна.
+        review_locks — задачи, чьи PR сейчас на ревью. paused и review_lock — производные, для панели."""
         q = read_json(self.runs / "queue.json", {}) or {}
-        q.setdefault("paused", None)
-        q.setdefault("review_lock", None)
-        return q
+        if not isinstance(q.get("pauses"), dict):  # файл старой версии: одна пауза, один lock
+            old = q.get("paused")
+            q["pauses"] = {old.get("reason") or "manual": old} if isinstance(old, dict) else {}
+        if not isinstance(q.get("review_locks"), list):
+            q["review_locks"] = [q["review_lock"]] if q.get("review_lock") else []
+        return sync_queue(q)
 
     def save_queue(self, q: dict) -> None:
-        write_json(self.runs / "queue.json", q)
+        write_json(self.runs / "queue.json", sync_queue(q))
+
+    def approved_path(self, tid: str) -> Path:
+        """Отпечаток диффа, который ревьюер одобрил: тот же дифф после rebase повторно не ревьюится."""
+        return self.runs / tid / "approved.json"
 
     def task_path(self, tid: str) -> Path:
         return self.runs / tid / "task.json"
@@ -700,11 +736,35 @@ class Claude:
         return run([self.bin, "rm", sid], cwd=self.root, timeout=60, env=self.env).returncode == 0
 
 
+PR_FIELDS_QUERY = (
+    "state isDraft headRefOid headRefName body "
+    "labels(first: 50) { nodes { name } } "
+    "comments(last: 100) { nodes { author { login } body createdAt } } "
+    "commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes { __typename "
+    "... on CheckRun { name conclusion status } ... on StatusContext { context state } } } } } } }"
+)
+
+
+def pr_from_graphql(node: dict) -> dict:
+    """Узел pullRequest из GraphQL → те же поля, что отдаёт gh pr view --json."""
+    commits = ((node.get("commits") or {}).get("nodes") or [{}])
+    rollup = (((commits[-1] or {}).get("commit") or {}).get("statusCheckRollup") or {})
+    return {
+        "state": node.get("state"), "isDraft": bool(node.get("isDraft")),
+        "headRefOid": node.get("headRefOid"), "headRefName": node.get("headRefName"), "body": node.get("body") or "",
+        "labels": [x for x in ((node.get("labels") or {}).get("nodes") or []) if x],
+        "comments": [x for x in ((node.get("comments") or {}).get("nodes") or []) if x],
+        "statusCheckRollup": [x for x in ((rollup.get("contexts") or {}).get("nodes") or []) if x],
+    }
+
+
 class GH:
     def __init__(self, root: Path):
         self.root = root
         self.bin = need("gh")
         self._repo_url = None
+        self._slug: str | None = None
+        self._prs: dict[int, dict] = {}
 
     def call(self, *args: str, timeout: int = 60):
         return gh_with_retry(lambda: run([self.bin, *args], cwd=self.root, timeout=timeout), args)
@@ -716,13 +776,54 @@ class GH:
         return json.loads(p.stdout or "null")
 
     def pr(self, n: int, fields: str) -> dict:
+        cached = self._prs.get(int(n))
+        if cached is not None and all(f in cached for f in fields.split(",")):
+            return cached
         return self.json("pr", "view", str(n), "--json", fields)
+
+    def prefetch(self, numbers) -> None:
+        """Состояние всех PR прохода одним запросом GraphQL вместо gh pr view на каждую задачу.
+        Ответ приводится к виду gh pr view --json. Не вышло — pr() спросит каждый PR отдельно."""
+        self._prs = {}
+        nums = sorted({int(n) for n in numbers if n})
+        if not nums:
+            return
+        if self._slug is None:
+            self._slug = gh_repo(self.root)
+        owner, _, name = self._slug.partition("/")
+        if not name or "{" in self._slug:
+            return
+        for i in range(0, len(nums), 20):
+            part = nums[i:i + 20]
+            query = ("query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { "
+                     + " ".join(f"p{n}: pullRequest(number: {n}) {{ {PR_FIELDS_QUERY} }}" for n in part) + " } }")
+            p = self.call("api", "graphql", "-f", f"query={query}", "-F", f"owner={owner}", "-F", f"name={name}")
+            try:
+                repo = ((json.loads(p.stdout or "{}").get("data") or {}).get("repository") or {})
+            except ValueError:
+                repo = {}
+            for n in part:
+                node = repo.get(f"p{n}")
+                if isinstance(node, dict):
+                    self._prs[n] = pr_from_graphql(node)
+
+    def forget(self, n: int) -> None:
+        self._prs.pop(int(n), None)
+
+    def pr_files(self, n: int) -> set[str] | None:
+        """Файлы, изменённые в PR; None — узнать не удалось."""
+        p = self.call("pr", "diff", str(n), "--name-only")
+        if p.returncode != 0:
+            return None
+        return {x.strip() for x in (p.stdout or "").splitlines() if x.strip()}
 
     def add_label(self, n: int, label: str) -> None:
         self.call("pr", "edit", str(n), "--add-label", label)
+        self.forget(n)
 
     def remove_label(self, n: int, label: str) -> None:
         self.call("pr", "edit", str(n), "--remove-label", label)
+        self.forget(n)
 
     def repo_url(self) -> str:
         if self._repo_url is None:
@@ -1054,15 +1155,17 @@ def resume_prompt(t: dict, state: str, why: str, base: str) -> str:
 # ---------------------------------------------------------------- dispatcher
 
 class Dispatcher:
-    def __init__(self, store: Store):
+    def __init__(self, store: Store, claude=None, gh=None):
+        """claude и gh можно подменить (тесты): по умолчанию — настоящие CLI."""
         self.store = store
         self.root = store.root
-        self.claude = Claude(self.root)
-        self.gh = GH(self.root)
+        self.claude = claude or Claude(self.root)
+        self.gh = gh or GH(self.root)
         self.events: list[dict] = []
         self.cfg: dict = {}
         self.q: dict = {}
         self.sessions: dict[str, dict] = {}
+        self.by_id: dict[str, dict] = {}
 
     # -- helpers
     def emit(self, t: dict | None, kind: str, text: str, key: str | None = None) -> None:
@@ -1097,9 +1200,82 @@ class Dispatcher:
         rep = self.store.report(t["id"])
         if not rep or rep.get("role") != role or rep.get("rid") == t.get("report_seen"):
             return None
+        t["report_prev"] = t.get("report_seen")
         t["report_seen"] = rep.get("rid")
-        (t.get("auto_resumed") or {}).pop(role, None)  # сессия продвинулась — счётчик автовозобновлений заново
+        # сессия продвинулась — счётчики автовозобновлений, напоминаний и пауз по лимиту заново
+        (t.get("auto_resumed") or {}).pop(role, None)
+        (t.get("nudged") or {}).pop(role, None)
+        t.pop("limit_hits", None)
         return rep
+
+    def verify_pr(self, t: dict, role: str, rep: dict, *, plan: bool) -> bool:
+        """Отчёт называет PR — проверить, что это PR этой задачи, а не опечатка или чужой номер.
+        Неверный отчёт возвращается сессии (до двух раз), потом — человеку."""
+        n = int(rep["pr"])
+        try:
+            pr = self.gh.pr(n, "state,headRefName,isDraft,body")
+        except AiflowError:
+            t["report_seen"] = t.get("report_prev")  # GitHub не ответил: разберём отчёт в следующий проход
+            raise
+        want = f"ai/{t['id']}"
+        problem = ""
+        if pr.get("state") != "OPEN":
+            problem = f"PR #{n} не открыт ({pr.get('state')})"
+        elif pr.get("headRefName") != want:
+            problem = f"PR #{n} открыт из ветки {pr.get('headRefName')}, а ветка задачи — {want}"
+        elif plan and "<!-- ai-plan" not in (pr.get("body") or ""):
+            problem = f"в описании PR #{n} нет плана по шаблону (маркер <!-- ai-plan v1 -->)"
+        elif not plan and pr.get("isDraft"):
+            problem = f"PR #{n} ещё draft: переведи его командой gh pr ready {n}"
+        if not problem:
+            (t.get("bounced") or {}).pop(role, None)
+            return True
+        counts = t.setdefault("bounced", {})
+        counts[role] = counts.get(role, 0) + 1
+        self.store.log(t["id"], {"report_rejected": problem})
+        text = (f"Отчёт {rep.get('status')} по задаче {t['id']} не принят: {problem}. Исправь и отчитайся снова "
+                f"командой aiflow report {t['id']} --role {role} с верным номером PR.")
+        if counts[role] > 2 or not self.wake(t, role, text):
+            self.to_human(t, f"отчёт {role} не принят: {problem}")
+            return False
+        self.touch(t, role)
+        self.emit(t, "report_rejected", f"{t['id']}: отчёт {role} не принят — {problem}", key=f"rejected:{rep.get('rid')}")
+        return False
+
+    def touch(self, t: dict, role: str) -> None:
+        """Сессию только что разбудили: её снимок в claude agents устарел, отсчёты — заново."""
+        e = self.cur(t, role)
+        if e:
+            e["resumed_at"] = iso()
+        t["state_at"] = iso()
+
+    def fresh(self, e: dict | None) -> bool:
+        return bool(e and e.get("resumed_at") and age_minutes(e["resumed_at"]) < 2)
+
+    def nudge(self, t: dict, role: str, state: str, reason: str) -> None:
+        """Сессия закончила ход без отчёта: один раз напомнить ей, и только потом звать человека."""
+        e = self.cur(t, role)
+        if self.fresh(e):
+            return
+        counts = t.setdefault("nudged", {})
+        if counts.get(role, 0) < 1:
+            text = (f"Ты закончил ход по задаче {t['id']} без итогового отчёта, поэтому очередь не знает результата. "
+                    "Если работа не закончена — доделай. Если нужен ответ или решение человека — выполни "
+                    f"aiflow report {t['id']} --role {role} --status blocked --summary \"<что нужно>\". "
+                    + RESUME_FINISH.get(state, "Отчитайся по своим инструкциям.").format(id=t["id"], pr=t.get("pr")))
+            if self.wake(t, role, text):
+                counts[role] = counts.get(role, 0) + 1
+                self.touch(t, role)
+                self.emit(t, "nudged", f"{t['id']}: {role} закончил ход без отчёта — напомнили", key=f"nudge:{role}:{iso()}")
+                return
+        self.to_human(t, reason)
+
+    def blocked(self, t: dict, role: str, e: dict) -> None:
+        """Сессия ждёт ответа: сказать человеку всегда; заодно проверить, не лимит ли это."""
+        w = (self.sess(e) or {}).get("waitingFor") or "ответ"
+        who = "планировщик" if role == "planner" else role
+        self.emit(t, "needs_input", f"{t['id']}: {who} ждёт вас в своей сессии ({w})", key=f"blocked:{e['id']}:{w}")
+        self.check_limit(e, t)
 
     def try_resume(self, t: dict, role: str, state: str, why: str, auto: bool) -> bool:
         """Возобновить ту же сессию роли. auto — монитор сам, не больше auto_resume раз подряд."""
@@ -1122,37 +1298,57 @@ class Dispatcher:
     def lost(self, t: dict, role: str, state: str, why: str, reason: str) -> None:
         """Сессия остановилась или пропала: сначала автовозобновление, иначе — к человеку."""
         e = self.cur(t, role)
-        if e and e.get("resumed_at") and age_minutes(e["resumed_at"]) < 2:
+        if self.fresh(e):
             return  # только что возобновили: claude agents ещё может показывать старое состояние
         if not self.try_resume(t, role, state, why, auto=True):
             self.to_human(t, reason)
 
     def release_lock(self, t: dict) -> None:
-        if self.q.get("review_lock") == t["id"]:
-            self.q["review_lock"] = None
+        self.q["review_locks"] = [i for i in self.q.get("review_locks") or [] if i != t["id"]]
 
-    def pause(self, reason: str, minutes: float | None, text: str) -> None:
-        if self.q.get("paused") and self.q["paused"].get("reason") == reason:
+    def pause(self, reason: str, minutes: float | None, text: str, note: str = "") -> None:
+        """Добавить причину паузы. Причины независимы: одна не затирает другую."""
+        pauses = self.q.setdefault("pauses", {})
+        if reason in pauses:
             return
         until = iso(now() + dt.timedelta(minutes=minutes)) if minutes else None
-        self.q["paused"] = {"reason": reason, "at": iso(), "until": until}
+        pauses[reason] = {"at": iso(), "until": until, "note": note}
+        sync_queue(self.q)
         self.emit(None, "paused", text)
 
-    def unpause(self, text: str) -> None:
-        if self.q.get("paused"):
-            self.q["paused"] = None
+    def unpause(self, reasons, text: str) -> None:
+        """Снять причины паузы. Очередь продолжает, только когда причин не осталось."""
+        pauses = self.q.setdefault("pauses", {})
+        gone = [r for r in ([reasons] if isinstance(reasons, str) else reasons) if pauses.pop(r, None) is not None]
+        if not gone:
+            return
+        sync_queue(self.q)
+        if pauses:
+            self.emit(None, "pause_kept", f"{text}; очередь всё ещё на паузе: {', '.join(sorted(pauses))}")
+        else:
             self.emit(None, "unpaused", text)
 
-    def check_limit(self, entry: dict | None) -> bool:
+    def check_limit(self, entry: dict | None, t: dict | None = None) -> bool:
+        """Сессия упёрлась в лимит использования? Тогда пауза очереди. Признак — текст в конце лога,
+        поэтому одна и та же сессия без продвижения ставит паузу не больше LIMIT_HITS_MAX раз подряд:
+        дальше это, скорее всего, слова из самой задачи, и сессию разбирают как обычно."""
         if not entry:
             return False
-        text = self.claude.logs(entry["id"])
+        text = self.claude.logs(entry["id"])[-LIMIT_LOG_TAIL:]
         s = self.sess(entry) or {}
-        if LIMIT_RE.search(text) or LIMIT_RE.search(json.dumps(s, ensure_ascii=False)):
-            mins = self.cfg["rate_limit_pause_minutes"]
-            self.pause("rate_limit", mins, f"лимит использования: очередь на паузе на {mins} мин")
+        if not (LIMIT_RE.search(text) or LIMIT_RE.search(json.dumps(s, ensure_ascii=False))):
+            return False
+        if "rate_limit" in (self.q.get("pauses") or {}):
             return True
-        return False
+        if t is not None:
+            hits = t.get("limit_hits") or {}
+            n = hits.get("n", 0) + 1 if hits.get("sid") == entry["id"] else 1
+            if n > LIMIT_HITS_MAX:
+                return False
+            t["limit_hits"] = {"sid": entry["id"], "n": n}
+        mins = self.cfg["rate_limit_pause_minutes"]
+        self.pause("rate_limit", mins, f"лимит использования: очередь на паузе на {mins} мин")
+        return True
 
     def to_human(self, t: dict, reason: str) -> None:
         self.release_lock(t)
@@ -1234,7 +1430,8 @@ class Dispatcher:
             self.store.save_queue(self.q)
             return self.events
         tasks = self.store.tasks()
-        by_id = {t["id"]: t for t in tasks}
+        by_id = self.by_id = {t["id"]: t for t in tasks}
+        self.gh.prefetch(t.get("pr") for t in tasks if not (t.get("state") in TERMINAL and t.get("cleaned")))
         self.process_commands(by_id)
         self.check_pause_timer()
         self.check_base()
@@ -1251,7 +1448,7 @@ class Dispatcher:
                 self.store.log(t["id"], {"error": str(e)})
                 self.emit(t, "error", f"{t['id']}: {e}", key=f"err:{str(e)[:60]}")
             self.store.save_task(t)
-        if not self.q.get("paused"):
+        if not self.q.get("pauses"):
             self.schedule(tasks)
         self.collect_usage(tasks)
         self.check_batch_done(tasks)
@@ -1271,10 +1468,10 @@ class Dispatcher:
         for c in self.store.take_commands():
             kind = c.get("cmd")
             if kind == "pause":
-                self.q["paused"] = {"reason": "manual", "at": iso(), "until": None, "note": c.get("reason", "")}
-                self.emit(None, "paused", "очередь поставлена на паузу вручную")
+                self.pause("manual", None, "очередь поставлена на паузу вручную", note=c.get("reason", ""))
             elif kind == "resume":
-                self.unpause("очередь возобновлена")
+                # паузы «нет базовой ветки» и «красная ветка» снимает только их условие
+                self.unpause(MANUAL_PAUSES, "очередь возобновлена")
             elif kind == "amend" and c.get("id") in by_id:
                 t = by_id[c["id"]]
                 if t.get("state") in TERMINAL:
@@ -1292,9 +1489,10 @@ class Dispatcher:
                 self.store.save_task(t)
 
     def check_pause_timer(self) -> None:
-        p = self.q.get("paused")
-        if p and p.get("until") and now() >= (parse_iso(p["until"]) or now()):
-            self.unpause("пауза по лимиту закончилась, очередь продолжает")
+        due = [r for r, p in (self.q.get("pauses") or {}).items()
+               if p.get("until") and now() >= (parse_iso(p["until"]) or now())]
+        if due:
+            self.unpause(due, "пауза по лимиту закончилась, очередь продолжает")
 
     def check_base(self) -> None:
         """Нет базовой ветки на origin — пауза, а не сессии, которые упрутся в это."""
@@ -1311,24 +1509,20 @@ class Dispatcher:
             cached = _BASE_SEEN[key] = (time.time(), found)
         if cached[1] is None:
             return  # сеть или доступ: не повод останавливать очередь
-        paused = self.q.get("paused") or {}
-        # Чужую паузу (ручную, по лимиту, по CI) не перезаписываем: её снимет её же условие.
-        if not cached[1] and not paused:
+        if not cached[1]:
             self.pause("base_missing", None, f"базовой ветки {base} нет на origin: поправьте base_branch "
                        "в runs/config.json либо создайте ветку")
-        elif cached[1] and paused.get("reason") == "base_missing":
-            self.unpause(f"базовая ветка {base} есть на origin, очередь продолжает")
+        else:
+            self.unpause("base_missing", f"базовая ветка {base} есть на origin, очередь продолжает")
 
     def check_integration(self) -> None:
         r = self.gh.last_push_run(self.cfg["base_branch"])
         if not r or r.get("status") != "completed":
             return
-        red = r.get("conclusion") in ("failure", "timed_out", "startup_failure")
-        paused = self.q.get("paused") or {}
-        if red and not paused:
+        if r.get("conclusion") in ("failure", "timed_out", "startup_failure"):
             self.pause("integration_red", None, f"ветка {self.cfg['base_branch']} покраснела после мержа: {r.get('url', '')}")
-        elif not red and paused.get("reason") == "integration_red":
-            self.unpause(f"ветка {self.cfg['base_branch']} снова зелёная")
+        else:
+            self.unpause("integration_red", f"ветка {self.cfg['base_branch']} снова зелёная")
 
     def advance(self, t: dict) -> None:
         st = t.get("state", "new")
@@ -1361,7 +1555,8 @@ class Dispatcher:
 
     def scan_comments(self, t: dict) -> None:
         """Комментарии человека в PR после начала реализации — дополнения к задаче."""
-        if not t.get("pr") or not (t.get("state") in WORKER_STAGES or t.get("plan_approved")):
+        if not t.get("pr") or not (t.get("state") in WORKER_STAGES or t.get("state") == "approved"
+                                   or t.get("plan_approved")):
             return
         seen = t.setdefault("comments_seen_at", t.get("plan_seen_at") or iso())
         comments = self.gh.pr(t["pr"], "comments").get("comments") or []
@@ -1415,7 +1610,7 @@ class Dispatcher:
         pending = [a for a in t.get("amendments") or [] if not a.get("delivered_at")]
         if not pending and t.get("amendments"):
             self.drop_inbox(t)
-        if not pending or st == "new" or (st == "plan_review" and t.get("plan_approved")):
+        if not pending or st in ("new", "approved"):
             return False  # уйдут в промпт запуска сессии
         role = "worker" if st in WORKER_STAGES else "planner"
         e = self.cur(t, role)
@@ -1445,6 +1640,8 @@ class Dispatcher:
             if st == "in_review" and t.get("pr"):
                 self.gh.call("pr", "merge", str(t["pr"]), "--disable-auto")
             t.pop("approved_sha", None)
+            t.pop("approved_at", None)
+            self.store.approved_path(t["id"]).unlink(missing_ok=True)  # прежнее одобрение дополнения не видело
             self.release_lock(t)
             self.set_state(t, "in_progress", "дополнение пользователя")
         t["state_at"] = iso()  # отсчёт «закончил ход без отчёта» — заново: сессию только что разбудили
@@ -1457,6 +1654,8 @@ class Dispatcher:
         if rep:
             st = rep.get("status")
             if st == "plan_ready" and rep.get("pr"):
+                if not self.verify_pr(t, "planner", rep, plan=True):
+                    return
                 t["pr"] = int(rep["pr"])
                 if rep.get("complexity") in ("simple", "complex"):
                     t["complexity"] = rep["complexity"]
@@ -1480,7 +1679,7 @@ class Dispatcher:
         e = self.cur(t, "planner")
         st = self.sstate(e)
         if st in ("failed", "stopped"):
-            if not self.check_limit(e):
+            if not self.check_limit(e, t):
                 self.lost(t, "planner", "discussing", f"сессия {st}", "сессия обсуждения остановилась")
         elif st in ("done", "blocked"):
             # ход закончен — ждём ответа пользователя в сессии; напоминаем один раз на каждый ход
@@ -1524,6 +1723,8 @@ class Dispatcher:
             if st == "ready_for_review":
                 if not rep.get("pr"):
                     return self.to_human(t, "планировщик отчитался ready_for_review без номера PR")
+                if not self.verify_pr(t, "planner", rep, plan=False):
+                    return
                 # планировщик сделал задачу сам: его сессия становится сессией исполнителя для ревью
                 t["pr"], t["complexity"], t["self_executed"] = int(rep["pr"]), "simple", True
                 e = self.cur(t, "planner")
@@ -1543,17 +1744,13 @@ class Dispatcher:
                           key="done")
                 return
             if st == "plan_ready" and rep.get("pr"):
+                if not self.verify_pr(t, "planner", rep, plan=True):
+                    return
                 t["pr"] = int(rep["pr"])
                 t["complexity"] = rep.get("complexity") or t.get("complexity") or "complex"
                 t["plan_seen_at"] = iso()
                 self.set_state(t, "plan_review")
-                why = ""
-                if t.get("auto_approve_plan") and t.get("complexity") == "simple":
-                    t["plan_checklist_sig"] = self.checklist_sig(t)
-                    if self.try_auto_approve(t):
-                        return
-                    why = "; автоодобрение не прошло — " + "; ".join(t.get("plan_checklist_missing") or [])
-                self.emit(t, "plan_ready", f"{t['id']}: план готов к обсуждению — PR #{t['pr']}{why}",
+                self.emit(t, "plan_ready", f"{t['id']}: план готов к обсуждению — PR #{t['pr']}",
                           key=f"plan:{rep['rid']}")
                 return
             if rep.get("status") in ("error", "blocked"):
@@ -1561,35 +1758,21 @@ class Dispatcher:
         e = self.cur(t, "planner")
         st = self.sstate(e)
         if st in ("failed", "stopped"):
-            if not self.check_limit(e):
+            if not self.check_limit(e, t):
                 self.lost(t, "planner", "planning", f"сессия {st}", "сессия планировщика завершилась без плана")
         elif st == "done" and age_minutes((self.sess(e) or {}).get("updatedAt") or t.get("state_at")) > 2:
-            self.to_human(t, "планировщик закончил ход без aiflow report")
+            self.nudge(t, "planner", "planning", "планировщик закончил ход без aiflow report")
         elif st == "blocked":
-            if not self.check_limit(e):
-                w = (self.sess(e) or {}).get("waitingFor") or "ответ"
-                self.emit(t, "needs_input", f"{t['id']}: планировщик ждёт вас в своей сессии ({w})",
-                          key=f"blocked:{e['id']}:{w}")
+            self.blocked(t, "planner", e)
         elif e and st is None and age_minutes(e.get("resumed_at") or e.get("started_at")) > 10:
             self.lost(t, "planner", "planning", "сессия пропала", "сессия планировщика пропала из claude agents")
 
-    @staticmethod
-    def checklist_sig(t: dict) -> str:
-        """Что влияет на чек-лист автоодобрения: последний отчёт планировщика и разрешённые пути."""
-        return json.dumps([t.get("report_seen"), sorted(t.get("allowed_protected_paths") or [])])
-
-    def try_auto_approve(self, t: dict) -> bool:
-        body = (self.gh.pr(t["pr"], "body").get("body") or "")
-        ok, missing = plan_checklist(body, self.cfg, t)
-        if ok:
-            self.gh.add_label(t["pr"], self.cfg["labels"]["approved"])
-            t["plan_approved"] = True
-            t["plan_auto_approved"] = True
-            t.pop("plan_checklist_missing", None)
-            self.store.log(t["id"], {"auto_approved": True})
-            return True
-        t["plan_checklist_missing"] = missing
-        return False
+    def adv_new(self, t: dict) -> None:
+        """Задача в очереди: зависимость, которую сняли, сама не выполнится — сказать об этом."""
+        gone = [d for d in t.get("depends_on") or [] if (self.by_id.get(d) or {}).get("state") in (None, "cancelled")]
+        if gone:
+            self.to_human(t, f"зависимость снята или не найдена: {', '.join(gone)} — снимите задачу или поставьте "
+                             "зависимость заново")
 
     def adv_plan_review(self, t: dict) -> None:
         pr = self.gh.pr(t["pr"], "state,labels,comments")
@@ -1598,8 +1781,11 @@ class Dispatcher:
             self.emit(t, "cancelled", f"{t['id']}: PR с планом закрыт, задача снята", key="cancelled")
             return
         labels = {lb.get("name") for lb in pr.get("labels") or []}
-        if self.cfg["labels"]["approved"] in labels:
-            t["plan_approved"] = True
+        if self.cfg["labels"]["approved"] in labels or t.get("plan_approved") or is_direct(t):
+            # plan_approved и задача без плана в этой стадии — записи старой версии: то же «ждёт исполнителя»
+            if not is_direct(t):
+                t["plan_approved"] = True
+            self.set_state(t, "approved", "план одобрен")
             return
         rep = self.new_report(t, "planner")
         if rep and rep.get("status") == "plan_ready":
@@ -1614,13 +1800,17 @@ class Dispatcher:
             if self.wake(t, "planner", revise_prompt(t, fresh)):
                 t["plan_seen_at"] = max(c["createdAt"] for c in fresh)
                 t["revising"] = True
-        # Перепроверить, когда план обновили или человек разрешил пути; не дёргать gh каждый тик.
-        if (t.get("auto_approve_plan") and t.get("complexity") == "simple" and not t.get("revising")
-                and t.get("plan_checklist_sig") != self.checklist_sig(t)):
-            t["plan_checklist_sig"] = self.checklist_sig(t)
-            if self.try_auto_approve(t):
-                self.emit(t, "plan_approved", f"{t['id']}: план одобрен автоматически — PR #{t['pr']}",
-                          key=f"autoapprove:{t['plan_checklist_sig']}")
+
+    def adv_approved(self, t: dict) -> None:
+        """Ждёт слот исполнителя (запускает schedule). Пока ждёт, PR могли закрыть."""
+        if not t.get("pr"):
+            return self.set_state(t, "new", "нет PR: задача начинается заново")
+        state = self.gh.pr(t["pr"], "state").get("state")
+        if state == "MERGED":
+            self.finish_merged(t)
+        elif state == "CLOSED":
+            self.set_state(t, "cancelled", "PR закрыт")
+            self.emit(t, "cancelled", f"{t['id']}: PR #{t['pr']} закрыт, задача снята", key="cancelled")
 
     def adv_in_progress(self, t: dict) -> None:
         rep = self.new_report(t, "worker")
@@ -1631,10 +1821,12 @@ class Dispatcher:
                           key="done")
                 return
             if rep.get("status") == "ready_for_review":
-                if rep.get("pr") and not t.get("pr"):
-                    t["pr"] = int(rep["pr"])
-                if not t.get("pr"):
+                n = t.get("pr") or rep.get("pr")
+                if not n:
                     return self.to_human(t, "worker отчитался ready_for_review без номера PR")
+                if not self.verify_pr(t, "worker", {**rep, "pr": n}, plan=False):
+                    return
+                t["pr"] = int(n)
                 t["ready_at"] = iso()
                 self.set_state(t, "ready", "реализация готова")
                 return
@@ -1646,15 +1838,12 @@ class Dispatcher:
         e = self.cur(t, role)
         st = self.sstate(e)
         if st in ("failed", "stopped"):
-            if not self.check_limit(e):
+            if not self.check_limit(e, t):
                 self.lost(t, role, t.get("state", "in_progress"), f"сессия {st}", dead_reason)
         elif st == "blocked":
-            if not self.check_limit(e):
-                w = (self.sess(e) or {}).get("waitingFor") or "ответ"
-                self.emit(t, "needs_input", f"{t['id']}: {role} ждёт вас в своей сессии ({w})",
-                          key=f"blocked:{e['id']}:{w}")
+            self.blocked(t, role, e)
         elif st == "done" and age_minutes(t.get("state_at")) > 2 and t.get("state") == "in_progress":
-            self.to_human(t, f"{role} закончил ход без aiflow report")
+            self.nudge(t, role, "in_progress", f"{role} закончил ход без aiflow report")
         elif e and st is None and age_minutes(e.get("resumed_at") or e.get("started_at")) > 10:
             self.lost(t, role, t.get("state", "in_progress"), "сессия пропала", f"сессия {role} пропала из claude agents")
 
@@ -1681,6 +1870,18 @@ class Dispatcher:
             st = rep.get("status")
             if st == "approved":
                 t["approved_sha"] = pr.get("headRefOid")
+                t["approved_at"] = iso()
+            elif st == "paused":
+                # очередь на паузе: мерж отложен. PR возвращается в очередь ревью на своё место; после паузы
+                # исполнителя разбудят снова, и одобренный дифф второй раз не ревьюится
+                self.release_lock(t)
+                t.pop("approved_sha", None)
+                t.pop("approved_at", None)
+                self.set_state(t, "ready", "ревью отложено: очередь на паузе")
+                return
+            elif st == "too_large":
+                t["size_hold"] = True  # «Повторить» от человека снимет предел для этой задачи
+                return self.to_human(t, rep.get("summary") or "изменение больше предела для задачи без плана")
             elif st in ("limit_reached", "error", "already_closed", "blocked"):
                 return self.to_human(t, rep.get("summary") or f"ревью: {st}")
         if self.cfg["labels"]["needs_human"] in labels:
@@ -1692,18 +1893,25 @@ class Dispatcher:
                 t["ci_wake"] = pr.get("headRefOid")
                 if not self.wake(t, "worker", ci_fix_prompt(t, failed)):
                     self.to_human(t, "после одобрения упал CI, а сессию worker'а не удалось разбудить")
+            elif age_minutes(t.get("approved_at") or t.get("state_at")) > float(
+                    self.cfg.get("merge_wait_minutes") or 60):
+                # одобрен, но не мержится (автомерж выключен, защита ветки ждёт одобрения): не держим очередь
+                # ревью. Когда PR смержат, задача закроется сама из «нужен человек».
+                self.to_human(t, f"PR #{t['pr']} одобрен, но не смержен за {self.cfg.get('merge_wait_minutes') or 60} мин: "
+                                 "смержите его сами или проверьте автомерж и защиту ветки")
             return
         e = self.cur(t, "worker")
         last_review = (self.store.review(t["id"]) or {}).get("at") or t.get("state_at")
-        if self.sstate(e) in ("failed", "stopped") and not self.check_limit(e):
-            self.lost(t, "worker", "in_review", f"сессия {self.sstate(e)}", "сессия worker'а завершилась во время ревью")
-        elif e and self.sstate(e) is None and age_minutes(e.get("resumed_at") or e.get("started_at")) > 10                 and age_minutes(last_review) > 10:
+        if self.sstate(e) in ("failed", "stopped"):
+            if not self.check_limit(e, t):
+                self.lost(t, "worker", "in_review", f"сессия {self.sstate(e)}", "сессия worker'а завершилась во время ревью")
+        elif e and self.sstate(e) is None and age_minutes(e.get("resumed_at") or e.get("started_at")) > 10 \
+                and age_minutes(last_review) > 10:
             self.lost(t, "worker", "in_review", "сессия пропала", "сессия worker'а пропала из claude agents во время ревью")
         elif self.sstate(e) == "done" and age_minutes(last_review) > 5 and age_minutes(t.get("state_at")) > 5:
-            self.to_human(t, "worker закончил ход, не доведя ревью до итогового статуса")
-        elif self.sstate(e) == "blocked" and not self.check_limit(e):
-            w = (self.sess(e) or {}).get("waitingFor") or "ответ"
-            self.emit(t, "needs_input", f"{t['id']}: worker ждёт вас в своей сессии ({w})", key=f"blocked:{e['id']}:{w}")
+            self.nudge(t, "worker", "in_review", "worker закончил ход, не доведя ревью до итогового статуса")
+        elif self.sstate(e) == "blocked":
+            self.blocked(t, "worker", e)
 
     def adv_needs_human(self, t: dict) -> None:
         if self.continued_by_human(t):
@@ -1754,9 +1962,11 @@ class Dispatcher:
         if not (woke or new_report):
             return False
         if prev == "in_review":
-            if self.q.get("review_lock") not in (None, t["id"]):
-                return False  # ревью другого PR идёт — вернём, когда освободится
-            self.q["review_lock"] = t["id"]
+            locks = self.q.setdefault("review_locks", [])
+            if t["id"] not in locks:
+                if not self.review_free(t, locks):
+                    return False  # ревью занято — вернём, когда освободится
+                locks.append(t["id"])
         t["human_reason"] = None
         t.pop("human_watch", None)
         t.pop("auto_resumed", None)
@@ -1780,6 +1990,13 @@ class Dispatcher:
             self.gh.remove_label(t["pr"], self.cfg["labels"]["retry"])
         self.release_lock(t)
         t.pop("auto_resumed", None)
+        t.pop("nudged", None)
+        t.pop("bounced", None)
+        t.pop("limit_hits", None)
+        t.pop("approved_sha", None)
+        t.pop("approved_at", None)
+        if t.pop("size_hold", None):
+            t["size_ok"] = True  # человек видел размер изменения и велел продолжать
         # Сначала — та же сессия с её контекстом и рабочим каталогом, в той же стадии.
         prev = next((h.get("from") for h in reversed(t.get("history") or []) if h.get("to") == "needs_human"), None)
         if prev == "in_review" and self.cur(t, "worker"):
@@ -1792,13 +2009,17 @@ class Dispatcher:
         if role and self.try_resume(t, role, prev, f"повтор после «{reason}»", auto=False):
             self.set_state(t, prev, "повтор: та же сессия")
             return
+        # Сессию не вернуть — новая. Куда встаёт задача:
+        #   нет PR                           → new: планировщик (или исполнитель, если задача без плана) с начала;
+        #   есть PR, план одобрен или не нужен → approved: новый исполнитель на той же ветке;
+        #   есть PR, план ещё не одобрен      → plan_review: ждёт одобрения, как и до сбоя.
         t["retry_pending"] = True
-        if is_direct(t):
-            self.set_state(t, "new" if not t.get("pr") else "plan_review", "повтор")
-        elif t.get("pr") and t.get("plan_approved"):
-            self.set_state(t, "plan_review", "повтор: новый worker")
+        if not t.get("pr"):
+            self.set_state(t, "new", "повтор")
+        elif t.get("plan_approved") or is_direct(t):
+            self.set_state(t, "approved", "повтор: новый исполнитель")
         else:
-            self.set_state(t, "new" if not t.get("pr") else "plan_review", "повтор")
+            self.set_state(t, "plan_review", "повтор")
         self.emit(t, "retry", f"{t['id']}: повтор поставлен в очередь", key=f"retry:{iso()[:16]}")
 
     def finish_merged(self, t: dict) -> None:
@@ -1814,6 +2035,10 @@ class Dispatcher:
         prompt = direct_prompt(self.store, t, self.cfg) + launch_amendments(t)
         t.setdefault("comments_seen_at", iso())
         t.setdefault("comments_floor", iso())
+        if t.get("pr"):
+            prompt += (f"\nУ задачи уже есть PR #{t['pr']} из ветки ai/{t['id']}: работай в этой ветке "
+                       f"(git fetch origin; git switch ai/{t['id']}), новый PR не открывай. Доведи работу до конца и "
+                       f"отчитайся ready_for_review с --pr {t['pr']}.")
         if retry:
             prompt += ("\nЭто повторная попытка после остановки: последний отчёт — "
                        + json.dumps(self.store.report(t["id"]) or {}, ensure_ascii=False))
@@ -1859,11 +2084,16 @@ class Dispatcher:
                 ok = self.launch(t, "planner", planner_prompt(self.store, t, self.cfg) + launch_amendments(t),
                                  model=model, effort=effort)
                 if ok:
+                    t.pop("retry_pending", None)
                     mark_delivered(t, "launch")
                     self.set_state(t, "planning")
                     active += 1
                 self.store.save_task(t)
-            elif st == "plan_review" and (t.get("plan_approved") or is_direct(t)):
+            elif st == "approved" and is_direct(t):
+                if self.start_direct(t):
+                    active += 1
+                self.store.save_task(t)
+            elif st == "approved":
                 retry = bool(t.pop("retry_pending", False))
                 model, effort = worker_choice(self.cfg, t)
                 t.setdefault("comments_floor", iso())
@@ -1876,24 +2106,65 @@ class Dispatcher:
                 elif retry:
                     t["retry_pending"] = True
                 self.store.save_task(t)
-        # очередь ревью: один PR за раз
-        lock = self.q.get("review_lock")
-        if lock and (by_id.get(lock) or {}).get("state") != "in_review":
-            self.q["review_lock"] = lock = None
-        if lock:
-            return
+        self.schedule_reviews(tasks, by_id)
+
+    def changed_files(self, t: dict) -> set[str] | None:
+        """Файлы PR задачи (с кэшем по коммиту); None — узнать не удалось."""
+        try:
+            sha = self.gh.pr(t["pr"], "headRefOid").get("headRefOid")
+        except AiflowError:
+            return None
+        cached = t.get("files_cache") or {}
+        if sha and cached.get("sha") == sha:
+            return set(cached.get("files") or [])
+        files = self.gh.pr_files(t["pr"])
+        if files is not None and sha:
+            t["files_cache"] = {"sha": sha, "files": sorted(files)}
+        return files
+
+    def review_free(self, t: dict, locks: list[str], waiting: tuple = ()) -> bool:
+        """Можно ли взять PR на ревью сейчас. Свободно — да. Иначе — только если есть место
+        (review_concurrency) и у PR нет общих файлов ни с PR на ревью, ни с теми, кто ждёт в очереди
+        раньше него: такие PR не конфликтуют при мерже, а порядок очереди для остальных сохраняется."""
+        others = [self.by_id[i] for i in locks if i in self.by_id and i != t["id"]] + list(waiting)
+        if not others:
+            return True
+        if len(locks) >= max(1, int(self.cfg.get("review_concurrency") or 1)):
+            return False
+        mine = self.changed_files(t)
+        if mine is None:
+            return False  # не знаем файлов — считаем, что пересекаются
+        for o in others:
+            theirs = self.changed_files(o) if o.get("pr") else None
+            if theirs is None or mine & theirs:
+                return False
+        return True
+
+    def schedule_reviews(self, tasks: list[dict], by_id: dict[str, dict]) -> None:
+        """Очередь ревью: по порядку готовности; сразу несколько — только PR без общих файлов."""
+        locks = self.q["review_locks"] = [i for i in self.q.get("review_locks") or []
+                                          if (by_id.get(i) or {}).get("state") == "in_review"]
+        limit = max(1, int(self.cfg.get("review_concurrency") or 1))
         ready = sorted((t for t in tasks if t.get("state") == "ready"), key=lambda t: t.get("ready_at") or "")
+        skipped: list[dict] = []
         for t in ready:
+            if len(locks) >= limit:
+                break
+            if self.sstate(self.cur(t, "worker")) == "working" or not self.review_free(t, locks, tuple(skipped)):
+                skipped.append(t)  # сессия ещё не закончила ход либо PR пересекается с идущим ревью
+                continue
             woke = self.wake(t, "worker", review_prompt(t, self.cfg))
             if not woke:
                 model, effort = worker_choice(self.cfg, t)
                 woke = self.launch(t, "worker", review_prompt(t, self.cfg) + "\n\nКонтекст задачи: "
                                    + worker_prompt(self.store, t, self.cfg), model=model, effort=effort)
             if woke:
-                self.q["review_lock"] = t["id"]
+                locks.append(t["id"])
+                self.touch(t, "worker")
                 self.set_state(t, "in_review")
-                self.store.save_task(t)
-                return
+            else:
+                skipped.append(t)
+            self.store.save_task(t)
 
     def collect_usage(self, tasks: list[dict]) -> None:
         for t in tasks:
@@ -1927,33 +2198,11 @@ class Dispatcher:
             self.emit(None, "batch_done", text)
 
 
-def plan_checklist(body: str, cfg: dict, t: dict) -> tuple[bool, list[str]]:
-    missing = []
-    if "<!-- ai-plan" not in body:
-        missing.append("маркер <!-- ai-plan -->")
-
-    def section(title: str) -> str:
-        m = re.search(r"^##\s+" + re.escape(title) + r".*?$(.*?)(?=^##\s|\Z)", body, re.M | re.S | re.I)
-        return m.group(1).strip() if m else ""
-
-    if "- [ ]" not in section("Критерии приёмки") and "- [x]" not in section("Критерии приёмки"):
-        missing.append("критерии приёмки (чекбоксы)")
-    for s in ("Тесты", "Файлы", "Цель и границы"):
-        if not section(s):
-            missing.append(s)
-    files = re.findall(r"`([^`]+\.[A-Za-z0-9]+)`", section("Файлы"))
-    allowed = t.get("allowed_protected_paths") or []
-    bad = [f for f in files if path_matches(f, cfg["protected_paths"]) and not path_matches(f, allowed)]
-    if bad:
-        missing.append("защищённые пути: " + ", ".join(bad))
-    return (not missing), missing
-
-
 # ---------------------------------------------------------------- status / state for UI
 
 STAGE_LABEL = {
     "new": "в очереди", "discussing": "обсуждение идеи", "answered": "ответ дан", "planning": "планирование", "plan_review": "обсуждение плана",
-    "in_progress": "реализация", "ready": "ждёт ревью", "in_review": "ревью",
+    "approved": "ждёт исполнителя", "in_progress": "реализация", "ready": "ждёт ревью", "in_review": "ревью",
     "merged": "смержено", "done": "выполнено", "needs_human": "нужен человек", "cancelled": "снята",
 }
 
@@ -1995,14 +2244,14 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
             "id": t["id"], "title": t.get("title", ""), "state": st,
             "label": "вопрос" if st == "discussing" and t.get("kind") == "ask" else STAGE_LABEL.get(st, st),
             "kind": t.get("kind") or "task", "answer": (t.get("answer") or {}).get("summary") if st == "answered" else None,
-            "stage": STAGES.index("planning") if st in ("discussing", "answered") else STAGES.index("merged") if st == "done" else STAGES.index(st) if st in STAGES else last_stage,
+            "stage": STAGES.index("planning") if st in ("discussing", "answered") else STAGES.index("plan_review") if st == "approved" else STAGES.index("merged") if st == "done" else STAGES.index(st) if st in STAGES else last_stage,
             "complexity": t.get("complexity"), "pr": pr,
             "pr_url": f"{repo_url}/pull/{pr}" if pr and repo_url else None,
             "rounds": review.get("round"), "max_rounds": cfg["max_rounds"],
             "allowed_paths": t.get("allowed_protected_paths") or [],
             "tokens": task_tokens(t), "usage": task_usage(t), "session": cur, "needs": needs,
             "depends_on": t.get("depends_on") or [], "state_at": t.get("state_at"),
-            "launching": bool(t.get("launching")), "review_lock": q.get("review_lock") == t["id"],
+            "launching": bool(t.get("launching")), "review_lock": t["id"] in (q.get("review_locks") or []),
             "amendments": len(t.get("amendments") or []),
             "amend_pending": sum(1 for a in t.get("amendments") or [] if not a.get("delivered_at")),
         })
@@ -2021,7 +2270,7 @@ def fmt_tokens(n: int) -> str:
 def print_status(state: dict) -> None:
     p = state["paused"]
     head = f"aiflow · {state['repo']} · база {state['base']}"
-    head += f" · ПАУЗА ({p.get('reason')})" if p else ""
+    head += f" · ПАУЗА ({', '.join(p.get('reasons') or [p.get('reason')])})" if p else ""
     head += "" if state["monitor_pid"] else " · монитор не запущен"
     print(head)
     if not state["tasks"]:
@@ -2207,7 +2456,6 @@ def normalize_task(raw: dict) -> dict:
     return {
         "id": tid, "title": str(raw.get("title") or tid).strip(), "text": text, "complexity": cx, "kind": kind,
         "depends_on": [str(d) for d in raw.get("depends_on") or []],
-        "auto_approve_plan": bool(raw.get("auto_approve_plan")) and cx == "simple" and kind in ("task", "ask"),
         "ui": raw.get("ui") or None,
         "planner_model": raw.get("planner_model") or None,
         "worker_model": raw.get("worker_model") or None,
@@ -2217,6 +2465,31 @@ def normalize_task(raw: dict) -> dict:
         "usage": {}, "created_at": iso(), "state_at": iso(),
         "history": [{"at": iso(), "event": "created", "by": "intake"}],
     }
+
+
+def dependency_cycle(tasks: list[dict]) -> list[str]:
+    """Цикл в depends_on внутри пачки (с уже существующими задачами цикла быть не может: они на новые
+    не ссылаются). Возвращает путь цикла или пустой список."""
+    deps = {t["id"]: [d for d in t.get("depends_on") or []] for t in tasks}
+    done: set[str] = set()
+
+    def walk(node: str, path: list[str]) -> list[str]:
+        if node in path:
+            return path[path.index(node):] + [node]
+        if node in done or node not in deps:
+            return []
+        for d in deps[node]:
+            found = walk(d, path + [node])
+            if found:
+                return found
+        done.add(node)
+        return []
+
+    for tid in deps:
+        found = walk(tid, [])
+        if found:
+            return found
+    return []
 
 
 def cmd_enqueue(args, root: Path) -> int:
@@ -2249,6 +2522,11 @@ def cmd_enqueue(args, root: Path) -> int:
             for d in t["depends_on"]:
                 if d not in ids and d not in existing:
                     raise AiflowError(f"{t['id']}: неизвестная зависимость {d}")
+                if d not in ids and existing[d].get("state") == "cancelled":
+                    raise AiflowError(f"{t['id']}: зависимость {d} снята — она не выполнится")
+        cycle = dependency_cycle(tasks)
+        if cycle:
+            raise AiflowError("зависимости замкнуты в цикл: " + " → ".join(cycle))
         for t in tasks:
             old = store.runs / t["id"]
             if old.exists():  # завершённая задача с тем же id уходит в архив вместе с её отчётами
@@ -2390,8 +2668,8 @@ def cancel_tasks(store: Store, ids: list[str], *, close_pr: bool = True, note: s
             store.save_task(t)
             store.event("cancelled", tid, f"{tid}: снята" + (f" (была в стадии «{STAGE_LABEL.get(prev, prev)}»)" if prev != "new" else ""))
         q = store.queue()
-        if q.get("review_lock") in ids:
-            q["review_lock"] = None
+        if any(i in ids for i in q.get("review_locks") or []):
+            q["review_locks"] = [i for i in q["review_locks"] if i not in ids]
             store.save_queue(q)
     finally:
         lock.release()
@@ -2752,7 +3030,7 @@ def cmd_statusline(args, root: Path | None) -> int:
     working = sum(1 for t in tasks if t.get("state") in ("planning", "in_progress", "in_review"))
     waiting = sum(1 for t in tasks if t.get("state") == "needs_human"
                   or (t.get("state") == "plan_review" and not t.get("plan_approved")))
-    queued = sum(1 for t in tasks if t.get("state") in ("new", "ready"))
+    queued = sum(1 for t in tasks if t.get("state") in ("new", "approved", "ready"))
     parts = []
     if working:
         parts.append(f"{working} в работе")
