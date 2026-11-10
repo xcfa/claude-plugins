@@ -122,6 +122,12 @@ button:disabled:hover { border-color: var(--rule); }
 #usage td:first-child { font-weight: 600; }
 #usage tr.sum td { font-weight: 650; }
 #usage tr.sum td:first-child { color: var(--muted); }
+#usage tr.u-proj td { font-weight: 650; background: color-mix(in srgb, var(--rule) 35%, transparent); }
+#usage tr.u-proj td:first-child { cursor: pointer; user-select: none; }
+#usage tr.u-proj .chev { display: inline-block; width: 1em; transition: transform .15s; }
+#usage tr.u-proj[aria-expanded="true"] .chev { transform: rotate(90deg); }
+#usage tr.u-task td:first-child { padding-left: 26px; font-weight: 500; }
+#usage td.cost { font-weight: 600; }
 #usage .note { color: var(--muted); font-size: 13px; margin-top: 8px; max-width: 760px; }
 
 #events ol { list-style: none; margin: 0; padding: 0; max-width: 760px; }
@@ -183,10 +189,10 @@ button:disabled:hover { border-color: var(--rule); }
 <section id="usage" hidden>
   <h2>Расход токенов</h2>
   <div class="wrap"><table>
-    <thead><tr><th>Задача</th><th>Модель</th><th>Вход</th><th>Выход</th><th>Кэш: чтение</th><th>Кэш: запись</th></tr></thead>
+    <thead><tr><th>Проект, задача</th><th>Модель</th><th>Вход</th><th>Выход</th><th>Кэш: чтение</th><th>Кэш: запись</th><th>Цена</th></tr></thead>
     <tbody id="usagebody"></tbody>
   </table></div>
-  <div class="note">Учитываются сессии задачи и их сабагенты. «Токены» на доске — вход + выход + запись в кэш; чтение из кэша стоит намного дешевле и в эту сумму не входит.</div>
+  <div class="note">Учитываются сессии задачи и их сабагенты; ревьюер opencode сюда не входит. «Токены» на доске — вход + выход + запись в кэш. Цена — оценка по тарифам API Anthropic с учётом модели и кэша (чтение из кэша дешевле входа, запись дороже): на подписке вы платите не за токены. Свои тарифы — <code>prices</code> в <code>~/.aiflow/config.json</code>.<span id="unpriced"></span></div>
 </section>
 
 <section id="events">
@@ -347,27 +353,59 @@ function tokens(n) { return n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? M
 function num(n) { return (n || 0).toLocaleString("ru-RU"); }
 function shortModel(m) { return String(m || "?").replace(/^claude-/, ""); }
 
-function usageRow(first, m, u, cls) {
-  return `<tr class="${cls}"><td>${first}</td><td>${esc(shortModel(m))}</td><td>${num(u.input)}</td><td>${num(u.output)}</td><td>${num(u.cache_read)}</td><td>${num(u.cache_write)}</td></tr>`;
+function money(v) { return v == null ? "—" : "$" + (v >= 100 ? v.toFixed(0) : v >= 0.995 ? v.toFixed(2) : v > 0 ? v.toFixed(3) : "0"); }
+
+// какие проекты в расходе свёрнуты до одной строки — помним между открытиями панели
+const usageClosed = new Set();
+try { JSON.parse(localStorage.getItem("aiflow.usageClosed") || "[]").forEach(k => usageClosed.add(k)); } catch (e) {}
+function toggleUsage(key) {
+  usageClosed.has(key) ? usageClosed.delete(key) : usageClosed.add(key);
+  try { localStorage.setItem("aiflow.usageClosed", JSON.stringify([...usageClosed])); } catch (e) {}
+}
+
+const USAGE_KEYS = ["input", "output", "cache_read", "cache_write"];
+function usageCells(u) { return USAGE_KEYS.map(k => `<td>${num(u[k])}</td>`).join(""); }
+function usageSum(models) {
+  const s = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
+  for (const u of Object.values(models || {})) for (const k of USAGE_KEYS) s[k] += u[k] || 0;
+  return s;
+}
+function byOutput(models) { return Object.entries(models || {}).sort((a, b) => b[1].output - a[1].output); }
+// строки по моделям: первая несёт подпись, цена каждой модели своя
+function modelRows(first, models, cls, attrs = "") {
+  return byOutput(models).map(([m, u], i) =>
+    `<tr class="${cls}"${attrs}><td>${i === 0 ? first : ""}</td><td>${esc(shortModel(m))}</td>${usageCells(u)}<td class="cost">${money(u.cost)}</td></tr>`).join("");
 }
 
 function renderUsage() {
-  const rows = [], total = {};
-  let withUsage = 0;
-  for (const p of last.projects) for (const t of p.tasks) {
-    const entries = Object.entries(t.usage || {});
-    if (entries.length) withUsage++;
-    const label = (many() ? `<span class="proj">${esc(p.name)}</span> ` : "") + esc(t.id);
-    entries.sort((a, b) => b[1].output - a[1].output).forEach(([m, u], i) => {
-      rows.push(usageRow(i === 0 ? label : "", m, u, ""));
-      const s = total[m] ||= { input: 0, output: 0, cache_read: 0, cache_write: 0 };
-      for (const k in s) s[k] += u[k] || 0;
-    });
+  const rows = [], total = {}, unpriced = new Set();
+  let grand = 0, shown = 0;
+  for (const p of last.projects) {
+    const tasks = (p.tasks || []).filter(t => Object.keys(t.usage || {}).length);
+    if (!tasks.length) continue;
+    shown++;
+    grand += p.cost || 0;
+    (p.unpriced || []).forEach(m => unpriced.add(m));
+    for (const [m, u] of Object.entries(p.usage || {})) {
+      const s = total[m] ||= { input: 0, output: 0, cache_read: 0, cache_write: 0, cost: 0 };
+      for (const k of USAGE_KEYS) s[k] += u[k] || 0;
+      s.cost = u.cost == null || s.cost == null ? null : s.cost + u.cost;
+    }
+    // строка проекта: итог по всем моделям, по клику сворачивает задачи
+    const open = !usageClosed.has(p.key), k = esc(p.key);
+    rows.push(`<tr class="u-proj" aria-expanded="${open}"><td data-toggle-usage="${k}"><span class="chev">▸</span> ${esc(p.name)}</td>`
+      + `<td>задач: ${tasks.length}</td>${usageCells(usageSum(p.usage))}<td class="cost">${money(p.cost)}</td></tr>`);
+    if (!open) continue;
+    if (Object.keys(p.usage || {}).length > 1) rows.push(modelRows("по моделям", p.usage, "u-task sum"));
+    for (const t of tasks) rows.push(modelRows(esc(t.id), t.usage, "u-task"));
   }
-  if (withUsage > 1) Object.entries(total).sort((a, b) => b[1].output - a[1].output)
-    .forEach(([m, u], i) => rows.push(usageRow(i === 0 ? "Всего" : "", m, u, "sum")));
+  if (shown > 1) {
+    rows.push(`<tr class="sum"><td>Всего</td><td></td>${usageCells(usageSum(total))}<td class="cost">${money(grand)}</td></tr>`);
+    rows.push(modelRows("по моделям", total, "sum"));
+  }
   $("usage").hidden = rows.length === 0;
   setHTML($("usagebody"), rows.join(""));
+  $("unpriced").textContent = unpriced.size ? " Без цены (не вошли в сумму): " + [...unpriced].map(shortModel).join(", ") + "." : "";
 }
 
 function tone(t) {
@@ -435,7 +473,7 @@ function renderBoard(p) {
     const cancel = isEnded(t) ? ""
       : `<div class="acts-row"><button class="link" data-amend="${id}" data-project="${k}" title="Добавить правку к идущей задаче">Дополнить${t.amend_pending ? " (" + esc(t.amend_pending) + " ждёт)" : ""}</button> `
       + `<button class="link danger" data-cancel="${id}" data-project="${k}" title="Остановить сессии задачи и закрыть её PR"${dis(p.key, t.id)}>Снять</button></div>`;
-    html += `<div class="meta"><div class="num">${pr}${rounds ? ", " + rounds : ""}</div><div class="line2 num">${t.tokens ? tokens(t.tokens) + " токенов" : "—"}</div>${cancel}</div>`;
+    html += `<div class="meta"><div class="num">${pr}${rounds ? ", " + rounds : ""}</div><div class="line2 num">${t.tokens ? tokens(t.tokens) + " токенов" + (t.cost ? " · " + money(t.cost) : "") : "—"}</div>${cancel}</div>`;
     return html;
   };
   html += active.map(row).join("");
@@ -529,6 +567,8 @@ function render(s) {
 }
 
 document.addEventListener("click", (e) => {
+  const tu = e.target.closest("[data-toggle-usage]");
+  if (tu) { toggleUsage(tu.dataset.toggleUsage); return last && render(last); }
   const tg = e.target.closest("[data-toggle-ended]");
   if (tg) {
     const k = tg.dataset.toggleEnded;

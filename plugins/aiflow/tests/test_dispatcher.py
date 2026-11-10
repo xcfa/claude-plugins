@@ -637,6 +637,57 @@ class Dependencies(ProjectCase):
         self.assertEqual(sorted(t["id"] for t in self.store.tasks()), ["old", "x", "y"])
 
 
+class Cost(ProjectCase):
+    M = 1_000_000
+
+    def test_price_depends_on_model_and_cache(self):
+        table = aiflow.price_table()
+        u = {"input": self.M, "output": self.M, "cache_read": self.M, "cache_write": self.M, "cache_write_1h": 0}
+        # sonnet 5.5: вход 2, выход 10, чтение кэша 0.10, запись на 5 минут 2 × 1.25
+        self.assertAlmostEqual(aiflow.usage_cost("claude-sonnet-5-5", u, table), 2 + 10 + 0.10 + 2.5)
+        # opus 5.5: 4, 20, 0.20, запись 4 × 1.25
+        self.assertAlmostEqual(aiflow.usage_cost("claude-opus-5-5", u, table), 4 + 20 + 0.20 + 5)
+        hour = {**u, "cache_write_1h": self.M}  # вся запись — на час: × 2
+        self.assertAlmostEqual(aiflow.usage_cost("claude-sonnet-5-5", hour, table), 2 + 10 + 0.10 + 4)
+        half = {**u, "cache_write_1h": self.M // 2}
+        self.assertAlmostEqual(aiflow.usage_cost("claude-sonnet-5-5", half, table), 2 + 10 + 0.10 + 1.25 + 2)
+
+    def test_model_is_matched_by_the_longest_prefix(self):
+        table = aiflow.price_table()
+        self.assertEqual(aiflow.model_price("claude-opus-5-5", table)[0], 4.0)
+        self.assertEqual(aiflow.model_price("claude-opus-5", table)[0], 5.0)
+        self.assertEqual(aiflow.model_price("claude-sonnet-5-5[1m]", table)[0], 2.0)
+        self.assertEqual(aiflow.model_price("claude-opus-4-8", table)[0], 5.0)
+        self.assertIsNone(aiflow.model_price("deepseek-chat", table))
+        self.assertIsNone(aiflow.usage_cost("?", {"input": 5}, table))
+
+    def test_own_prices_from_the_global_config(self):
+        aiflow.write_json(aiflow.aiflow_home() / "config.json",
+                          {"prices": {"deepseek": {"input": 1, "output": 2}, "claude-opus-5-5": {"input": 40, "output": 0,
+                                                                                                "cache_read": 0}, "bad": 5}})
+        table = aiflow.price_table()
+        self.assertEqual(table["deepseek"], (1.0, 2.0, 0.1))
+        self.assertAlmostEqual(aiflow.usage_cost("claude-opus-5-5", {"input": self.M}, table), 40)
+        self.assertNotIn("bad", table)
+
+    def test_task_and_project_totals(self):
+        new = {"input": self.M, "output": 0, "cache_read": 0, "cache_write": 0, "cache_write_1h": 0}
+        old = {"input": 0, "output": 0, "cache_read": 0, "cache_write": self.M}  # запись старой версии, без разбивки
+        self.add("a", usage={"s1": {"role": "worker", "model": "claude-sonnet-5-5",
+                                    "models": {"claude-sonnet-5-5": new, "mystery-model": new}}})
+        self.add("b", usage={"s2": {"role": "planner", "model": "claude-opus-5-5", "models": {"claude-opus-5-5": old}},
+                             "s3": {"role": "worker", "model": "claude-sonnet-5-5", "models": {"claude-sonnet-5-5": new}}})
+        st = aiflow.build_state(self.store)
+        a, b = st["tasks"]
+        self.assertAlmostEqual(a["cost"], 2.0)  # модель без цены в сумму не входит
+        self.assertIsNone(a["usage"]["mystery-model"]["cost"])
+        self.assertAlmostEqual(b["cost"], 8.0 + 2.0)  # старая запись кэша считается часовой: 4 × 2
+        self.assertAlmostEqual(st["cost"], 12.0)
+        self.assertEqual(st["unpriced"], ["mystery-model"])
+        self.assertEqual(st["usage"]["claude-sonnet-5-5"]["input"], 2 * self.M)
+        self.assertAlmostEqual(st["usage"]["claude-sonnet-5-5"]["cost"], 4.0)
+
+
 class Misc(ProjectCase):
     def test_graphql_pr_matches_gh_pr_view_shape(self):
         node = {"state": "OPEN", "isDraft": False, "headRefOid": "abc", "headRefName": "ai/a", "body": None,

@@ -887,7 +887,68 @@ class GH:
 
 # ---------------------------------------------------------------- usage
 
-TOKEN_KINDS = ("input", "output", "cache_read", "cache_write")
+# cache_write — вся запись в кэш; cache_write_1h — её часть с часовым сроком жизни (она дороже)
+TOKEN_KINDS = ("input", "output", "cache_read", "cache_write", "cache_write_1h")
+
+# Цены API Anthropic, $ за 1 млн токенов: (вход, выход, чтение из кэша). Запись в кэш считается от цены
+# входа: ×1.25 на 5 минут, ×2 на час. Это оценка «сколько стоило бы по API»: на подписке вы платите не
+# за токены. Свои цены — в ~/.aiflow/config.json: "prices": {"<начало id модели>": {"input": …,
+# "output": …, "cache_read": …}}. Модель ищется по самому длинному совпавшему началу id.
+PRICES = {
+    "claude-fable-5-2": (8.0, 40.0, 0.20), "claude-mythos-5-2": (8.0, 40.0, 0.20),
+    "claude-fable-5-1": (10.0, 50.0, 1.0), "claude-mythos-5-1": (10.0, 50.0, 1.0),
+    "claude-fable-5": (10.0, 50.0, 1.0), "claude-mythos-5": (10.0, 50.0, 1.0),
+    "claude-opus-5-5": (4.0, 20.0, 0.20), "claude-opus-5": (5.0, 25.0, 0.50),
+    "claude-opus-4": (5.0, 25.0, 0.50),
+    "claude-sonnet-5-5": (2.0, 10.0, 0.10), "claude-sonnet-5": (2.0, 10.0, 0.20),
+    "claude-sonnet-4": (3.0, 15.0, 0.30),
+    "claude-haiku-5-5": (0.10, 0.50, 0.01), "claude-haiku-4-5": (1.0, 5.0, 0.10),
+}
+CACHE_WRITE_5M, CACHE_WRITE_1H = 1.25, 2.0
+
+
+def price_table() -> dict[str, tuple]:
+    """Встроенные цены плюс свои из ~/.aiflow/config.json."""
+    table = dict(PRICES)
+    user = (read_json(aiflow_home() / "config.json", {}) or {}).get("prices")
+    for model, p in (user.items() if isinstance(user, dict) else ()):
+        try:
+            inp = float(p["input"])
+            table[str(model)] = (inp, float(p["output"]), float(p.get("cache_read", inp * 0.1)))
+        except (TypeError, ValueError, KeyError):
+            continue
+    return table
+
+
+def model_price(model: str, table: dict[str, tuple]) -> tuple | None:
+    hits = [k for k in table if str(model or "").startswith(k)]
+    return table[max(hits, key=len)] if hits else None
+
+
+def usage_cost(model: str, u: dict, table: dict[str, tuple]) -> float | None:
+    """Стоимость расхода одной модели в долларах; None — цена модели неизвестна."""
+    price = model_price(model, table)
+    if not price:
+        return None
+    inp, out, read = price
+    write = int(u.get("cache_write") or 0)
+    hour = min(write, int(u.get("cache_write_1h") or 0))
+    tokens = (int(u.get("input") or 0) * inp + int(u.get("output") or 0) * out + int(u.get("cache_read") or 0) * read
+              + (write - hour) * inp * CACHE_WRITE_5M + hour * inp * CACHE_WRITE_1H)
+    return tokens / 1_000_000
+
+
+def priced(usage: dict[str, dict], table: dict[str, tuple]) -> tuple[dict[str, dict], float, list[str]]:
+    """Расход по моделям с полем cost, общая стоимость и модели без цены."""
+    out, total, unknown = {}, 0.0, []
+    for model, u in usage.items():
+        cost = usage_cost(model, u, table)
+        out[model] = {**u, "cost": cost}
+        if cost is None:
+            unknown.append(model)
+        else:
+            total += cost
+    return out, total, unknown
 _usage_cache: dict[str, tuple[float, dict]] = {}
 
 
@@ -920,6 +981,9 @@ def add_usage(into: dict[str, dict], models: dict[str, dict]) -> dict[str, dict]
         m = into.setdefault(model, dict.fromkeys(TOKEN_KINDS, 0))
         for k in TOKEN_KINDS:
             m[k] += int(u.get(k) or 0)
+        if "cache_write_1h" not in u:
+            # запись старой версии, без разбивки по сроку: Claude Code пишет кэш на час — считаем по этой цене
+            m["cache_write_1h"] += int(u.get("cache_write") or 0)
     return into
 
 
@@ -950,6 +1014,7 @@ def transcript_usage(session_id: str, seen: set[str] | None = None) -> dict | No
             m["output"] += int(u.get("output_tokens") or 0)
             m["cache_read"] += int(u.get("cache_read_input_tokens") or 0)
             m["cache_write"] += int(u.get("cache_creation_input_tokens") or 0)
+            m["cache_write_1h"] += int((u.get("cache_creation") or {}).get("ephemeral_1h_input_tokens") or 0)
         add_usage(models, fu)
         if i == 0:
             main = fu
@@ -2264,9 +2329,13 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
     cfg = store.config()
     q = store.queue()
     tasks = store.tasks()
+    prices = price_table()
+    project_usage: dict[str, dict] = {}
     out = []
     for t in tasks:
         st = t.get("state", "new")
+        usage, cost, _ = priced(task_usage(t), prices)
+        add_usage(project_usage, task_usage(t))
         cur = {}
         for role in ("worker", "planner"):
             lst = (t.get("sessions") or {}).get(role) or []
@@ -2302,17 +2371,19 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
             "pr_url": f"{repo_url}/pull/{pr}" if pr and repo_url else None,
             "rounds": review.get("round"), "max_rounds": cfg["max_rounds"],
             "allowed_paths": t.get("allowed_protected_paths") or [],
-            "tokens": task_tokens(t), "usage": task_usage(t), "session": cur, "needs": needs,
+            "tokens": task_tokens(t), "usage": usage, "cost": round(cost, 4), "session": cur, "needs": needs,
             "action": t.get("human_action") if st == "needs_human" else None,
             "depends_on": t.get("depends_on") or [], "state_at": t.get("state_at"),
             "launching": bool(t.get("launching")), "review_lock": t["id"] in (q.get("review_locks") or []),
             "amendments": len(t.get("amendments") or []),
             "amend_pending": sum(1 for a in t.get("amendments") or [] if not a.get("delivered_at")),
         })
+    total_usage, total_cost, unpriced = priced(project_usage, prices)
     return {
         "version": VERSION, "repo": store.root.name, "repo_url": repo_url, "base": cfg["base_branch"],
         "paused": q.get("paused"), "review_lock": q.get("review_lock"), "concurrency": cfg["concurrency"],
         "monitor_pid": FileLock(store.runs / "monitor.lock").owner(),
+        "usage": total_usage, "cost": round(total_cost, 4), "unpriced": unpriced,
         "tasks": out, "events": list(reversed(store.events(40))), "now": iso(),
     }
 
@@ -2330,17 +2401,20 @@ def print_status(state: dict) -> None:
     if not state["tasks"]:
         print("Задач нет. Добавьте их через /aiflow:intake.")
         return
-    rows = [("задача", "состояние", "PR", "раунды", "токены", "сессия")]
+    rows = [("задача", "состояние", "PR", "раунды", "токены", "цена", "сессия")]
     for t in state["tasks"]:
         s = t["session"]
         rows.append((t["id"], t["label"] + (" 🔒" if t["review_lock"] else ""),
                      f"#{t['pr']}" if t["pr"] else "—",
                      f"{t['rounds']}/{t['max_rounds']}" if t["rounds"] else "—",
-                     fmt_tokens(t["tokens"]),
+                     fmt_tokens(t["tokens"]), f"${t['cost']:.2f}" if t.get("cost") else "—",
                      f"{s.get('role')} {s.get('id')} {s.get('state') or ''}".strip() if s else "—"))
     widths = [max(len(str(r[i])) for r in rows) for i in range(len(rows[0]))]
     for r in rows:
         print("  ".join(str(c).ljust(w) for c, w in zip(r, widths)))
+    if state.get("cost"):
+        print(f"Всего по проекту: ${state['cost']:.2f} по ценам API"
+              + (f" (без цены: {', '.join(state['unpriced'])})" if state.get("unpriced") else ""))
     waiting = [t for t in state["tasks"] if t["needs"]]
     if waiting:
         print("\nЖдут вас:")
