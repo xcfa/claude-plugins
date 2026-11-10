@@ -77,9 +77,9 @@ class Runner:
             self.gh_env = {k: v for k, v in os.environ.items() if k != "REVIEW_BOT_TOKEN"}
         self.plain_env = base
 
-    def run(self, cmd, *, env, check=True, timeout=180):
+    def run(self, cmd, *, env, check=True, timeout=180, input=None):
         proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                              env=env, timeout=timeout, cwd=self.cwd, **aiflow.NO_WINDOW)
+                              env=env, timeout=timeout, cwd=self.cwd, input=input, **aiflow.NO_WINDOW)
         if check and proc.returncode != 0:
             raise RuntimeError(f"{Path(cmd[0]).stem} {' '.join(cmd[1:3])}: {(proc.stderr or proc.stdout).strip()[:500]}")
         return proc
@@ -287,13 +287,21 @@ def format_amendments(task: dict | None) -> str:
             "вне плана. Проверь, что они выполнены.\n\n" + aiflow.amend_list(items) + "\n")
 
 
-def build_context(plan: str, pr: dict, history: str, diff: str, max_chars: int) -> tuple[str, bool]:
-    truncated = len(diff) > max_chars
-    if truncated:
-        diff = diff[:max_chars] + "\n\n[... дифф обрезан. Дочитай остаток через git diff и верни \"diff_fully_read\": true]\n"
-    ctx = (f"# План задачи и описание PR: {pr.get('title', '')}\n\n{plan or '(описания нет)'}\n\n"
-           f"# История ревью\n\n{history}\n\n# Дифф\n\n```diff\n{diff}\n```\n")
-    return ctx, truncated
+BIG_DIFF_CHARS = 30000  # больше — вывод gh pr diff у ревьюера может обрезаться: требуем подтверждения
+
+
+def build_brief(n: int, pr: dict, base: str, history: str, big_diff: bool) -> str:
+    """Задание ревьюеру. План и дифф он читает сам (gh pr view / gh pr diff): так aiflow не гоняет
+    через себя сотни килобайт, а модель читает столько, сколько нужно. Здесь — только то, чего в PR
+    не видно напрямую: раунд, история ревью, дополнения и открытые треды."""
+    read = (f"# PR #{n}: {pr.get('title', '')}\n\nБазовая ветка: {base}. Текущий каталог — ветка PR.\n"
+            f"Прочитай сам: описание PR с планом — `gh pr view {n}`; изменения — `gh pr diff {n}`. "
+            f"Если вывод обрезан, читай по файлам: `gh pr diff {n} --name-only`, затем "
+            f"`git diff origin/{base}...HEAD -- <файл>`. Код вокруг изменений — чтением файлов репозитория.\n")
+    if big_diff:
+        read += ("Дифф большой: прочитай его целиком (по файлам) и верни \"diff_fully_read\": true; "
+                 "не смог — false.\n")
+    return read + f"\n# История ревью\n\n{history}\n"
 
 
 def extract_json(text: str) -> dict | None:
@@ -314,7 +322,8 @@ def extract_json(text: str) -> dict | None:
 AGENT = "aiflow-reviewer"
 REVIEWER_PERMISSION = {
     "edit": "deny", "webfetch": "deny",
-    "bash": {"*": "deny", "git diff*": "allow", "git log*": "allow", "git show*": "allow"},
+    "bash": {"*": "deny", "git diff*": "allow", "git log*": "allow", "git show*": "allow",
+             "gh pr view*": "allow", "gh pr diff*": "allow"},
 }
 
 
@@ -356,17 +365,19 @@ def reviewer_config(r: Runner, tmp: Path) -> dict:
     return {**r.plain_env, "OPENCODE_CONFIG": str(path)}
 
 
-def call_reviewer(r: Runner, pr: int, rnd: int, max_rounds: int, model: str, ctx_path: Path) -> dict:
-    message = (f"Review pull request #{pr}, round {rnd} of {max_rounds}. All materials are in the attached file. "
-               "Reply with exactly one JSON object following your instructions.")
-    env = reviewer_config(r, ctx_path.parent)
+def call_reviewer(r: Runner, pr: int, rnd: int, max_rounds: int, model: str, brief: str, tmp: Path) -> dict:
+    # Задание — через stdin: история ревью бывает длиннее лимита командной строки Windows (~32k),
+    # а файл во временной папке лежит вне проекта, и opencode отклоняет его чтение (external_directory).
+    message = (f"Review pull request #{pr}, round {rnd} of {max_rounds}. The brief follows this message: read the "
+               "plan and the diff yourself as it says. Reply with exactly one JSON object following your instructions.")
+    materials = brief
+    env = reviewer_config(r, tmp)
     cmd = [r.opencode, "run", message, "--agent", AGENT]
     if model:
         cmd += ["--model", model]
-    cmd += ["--file", str(ctx_path)]
     last = err = ""
     for _ in range(PARSE_ATTEMPTS):
-        proc = r.run(cmd, env=env, check=False, timeout=OPENCODE_TIMEOUT)
+        proc = r.run(cmd, env=env, check=False, timeout=OPENCODE_TIMEOUT, input=materials)
         last = ANSI_RE.sub("", proc.stdout or "")
         err = ANSI_RE.sub("", proc.stderr or "").strip()
         data = extract_json(last)
@@ -412,7 +423,7 @@ def normalize(data: dict, truncated: bool) -> tuple[str, list[dict], str]:
             comments.append({"severity": sev, "file": str(c.get("file") or ""), "line": line, "text": text})
     if truncated and data.get("diff_fully_read") is not True:
         comments.append({"severity": "blocking", "file": "", "line": None,
-                         "text": "Дифф был обрезан, а ревьюер не подтвердил, что прочитал остаток. "
+                         "text": "Дифф большой, а ревьюер не подтвердил, что прочитал его целиком. "
                                  "Разбейте изменения или повторите раунд."})
     # nit тоже исправляется: одобрение — только когда замечаний нет совсем
     verdict = "changes" if comments else "approve"
@@ -604,12 +615,12 @@ def main(argv: list[str] | None = None) -> int:
         thread_comments = review_comments(r, args.pr)
         history = build_history(reviews, thread_comments, comments)
         pending = open_threads(thread_comments, review_threads(r, args.pr), login) if reviews else []
-        ctx, truncated = build_context(pr.get("body") or "", pr, history, diff, int(cfg["max_diff_chars"]))
-        ctx += "\n" + format_amendments(store.task(task["id"]) if task else None) + "\n" + format_open_threads(pending)
-        ctx_path = tmp / "review-context.md"
-        ctx_path.write_text(ctx, encoding="utf-8")
+        truncated = len(diff) > BIG_DIFF_CHARS  # ревьюер должен подтвердить, что дочитал
+        brief = build_brief(args.pr, pr, cfg["base_branch"], history, truncated)
+        brief += "\n" + format_amendments(store.task(task["id"]) if task else None) + "\n" + format_open_threads(pending)
+        (tmp / "review-brief.md").write_text(brief, encoding="utf-8")  # для разбора, ревьюеру не нужен
 
-        data = call_reviewer(r, args.pr, rnd, max_rounds, cfg.get("reviewer_model") or "", ctx_path)
+        data = call_reviewer(r, args.pr, rnd, max_rounds, cfg.get("reviewer_model") or "", brief, tmp)
         verdict, cs, summary = normalize(data, truncated)
         still_open = answer_threads(r, args.pr, pending, thread_verdicts(data), tmp) if pending else []
         if still_open:

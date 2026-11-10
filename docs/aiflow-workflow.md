@@ -157,9 +157,9 @@ stateDiagram-v2
 | 3 | Нет комментариев человека с `<!-- human -->` без ответа | `human_input`, раунд не расходуется |
 | 4 | CI: ждёт завершения проверок | `ci_failed` с именами job и хвостом логов, раунд не расходуется |
 | 5 | Изменённые файлы не попадают в защищённые пути (кроме `allowed_protected_paths`) | blocking-ревью без вызова модели |
-| 6 | Контекст: описание PR, история раундов с тредами, дифф | — |
-| 7 | `opencode run --agent reviewer`, две попытки разобрать JSON | `error` |
-| 8 | Нормализация: неизвестная серьёзность → blocking; обрезанный дифф без `diff_fully_read: true` → blocking | — |
+| 6 | Задание ревьюеру через stdin: номер PR, история раундов с тредами, дополнения, открытые треды. План (`gh pr view`) и дифф (`gh pr diff`) ревьюер читает сам — ему открыты только эти команды и git на чтение | — |
+| 7 | `opencode run --agent aiflow-reviewer`, три попытки разобрать JSON | `error` |
+| 8 | Нормализация: неизвестная серьёзность → blocking; большой дифф (больше 30 тыс. символов) без `diff_fully_read: true` → blocking | — |
 | 9 | Ревью в PR: inline-комментарии на строки из диффа, остальное в общем тексте. `review_identity: self` — от вашего аккаунта событием `COMMENT` (GitHub не даёт одобрить свой PR), `bot` — от бота с `APPROVE`/`REQUEST_CHANGES` | — |
 | 10 | При вердикте approve: `gh pr merge --auto --squash`, без защиты ветки — сразу `gh pr merge --squash` | `merge_conflict` |
 
@@ -247,7 +247,7 @@ claude plugin install aiflow@aiflow-local
 7. Один раз открыть `claude` в репозитории интерактивно и принять доверие к папке.
 8. `! aiflow doctor`.
 
-**Основные настройки `runs/config.json`:** `concurrency` (2), `tick_seconds` (45), `base_branch`, `permission_mode` (`auto` — безопасные действия одобряет классификатор Claude Code, запреты `deny` из `.claude/settings.json` действуют; `acceptEdits` — спрашивать о каждой команде вне `allow`), `planner_model` и `planner_effort` по сложности, `worker_model` и `worker_effort` (строкой или по сложности), `worker_opus_effort` (`medium`), `reviewer_model`, `max_rounds` (5), `auto_resume` (1), `notify` (`important` — оркестратору только события, которые ждут вас; `all`; `none`), `desktop_notify` (`true` — те же важные события системными уведомлениями), `max_diff_chars`, `ci_timeout_minutes`, `rate_limit_pause_minutes`, `watch_integration` (следить за CI базовой ветки после мержа), `protected_paths`.
+**Основные настройки `runs/config.json`:** `concurrency` (2), `tick_seconds` (45), `base_branch`, `permission_mode` (`auto` — безопасные действия одобряет классификатор Claude Code, запреты `deny` из `.claude/settings.json` действуют; `acceptEdits` — спрашивать о каждой команде вне `allow`), `planner_model` и `planner_effort` по сложности, `worker_model` и `worker_effort` (строкой или по сложности), `worker_opus_effort` (`medium`), `reviewer_model`, `max_rounds` (5), `auto_resume` (1), `notify` (`important` — оркестратору только события, которые ждут вас; `all`; `none`), `desktop_notify` (`true` — те же важные события системными уведомлениями), `ci_timeout_minutes`, `rate_limit_pause_minutes`, `watch_integration` (следить за CI базовой ветки после мержа), `protected_paths`.
 
 ## 12. Ваша работа день за днём
 
