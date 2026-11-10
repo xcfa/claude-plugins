@@ -809,6 +809,47 @@ class ReviewerUsage(ProjectCase):
         self.assertEqual(task["activity"], "ревьюер opencode, раунд 2/5: читает Import.cs, шаг 7, 66k токенов")
 
 
+class Coordinator(ProjectCase):
+    def session(self, sid: str, name: str, state: str = "done", **extra) -> None:
+        self.claude.sessions[sid] = {"id": sid, "name": name, "state": state, "sessionId": f"uuid-{sid}",
+                                     "cwd": str(self.root), "startedAt": len(self.claude.sessions), **extra}
+
+    def test_session_running_the_monitor_is_the_coordinator(self):
+        self.session("w1", "worker: a")
+        self.session("o1", "db-schema-cache-test-container")  # имя сессии Claude переименовал сам
+        self.session("o2", "aiflow")
+        aiflow.write_json(self.root / "runs" / "orchestrator.json", {"session_id": "uuid-o1"})
+        self.assertEqual(aiflow.orchestrator_session(self.store, self.claude.agents()), "o1")
+        self.assertEqual(aiflow.open_orchestrator(self.store, self.claude), ("o1", False))
+        self.assertEqual(self.claude.launched, [])
+
+    def test_falls_back_to_a_session_named_aiflow(self):
+        self.session("old", "aiflow")
+        self.session("new", "aiflow")
+        self.session("far", "aiflow", cwd=str(self.tmp / "other-project"))
+        self.session("w1", "worker: a")
+        self.assertEqual(aiflow.orchestrator_session(self.store, self.claude.agents()), "new")
+
+    def test_stopped_or_missing_coordinator_is_started_anew(self):
+        self.session("o1", "aiflow", state="stopped")
+        aiflow.write_json(self.root / "runs" / "orchestrator.json", {"session_id": "uuid-gone"})
+        self.assertIsNone(aiflow.orchestrator_session(self.store, self.claude.agents()))
+        sid, started = aiflow.open_orchestrator(self.store, self.claude)
+        self.assertTrue(started)
+        self.assertEqual(self.claude.launched[-1]["agent"], "aiflow:orchestrator")
+        self.assertEqual(self.claude.launched[-1]["name"], "aiflow")
+        self.assertEqual(aiflow.open_orchestrator(self.store, self.claude), (sid, False))  # второй раз — та же
+
+    def test_launch_failure_is_reported(self):
+        self.claude.fail_launch = True
+        with self.assertRaisesRegex(aiflow.AiflowError, "координатора"):
+            aiflow.open_orchestrator(self.store, self.claude)
+
+    def test_tab_is_named_after_the_project(self):
+        import aiflow_ui
+        self.assertEqual(aiflow_ui.session_title({"id": "shizuka"}, "abc"), "shizuka")
+
+
 class Misc(ProjectCase):
     def test_graphql_pr_matches_gh_pr_view_shape(self):
         node = {"state": "OPEN", "isDraft": False, "headRefOid": "abc", "headRefName": "ai/a", "body": None,

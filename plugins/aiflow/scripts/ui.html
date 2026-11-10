@@ -329,6 +329,8 @@ async function act(action, key, id, value) {
     if (r.status === 403) return staleToken();
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || r.statusText);
+    if (action === "open_orchestrator") return toast(/уже открыт/.test(d.where || "") ? "Чат с координатором уже открыт — вывел его на передний план"
+      : (d.started ? "Запустил координатора и открыл чат" : "Открыл чат с координатором") + ": напишите задачи через /aiflow:intake");
     if (action === "open_session" || action === "open_reviewer") return toast(/уже открыт/.test(d.where || "") ? "Вкладка сессии уже открыта — вывел её на передний план" : `Сессия открыта: ${d.where}`);
     if (action === "cancel" && d.warnings && d.warnings.length) { toast("Снята, но: " + d.warnings.join("; ")); setTimeout(load, 600); return; }
     toast({ amend: "Дополнение принято — его получит сессия задачи", allow_paths: "Пути разрешены, задача продолжит работу", cancel: "Задача снята", approve: "План одобрен", retry: "Повтор поставлен", pause: "Очередь на паузе", resume: "Очередь продолжает", forget: "Проект убран из службы" }[action] || "Готово");
@@ -506,7 +508,8 @@ function renderProject(p) {
   const why = r => r === "integration_red" ? "ветка " + p.base + " красная" : REASONS[r] || r;
   const reason = pz ? (pz.reasons || [pz.reason]).map(why).join(", ") : "";
   const qstate = pz ? `<span class="state paused">Пауза: ${esc(reason)}${pz.until ? ", до " + time(pz.until) : ""}</span>` : `<span class="state">Очередь идёт</span>`;
-  const qbtn = `<button data-act="${pz ? "resume" : "pause"}" data-project="${k}"${dis(p.key, null)}>${pz ? "Продолжить очередь" : "Поставить на паузу"}</button>`;
+  const give = `<button class="primary" data-act="open_orchestrator" data-project="${k}" title="Открыть чат с координатором проекта: задачи пишутся там через /aiflow:intake">Дать задачу</button> `;
+  const qbtn = give + `<button data-act="${pz ? "resume" : "pause"}" data-project="${k}"${dis(p.key, null)}>${pz ? "Продолжить очередь" : "Поставить на паузу"}</button>`;
   return `<section class="project">
     <div class="phead">
       <div><h2>${/^https?:\/\//.test(p.repo_url || "") ? `<a href="${esc(p.repo_url)}" target="_blank" rel="noopener" title="Открыть репозиторий">${esc(p.name)}</a>` : esc(p.name)}</h2>

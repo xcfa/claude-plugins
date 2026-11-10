@@ -66,8 +66,9 @@ def _task_session(t: dict) -> str | None:
     return None
 
 
-def _win_focus(title: str, wait: float = 0.0) -> bool:
-    """Windows: вывести на передний план окно, в заголовке которого есть title.
+def _win_focus(title: str, wait: float = 0.0, exact: bool = False) -> bool:
+    """Windows: вывести на передний план окно, в заголовке которого есть title (exact — заголовок равен
+    title: короткое имя вроде названия проекта встречается и в заголовках чужих окон).
     Служба — фоновый процесс, и Windows не даёт ему просто так забрать фокус: перед
     SetForegroundWindow нажимаем и отпускаем Alt — это снимает блокировку переднего плана."""
     import ctypes
@@ -82,7 +83,7 @@ def _win_focus(title: str, wait: float = 0.0) -> bool:
             if n:
                 buf = ctypes.create_unicode_buffer(n + 1)
                 user32.GetWindowTextW(hwnd, buf, n + 1)
-                if title in buf.value:
+                if (buf.value == title) if exact else (title in buf.value):
                     found.append(hwnd)
                     return False
         return True
@@ -120,7 +121,7 @@ def session_title(t: dict | None, sid: str) -> str:
     return (text if len(text) <= 60 else text[:59].rstrip() + "…") or f"aiflow {sid}"
 
 
-def open_terminal(root: Path, sid: str, title: str | None = None, tool: str = "claude") -> str:
+def open_terminal(root: Path, sid: str, title: str | None = None, tool: str = "claude", exact: bool = False) -> str:
     """Открыть сессию в терминале: `claude attach <sid>` или, для ревьюера, `opencode -s <sid>`.
     В Windows Terminal — вкладкой общего окна aiflow с заголовком задачи. Если вкладка этой сессии уже
     на виду — вывести её окно на передний план. Возвращает, где открыли."""
@@ -132,14 +133,14 @@ def open_terminal(root: Path, sid: str, title: str | None = None, tool: str = "c
             raise aiflow.AiflowError("opencode не найден в PATH")
         return _open_tab(root, [exe, "-s", sid], title or f"ревьюер {sid}", f"opencode -s {sid}")
     claude = shutil.which("claude") or "claude"
-    return _open_tab(root, [claude, "attach", sid], title or f"aiflow {sid}", f"claude attach {sid}")
+    return _open_tab(root, [claude, "attach", sid], title or f"aiflow {sid}", f"claude attach {sid}", exact)
 
 
-def _open_tab(root: Path, command: list[str], title: str, manual: str) -> str:
+def _open_tab(root: Path, command: list[str], title: str, manual: str, exact: bool = False) -> str:
     claude, sid = command[0], command[-1]
     attach = command[1:-1]
     if os.name == "nt":
-        if _win_focus(title):
+        if _win_focus(title, exact=exact):
             return "уже открытой вкладке"
         flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         wt = shutil.which("wt.exe") or shutil.which("wt")
@@ -154,7 +155,7 @@ def _open_tab(root: Path, command: list[str], title: str, manual: str) -> str:
             subprocess.Popen(["cmd", "/c", "start", title, "/D", str(root), claude, *attach, sid],
                              cwd=root, creationflags=flags, env=aiflow.claude_env())
             where = "cmd"
-        threading.Thread(target=_win_focus, args=(title, 8.0), daemon=True).start()
+        threading.Thread(target=_win_focus, args=(title, 8.0, exact), daemon=True).start()
         return where
     cmd = f"cd {shlex.quote(str(root))} && {shlex.quote(claude)} {' '.join(attach)} {sid}"
     if sys.platform == "darwin":
@@ -366,6 +367,13 @@ def start_server(provider, port: int, wake: threading.Event, service: bool = Fal
                         return self._json(400, {"error": "у задачи ещё нет сессии"})
                     where = open_terminal(store.root, sid, session_title(t, sid))
                     return self._json(200, {"ok": True, "where": where, "command": f"claude attach {sid}"})
+                elif action == "open_orchestrator":
+                    # чат с координатором проекта: вкладка названа именем проекта
+                    sid, started = aiflow.open_orchestrator(store)
+                    title = session_title({"id": store.root.name}, sid)
+                    place = open_terminal(store.root, sid, title, exact=True)
+                    return self._json(200, {"ok": True, "where": place, "started": started,
+                                            "command": f"claude attach {sid}"})
                 elif action == "open_reviewer" and tid:
                     t = store.task(tid)
                     run = next((r for r in reversed(aiflow.reviewer_runs(store, tid)) if r.get("session")), None) if t else None

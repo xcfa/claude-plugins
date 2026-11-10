@@ -2470,6 +2470,39 @@ class Dispatcher:
             self.emit(None, "batch_done", text)
 
 
+ORCHESTRATOR_NAME = "aiflow"
+
+
+def orchestrator_session(store: "Store", sessions: dict[str, dict]) -> str | None:
+    """Короткий id сессии координатора проекта, к которой можно подключиться, или None.
+    Сначала — сессия, в которой работает монитор (она записала себя в runs/orchestrator.json), затем —
+    фоновая сессия с именем aiflow. Остановленная и чужая интерактивная (без id) не годятся."""
+    usable = {sid: s for sid, s in sessions.items() if sid and s.get("state") != "stopped"}
+    seen = (read_json(store.runs / "orchestrator.json", {}) or {}).get("session_id")
+    if seen:
+        for sid, s in usable.items():
+            if s.get("sessionId") == seen:
+                return sid
+    root = str(store.root).replace("\\", "/").rstrip("/").lower()
+    named = [sid for sid, s in usable.items() if s.get("name") == ORCHESTRATOR_NAME
+             and str(s.get("cwd") or "").replace("\\", "/").rstrip("/").lower() in ("", root)]
+    return max(named, key=lambda sid: usable[sid].get("startedAt") or 0) if named else None
+
+
+def open_orchestrator(store: "Store", claude=None) -> tuple[str, bool]:
+    """Сессия координатора проекта: существующая или только что запущенная. → (id, запущена ли новая)."""
+    claude = claude or Claude(store.root)
+    sid = orchestrator_session(store, claude.agents())
+    if sid:
+        return sid, False
+    sid, out = claude.launch("aiflow:orchestrator", ORCHESTRATOR_NAME,
+                             "Готов к задачам. Пользователь напишет их через /aiflow:intake.",
+                             mode=store.config().get("permission_mode"))
+    if not sid:
+        raise AiflowError("не удалось запустить сессию координатора: " + out[-200:])
+    return sid, True
+
+
 # ---------------------------------------------------------------- status / state for UI
 
 STAGE_LABEL = {

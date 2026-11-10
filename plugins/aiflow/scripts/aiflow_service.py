@@ -383,6 +383,12 @@ def relay_events(store: Store) -> int:
     events = store.runs / "events.jsonl"
     pos = events.stat().st_size if events.is_file() else 0
     owner = int(os.environ.get("CLAUDE_PID") or 0)
+    session = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if session:  # эта сессия — координатор проекта: кнопка «Дать задачу» в панели откроет её
+        try:
+            write_json(store.runs / "orchestrator.json", {"session_id": session, "pid": owner, "at": iso()})
+        except OSError:
+            pass
     register(store.root)
     other = _foreign_monitor(store)
     if other:  # монитор сессии старой версии держит проект — службе он больше не нужен
