@@ -83,8 +83,9 @@ class Runner:
         self.plain_env = base
 
     def run(self, cmd, *, env, check=True, timeout=180, input=None):
-        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                              env=env, timeout=timeout, cwd=self.cwd, input=input, **aiflow.NO_WINDOW)
+        # run_tree: по таймауту убивается всё дерево процессов. opencode на Windows запускается через
+        # opencode.CMD, и без этого зависший ревьюер переживал таймаут, а aiflow review ждал его вечно.
+        proc = aiflow.run_tree(cmd, cwd=self.cwd, timeout=timeout, env=env, input=input)
         if check and proc.returncode != 0:
             raise RuntimeError(f"{Path(cmd[0]).stem} {' '.join(cmd[1:3])}: {(proc.stderr or proc.stdout).strip()[:500]}")
         return proc
@@ -822,8 +823,9 @@ def main(argv: list[str] | None = None) -> int:
             finish("merge_conflict", **result, message="одобрено, но конфликт с базовой веткой: нужен rebase")
         finish("approved", merge=merge, **result)
 
-    except subprocess.TimeoutExpired:
-        finish("error", 1, message="внешняя команда не уложилась в таймаут")
+    except subprocess.TimeoutExpired as e:
+        what = Path(str(e.cmd[0] if isinstance(e.cmd, (list, tuple)) else e.cmd)).stem
+        finish("error", 1, message=f"{what} не ответил за {int(e.timeout)} с и был остановлен")
     except (RuntimeError, json.JSONDecodeError, KeyError, OSError) as e:
         finish("error", 1, message=str(e))
     finally:

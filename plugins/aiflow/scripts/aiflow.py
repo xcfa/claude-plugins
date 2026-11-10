@@ -80,6 +80,8 @@ WHAT_TO_DO = {
     "deps": "«Снять» эту задачу либо поставьте зависимость заново через /aiflow:intake и нажмите «Повторить».",
     "label": "На PR стоит метка needs-human. Разберитесь в PR и нажмите «Повторить» — метка снимется.",
     "closed": "PR уже закрыт. Если задача не нужна — «Снять»; если нужна — откройте PR заново и «Повторить».",
+    "stall": "Сессия числится занятой, но ревью давно не двигается: скорее всего, зависла её команда. «Открыть "
+             "сессию», остановите команду (Esc) и напишите «продолжай»; либо «Повторить».",
     "paths": "Задаче нужен защищённый путь: «Разрешить пути…», либо попросите убрать эту правку комментарием в PR.",
 }
 REVIEW_ACTIONS = {"error": "tool", "limit_reached": "rounds", "too_large": "size", "already_closed": "closed",
@@ -246,12 +248,46 @@ def age_minutes(s: str | None) -> float:
 NO_WINDOW = {"creationflags": 0x08000000} if os.name == "nt" else {}  # CREATE_NO_WINDOW
 
 
+def kill_tree(proc: subprocess.Popen) -> None:
+    """Убить процесс вместе с потомками. Просто proc.kill() мало: команда часто запущена через обёртку
+    (opencode.CMD → cmd.exe → opencode.exe), обёртка умирает, а потомок живёт и держит наши каналы
+    вывода — и ожидание конца вывода не кончается никогда."""
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, timeout=30, **NO_WINDOW)
+        else:
+            import signal
+            os.killpg(proc.pid, signal.SIGKILL)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
+def run_tree(cmd, *, cwd=None, timeout: float = 120, env=None, input: str | None = None) -> subprocess.CompletedProcess:
+    """subprocess.run с настоящим таймаутом: по его истечении убивается всё дерево процессов.
+    Бросает subprocess.TimeoutExpired и FileNotFoundError, как subprocess.run."""
+    group = NO_WINDOW if os.name == "nt" else {"start_new_session": True}
+    proc = subprocess.Popen(cmd, cwd=cwd, env=env, text=True, encoding="utf-8", errors="replace",
+                            stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, **group)
+    try:
+        out, err = proc.communicate(input=input, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        kill_tree(proc)
+        try:
+            proc.communicate(timeout=10)  # забрать остатки вывода и освободить каналы
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            pass
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
 def run(cmd: list[str], *, cwd=None, timeout: int = 120, env=None, input: str | None = None):
     try:
-        return subprocess.run(
-            cmd, cwd=cwd, capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=timeout, env=env, input=input, **NO_WINDOW,
-        )
+        return run_tree(cmd, cwd=cwd, timeout=timeout, env=env, input=input)
     except FileNotFoundError:
         raise AiflowError(f"не найдено: {cmd[0]}")
     except subprocess.TimeoutExpired:
@@ -263,7 +299,7 @@ GH_NET_SAFE = re.compile(r"TLS handshake timeout|dial tcp|no such host|connectio
                          r"network is unreachable", re.I)
 # Сбой после отправки: запрос мог дойти — повторяем только чтение.
 GH_NET_ANY = re.compile(r"i/o timeout|connection reset|unexpected EOF|\bEOF\b|context deadline exceeded|"
-                        r"timeout awaiting|HTTP 50[234]|HTTP 429|was submitted too quickly|secondary rate limit", re.I)
+                        r"timeout awaiting|HTTP 50[0234]|HTTP 429|was submitted too quickly|secondary rate limit", re.I)
 GH_RETRY_DELAYS = (3, 10, 30)
 
 
@@ -1021,6 +1057,20 @@ def transcript_usage(session_id: str, seen: set[str] | None = None) -> dict | No
     tot = {k: sum(u[k] for u in models.values()) for k in TOKEN_KINDS}
     model = max(main, key=lambda m: main[m]["output"], default="")
     return {**tot, "model": model, "models": models}
+
+
+def transcript_age_minutes(session_id: str | None) -> float | None:
+    """Сколько минут назад сессия последний раз что-то записала в свой транскрипт; None — транскрипта нет."""
+    if not session_id:
+        return None
+    base = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    times = []
+    for path in glob.glob(str(base / "projects" / "*" / f"{session_id}.jsonl")):
+        try:
+            times.append(os.path.getmtime(path))
+        except OSError:
+            pass
+    return (time.time() - max(times)) / 60 if times else None
 
 
 def task_usage(t: dict) -> dict[str, dict]:
@@ -2014,6 +2064,16 @@ class Dispatcher:
             self.nudge(t, "worker", "in_review", "worker закончил ход, не доведя ревью до итогового статуса")
         elif self.sstate(e) == "blocked":
             self.blocked(t, "worker", e)
+        elif self.sstate(e) == "working" and not self.fresh(e):
+            # Сессия «занята», но это ещё не значит, что ревью идёт: она могла закончить ход и ждать фоновую
+            # команду, которая зависла. Самый долгий честный простой — ожидание CI плюс три попытки ревьюера.
+            limit = float(self.cfg.get("ci_timeout_minutes") or 45) + 60
+            quiet = [age_minutes(last_review), age_minutes(t.get("state_at"))]
+            written = transcript_age_minutes(self.session_uuid(e))
+            if written is not None:
+                quiet.append(written)
+            if min(quiet) > limit:
+                self.to_human(t, f"ревью не двигается {int(min(quiet))} мин, хотя сессия числится занятой", "stall")
 
     def adv_needs_human(self, t: dict) -> None:
         if self.continued_by_human(t):

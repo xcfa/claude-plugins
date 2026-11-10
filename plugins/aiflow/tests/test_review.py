@@ -344,6 +344,36 @@ class Pieces(unittest.TestCase):
         self.assertEqual(review.wait_checks(runner([[{"name": "b", "bucket": "fail"}]]), 1, 1)[0], "fail")
         self.assertEqual(review.wait_checks(runner([[{"name": "b", "bucket": "pending"}]]), 1, 1)[0], "pending")
 
+    def test_timeout_kills_the_whole_process_tree(self):
+        """Обёртка запускает потомка, который держит вывод открытым: таймаут должен убить обоих и вернуться."""
+        import subprocess
+        import sys
+        import time
+        child = "import time; time.sleep(120)"
+        parent = f"import subprocess, sys; subprocess.Popen([sys.executable, '-c', {child!r}]).wait()"
+        started = time.time()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            aiflow.run_tree([sys.executable, "-c", parent], timeout=2)
+        self.assertLess(time.time() - started, 30)
+        ok = aiflow.run_tree([sys.executable, "-c", "import sys; print(sys.stdin.read().upper())"], input="hello")
+        self.assertEqual((ok.returncode, ok.stdout.strip()), (0, "HELLO"))
+
+    def test_github_500_is_retried_for_reads_only(self):
+        busy = "HTTP 500: Server Error: Sorry, this diff is temporarily unavailable due to heavy server load."
+        self.assertTrue(aiflow.GH_NET_ANY.search(busy))
+        calls = []
+
+        def call():
+            calls.append(1)
+            return SimpleNamespace(returncode=0 if len(calls) > 1 else 1, stdout="", stderr=busy)
+
+        with mock.patch.object(aiflow.time, "sleep", lambda s: None):
+            self.assertEqual(aiflow.gh_with_retry(call, ["pr", "diff", "1"]).returncode, 0)
+            self.assertEqual(len(calls), 2)
+            calls.clear()
+            self.assertEqual(aiflow.gh_with_retry(call, ["pr", "merge", "1"]).returncode, 1)  # запись не повторяем
+            self.assertEqual(len(calls), 1)
+
     def test_diff_lines(self):
         self.assertEqual(review.diff_lines(DIFF), {"src/a.py": {1, 2, 3}})
 

@@ -307,6 +307,30 @@ class InReview(ProjectCase):
         self.assertEqual(self.state("a"), "in_review")
         self.assertIn("aiflow review --pr 1", self.claude.resumed[-1]["prompt"])
 
+    def test_busy_session_without_progress_is_a_stall(self):
+        """Сессия закончила ход и ждёт фоновую команду, которая зависла: числится занятой, ревью стоит."""
+        self.start()
+        self.assertEqual(self.claude.sessions["w-a"]["state"], "working")
+        self.age("a", 90)
+        self.tick()
+        self.assertEqual(self.state("a"), "in_review")  # ожидание CI и ревьюера столько длиться может
+        self.age("a", 106)
+        self.to_ready("b", 2, files=["a.py"])
+        self.tick()
+        self.assertEqual(self.state("a"), "needs_human")
+        self.assertIn("не двигается", self.task("a")["human_reason"])
+        self.assertIn("зависла", self.task("a")["human_action"])
+        self.assertEqual(self.state("b"), "in_review")  # очередь ревью освободилась
+
+    def test_recent_transcript_activity_is_not_a_stall(self):
+        self.start()
+        self.age("a", 300)
+        folder = self.tmp / "claude" / "projects" / "p"
+        folder.mkdir(parents=True)
+        (folder / "uuid-w-a.jsonl").write_text("{}\n", encoding="utf-8")  # сессия только что писала в транскрипт
+        self.tick()
+        self.assertEqual(self.state("a"), "in_review")
+
     def test_amendment_drops_the_stored_approval(self):
         self.start()
         self.claude.finish_turn("w-a")

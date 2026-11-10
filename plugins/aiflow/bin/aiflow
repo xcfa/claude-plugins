@@ -3,9 +3,14 @@
 # UTF-8 для stdin/stdout/файлов: на Windows иначе берётся ANSI-кодировка (cp1251)
 export PYTHONUTF8=1
 DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# Сессия Claude держит в PATH ту версию плагина, с которой стартовала. Чтобы обновление доходило и до
+# уже работающих сессий, берём самую новую версию из установленных рядом (…/aiflow/<версия>/).
+SCRIPTS="$DIR/../scripts"
+NEWEST=$(ls -d "$DIR"/../../[0-9]*.[0-9]*.[0-9]*/scripts 2>/dev/null | sort -V | tail -n 1)
+[ -n "$NEWEST" ] && [ -f "$NEWEST/aiflow.py" ] && SCRIPTS="$NEWEST"
 for p in python3 python py; do
   if command -v "$p" >/dev/null 2>&1 && "$p" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; then
-    exec "$p" "$DIR/../scripts/aiflow.py" "$@"
+    exec "$p" "$SCRIPTS/aiflow.py" "$@"
   fi
 done
 echo "aiflow: нужен Python 3.9+ в PATH" >&2
