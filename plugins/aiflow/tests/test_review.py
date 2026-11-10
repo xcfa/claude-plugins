@@ -102,7 +102,7 @@ class ReviewMain(ProjectCase):
         self.answer = {"summary": "ок", "comments": [], "threads": []}
         self.reviewer_calls: list[str] = []
 
-        def reviewer(r, pr, rnd, max_rounds, model, brief, tmp):
+        def reviewer(r, pr, rnd, max_rounds, model, brief, tmp, *rest):
             self.reviewer_calls.append(brief)
             return self.answer
 
@@ -145,7 +145,7 @@ class ReviewMain(ProjectCase):
         self.assertEqual(self.last_report()["status"], "paused")
 
     def test_pause_that_arrives_during_review_blocks_the_merge(self):
-        def reviewer(r, pr, rnd, max_rounds, model, brief, tmp):
+        def reviewer(r, pr, rnd, max_rounds, model, brief, tmp, *rest):
             q = self.store.queue()
             q["pauses"]["manual"] = {"at": aiflow.iso(), "until": None}
             self.store.save_queue(q)
@@ -293,7 +293,7 @@ class ReviewMain(ProjectCase):
         phase_file = self.root / "runs" / "a" / "phase.json"
         seen = []
 
-        def reviewer(r, pr, rnd, max_rounds, model, brief, tmp):
+        def reviewer(r, pr, rnd, max_rounds, model, brief, tmp, *rest):
             seen.append(aiflow.read_json(phase_file))
             return self.answer
 
@@ -425,6 +425,97 @@ class Pieces(unittest.TestCase):
         self.assertEqual(review.patch_id(r, DIFF), review.patch_id(r, moved))
         self.assertNotEqual(review.patch_id(r, DIFF), review.patch_id(r, DIFF.replace("+more", "+other")))
         self.assertIsNone(review.patch_id(r, "  "))
+
+
+def ev(kind: str, **part) -> dict:
+    return {"type": kind, "timestamp": 1, "sessionID": "ses_test1", "part": part}
+
+
+# события настоящего прогона opencode 1.19.5 (--format json), сокращённо
+PROBE = [
+    ev("step_start", type="step-start"),
+    ev("tool_use", type="tool", tool="read", state={"status": "completed", "input": {"filePath": "C:\\repo\\src\\Import.cs"}}),
+    ev("step_finish", type="step-finish", reason="tool-calls", cost=0.0014,
+       tokens={"total": 10683, "input": 8757, "output": 99, "reasoning": 35, "cache": {"write": 0, "read": 1792}}),
+    ev("step_start", type="step-start"),
+    ev("text", type="text", text='{"summary": "ок", "comments": [], "threads": []}'),
+    ev("step_finish", type="step-finish", reason="stop", cost=0.0006,
+       tokens={"total": 900, "input": 700, "output": 60, "reasoning": 0, "cache": {"write": 5, "read": 100}}),
+]
+
+
+class Reviewer(ProjectCase):
+    """Запуск ревьюера: поток событий opencode, расход, сторож тишины. Вместо opencode — скрипт на Python."""
+
+    def fake_opencode(self, body: str) -> list[str]:
+        script = self.tmp / "fake_opencode.py"
+        script.write_text("import sys, json, time\nsys.stdin.read()\n" + body, encoding="utf-8")
+        return [review.sys.executable, str(script)]
+
+    def emit(self, events: list[dict]) -> str:
+        return "".join(f"print({json.dumps(json.dumps(e))}, flush=True)\n" for e in events)
+
+    def test_usage_and_answer_from_events(self):
+        u = review.events_usage(PROBE)
+        self.assertEqual((u["input"], u["output"], u["cache_read"], u["cache_write"], u["steps"]), (9457, 194, 1892, 5, 2))
+        self.assertAlmostEqual(u["cost"], 0.002)
+        self.assertEqual(review.extract_json(review.events_text(PROBE))["summary"], "ок")
+        self.assertEqual(review.events_text([ev("text", type="text", text="черновик"), *PROBE[1:]])[:1], "{")
+        self.assertEqual(review.tool_note(PROBE[1]["part"]), "читает Import.cs")
+        self.assertEqual(review.tool_note({"tool": "bash", "state": {"input": {"command": "gh pr diff 7"}}}), "выполняет gh pr diff 7")
+
+    def test_stream_reads_events_as_they_come(self):
+        seen = []
+        cmd = self.fake_opencode('print("not json")\n' + self.emit(PROBE))
+        code, events, other, err = review.stream_events(cmd, env=None, cwd=self.tmp, input="brief", timeout=60, idle=30,
+                                                        on_event=seen.append)
+        self.assertEqual(code, 0)
+        self.assertEqual([e["type"] for e in events], [e["type"] for e in PROBE])
+        self.assertEqual(len(seen), len(PROBE))
+        self.assertEqual(other, "not json")
+
+    def test_silent_reviewer_is_stopped_early(self):
+        cmd = self.fake_opencode(self.emit(PROBE[:2]) + "time.sleep(120)\n")
+        started = review.time.time()
+        with self.assertRaises(review.ReviewerStalled):
+            review.stream_events(cmd, env=None, cwd=self.tmp, input="", timeout=600, idle=2)
+        self.assertLess(review.time.time() - started, 40)
+
+    def test_total_timeout_still_applies(self):
+        cmd = self.fake_opencode("while True:\n    print(json.dumps({'type': 'step_start', 'part': {}}), flush=True)\n    time.sleep(0.2)\n")
+        with self.assertRaises(review.subprocess.TimeoutExpired):
+            review.stream_events(cmd, env=None, cwd=self.tmp, input="", timeout=2, idle=30)
+
+    def test_round_records_usage_session_and_phase(self):
+        t = self.add("a")
+        t.update(state="in_review", pr=7)
+        self.store.save_task(t)
+        review.CTX.update(root=self.root, task=t, pr=7, round=1, phase=None)
+        self.addCleanup(lambda: review.CTX.update(root=None, task=None, pr=None, round=None, phase=None))
+        cmd = self.fake_opencode(self.emit(PROBE))
+        r = SimpleNamespace(opencode=cmd[0], cwd=self.tmp, plain_env={})
+        phases = []
+        real_phase, real_popen = review.set_phase, review.subprocess.Popen
+
+        def spy(phase, **detail):
+            phases.append((phase, detail))
+            real_phase(phase, **detail)
+
+        # вместо «opencode run …» запускаем подделку, остальное (каналы, окружение) — как в жизни
+        with mock.patch.object(review, "reviewer_config", lambda r, tmp: None), mock.patch.object(review, "set_phase", spy), \
+                mock.patch.object(review.subprocess, "Popen", lambda c, **kw: real_popen(cmd, **kw)):
+            data = review.call_reviewer(r, 7, 1, 5, "opencode-go/deepseek", "brief", self.tmp)
+        self.assertEqual(data["summary"], "ок")
+        runs = aiflow.reviewer_runs(self.store, "a")
+        self.assertEqual(len(runs), 1)
+        self.assertEqual((runs[0]["session"], runs[0]["round"], runs[0]["model"], runs[0]["input"]),
+                         ("ses_test1", 1, "opencode-go/deepseek", 9457))
+        self.assertAlmostEqual(runs[0]["cost"], 0.002)
+        self.assertEqual(phases[0][1]["doing"], "читает Import.cs")
+        self.assertEqual(phases[-1][1]["steps"], 2)
+        usage = aiflow.reviewer_usage(self.store, "a")
+        self.assertEqual(usage["role"], "reviewer")
+        self.assertAlmostEqual(usage["models"]["opencode-go/deepseek"]["reported_cost"], 0.002)
 
 
 class Streak(ProjectCase):

@@ -123,7 +123,7 @@ def review_activity(store: "Store", t: dict, session_state: str | None, max_roun
         return None
     ph = read_json(store.runs / t["id"] / "phase.json", {}) or {}
     if ph and owner_alive(ph):
-        mins = int(age_minutes(ph.get("at")))
+        mins = int(age_minutes(ph.get("since") or ph.get("at")))
         took = f" ({mins} мин)" if mins >= 1 else ""
         kind = ph.get("phase")
         if kind == "ci_appear":
@@ -131,7 +131,13 @@ def review_activity(store: "Store", t: dict, session_state: str | None, max_roun
         if kind == "ci":
             return "ждёт CI" + (f": {ci}" if ci else "") + took
         if kind == "reviewer":
-            return f"ревьюер opencode, раунд {ph.get('round') or '?'}/{max_rounds}" + took
+            more = [str(ph["doing"])] if ph.get("doing") else []
+            if ph.get("steps"):
+                more.append(f"шаг {ph['steps']}")
+            if ph.get("tokens"):
+                more.append(f"{fmt_tokens(int(ph['tokens']))} токенов")
+            return (f"ревьюер opencode, раунд {ph.get('round') or '?'}/{max_rounds}"
+                    + (": " + ", ".join(more) if more else "") + took)
         if kind == "merge":
             return "мерж" + took
     if t.get("approved_sha"):
@@ -198,6 +204,7 @@ DEFAULT_CONFIG = {
     "review_identity": "self",  # self — ревью и мерж от вашего gh; bot — от бота с токеном REVIEW_BOT_TOKEN
     "max_rounds": 5,
     "nit_rounds": 1,  # в скольких первых раундах nit блокирует одобрение; дальше одобряется, если blocking нет
+    "reviewer_idle_minutes": 5,  # ревьюер opencode не присылает событий дольше этого — завис: остановить
     "max_ci_fixes": 5,  # сколько раз подряд aiflow review возвращает ci_failed, прежде чем звать человека
     "review_concurrency": 2,  # сколько PR на ревью сразу; параллельно — только PR без общих файлов
     "merge_wait_minutes": 60,  # одобренный PR не смержился за это время — к человеку, очередь ревью идёт дальше
@@ -1018,6 +1025,8 @@ def model_price(model: str, table: dict[str, tuple]) -> tuple | None:
 
 def usage_cost(model: str, u: dict, table: dict[str, tuple]) -> float | None:
     """Стоимость расхода одной модели в долларах; None — цена модели неизвестна."""
+    if u.get("reported_cost") is not None:
+        return float(u["reported_cost"])  # цену посчитал сам инструмент (ревьюер opencode)
     price = model_price(model, table)
     if not price:
         return None
@@ -1072,6 +1081,8 @@ def add_usage(into: dict[str, dict], models: dict[str, dict]) -> dict[str, dict]
         m = into.setdefault(model, dict.fromkeys(TOKEN_KINDS, 0))
         for k in TOKEN_KINDS:
             m[k] += int(u.get(k) or 0)
+        if u.get("reported_cost") is not None:
+            m["reported_cost"] = m.get("reported_cost", 0.0) + float(u["reported_cost"])
         if "cache_write_1h" not in u:
             # запись старой версии, без разбивки по сроку: Claude Code пишет кэш на час — считаем по этой цене
             m["cache_write_1h"] += int(u.get("cache_write") or 0)
@@ -1126,6 +1137,25 @@ def transcript_age_minutes(session_id: str | None) -> float | None:
         except OSError:
             pass
     return (time.time() - max(times)) / 60 if times else None
+
+
+def reviewer_runs(store: "Store", tid: str) -> list[dict]:
+    data = read_json(store.runs / tid / "reviewer.json", {}) or {}
+    return [x for x in data.get("runs") or [] if isinstance(x, dict)]
+
+
+def reviewer_usage(store: "Store", tid: str) -> dict | None:
+    """Расход ревьюера opencode по задаче (runs/<id>/reviewer.json) в том же виде, что расход сессии Claude."""
+    models: dict[str, dict] = {}
+    for run in reviewer_runs(store, tid):
+        m = models.setdefault(str(run.get("model") or "opencode"),
+                              {**dict.fromkeys(TOKEN_KINDS, 0), "reported_cost": 0.0})
+        for k in ("input", "output", "cache_read", "cache_write"):
+            m[k] += int(run.get(k) or 0)
+        m["reported_cost"] += float(run.get("cost") or 0)
+    if not models:
+        return None
+    return {"role": "reviewer", "model": max(models, key=lambda k: models[k]["output"]), "models": models}
 
 
 def task_usage(t: dict) -> dict[str, dict]:
@@ -2145,7 +2175,13 @@ class Dispatcher:
             t["retry_requested"] = True
             self.do_retry(t)
 
+    def add_reviewer_usage(self, t: dict) -> None:
+        u = reviewer_usage(self.store, t["id"])
+        if u:
+            t.setdefault("usage", {})["reviewer"] = u
+
     def adv_merged(self, t: dict) -> None:
+        self.add_reviewer_usage(t)  # последний раунд ревью заканчивается мержем: забрать его расход до уборки
         lost = [a for a in t.get("amendments") or [] if not a.get("delivered_at")]
         if lost and not t.get("amend_lost_told"):
             t["amend_lost_told"] = True
@@ -2412,6 +2448,7 @@ class Dispatcher:
                 u = transcript_usage(e["session_id"], seen)
                 if u:
                     t.setdefault("usage", {})[e["session_id"]] = {"role": role, **u}
+            self.add_reviewer_usage(t)
             self.store.save_task(t)
 
     def check_batch_done(self, tasks: list[dict]) -> None:
@@ -2492,6 +2529,7 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
             "action": t.get("human_action") if st == "needs_human" else None,
             "activity": review_activity(store, t, cur.get("state"), int(cfg["max_rounds"])),
             "ci": t.get("ci") if st in ("ready", "in_review") else None,
+            "reviewer_session": next((r.get("session") for r in reversed(reviewer_runs(store, t["id"])) if r.get("session")), None),
             "depends_on": t.get("depends_on") or [], "state_at": t.get("state_at"),
             "launching": bool(t.get("launching")), "review_lock": t["id"] in (q.get("review_locks") or []),
             "amendments": len(t.get("amendments") or []),

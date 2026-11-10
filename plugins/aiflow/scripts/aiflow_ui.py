@@ -120,14 +120,24 @@ def session_title(t: dict | None, sid: str) -> str:
     return (text if len(text) <= 60 else text[:59].rstrip() + "…") or f"aiflow {sid}"
 
 
-def open_terminal(root: Path, sid: str, title: str | None = None) -> str:
-    """Открыть `claude attach <sid>` в терминале: в Windows Terminal — вкладкой общего окна aiflow с
-    заголовком задачи. Если вкладка этой сессии уже на виду — вывести её окно на передний план.
-    Возвращает, где открыли."""
+def open_terminal(root: Path, sid: str, title: str | None = None, tool: str = "claude") -> str:
+    """Открыть сессию в терминале: `claude attach <sid>` или, для ревьюера, `opencode -s <sid>`.
+    В Windows Terminal — вкладкой общего окна aiflow с заголовком задачи. Если вкладка этой сессии уже
+    на виду — вывести её окно на передний план. Возвращает, где открыли."""
     if not re.fullmatch(r"[A-Za-z0-9][\w\-]{0,100}", sid):
         raise aiflow.AiflowError("некорректный id сессии")
+    if tool == "opencode":
+        exe = shutil.which("opencode")
+        if not exe:
+            raise aiflow.AiflowError("opencode не найден в PATH")
+        return _open_tab(root, [exe, "-s", sid], title or f"ревьюер {sid}", f"opencode -s {sid}")
     claude = shutil.which("claude") or "claude"
-    title = title or f"aiflow {sid}"
+    return _open_tab(root, [claude, "attach", sid], title or f"aiflow {sid}", f"claude attach {sid}")
+
+
+def _open_tab(root: Path, command: list[str], title: str, manual: str) -> str:
+    claude, sid = command[0], command[-1]
+    attach = command[1:-1]
     if os.name == "nt":
         if _win_focus(title):
             return "уже открытой вкладке"
@@ -137,16 +147,16 @@ def open_terminal(root: Path, sid: str, title: str | None = None) -> str:
             # -w aiflow: вкладка в окне с этим именем (нет окна — оно создаётся).
             # --suppressApplicationTitle: Claude Code меняет заголовок, а по нему вкладка ищется в следующий раз.
             subprocess.Popen([wt, "-w", WT_WINDOW, "new-tab", "-d", str(root), "--title", title,
-                              "--suppressApplicationTitle", claude, "attach", sid],
+                              "--suppressApplicationTitle", claude, *attach, sid],
                              cwd=root, creationflags=flags, env=aiflow.claude_env())
             where = "вкладке Windows Terminal"
         else:
-            subprocess.Popen(["cmd", "/c", "start", title, "/D", str(root), claude, "attach", sid],
+            subprocess.Popen(["cmd", "/c", "start", title, "/D", str(root), claude, *attach, sid],
                              cwd=root, creationflags=flags, env=aiflow.claude_env())
             where = "cmd"
         threading.Thread(target=_win_focus, args=(title, 8.0), daemon=True).start()
         return where
-    cmd = f"cd {shlex.quote(str(root))} && {shlex.quote(claude)} attach {sid}"
+    cmd = f"cd {shlex.quote(str(root))} && {shlex.quote(claude)} {' '.join(attach)} {sid}"
     if sys.platform == "darwin":
         esc = cmd.replace("\\", "\\\\").replace('"', '\\"')
         subprocess.Popen(["osascript", "-e", f'tell application "Terminal" to do script "{esc}"',
@@ -157,7 +167,7 @@ def open_terminal(root: Path, sid: str, title: str | None = None) -> str:
         if exe:
             subprocess.Popen([exe, *args, "sh", "-c", cmd], cwd=root, start_new_session=True)
             return term
-    raise aiflow.AiflowError("не нашёл терминал; выполните вручную: claude attach " + sid)
+    raise aiflow.AiflowError("не нашёл терминал; выполните вручную: " + manual)
 
 
 class _Cache:
@@ -356,6 +366,16 @@ def start_server(provider, port: int, wake: threading.Event, service: bool = Fal
                         return self._json(400, {"error": "у задачи ещё нет сессии"})
                     where = open_terminal(store.root, sid, session_title(t, sid))
                     return self._json(200, {"ok": True, "where": where, "command": f"claude attach {sid}"})
+                elif action == "open_reviewer" and tid:
+                    t = store.task(tid)
+                    run = next((r for r in reversed(aiflow.reviewer_runs(store, tid)) if r.get("session")), None) if t else None
+                    if not run:
+                        return self._json(400, {"error": "у задачи ещё нет сессии ревьюера"})
+                    where = Path(str(run.get("dir") or ""))  # opencode ищет сессию по проекту, где она шла
+                    where = where if where.is_dir() else store.root
+                    title = "ревьюер " + session_title(t, run["session"])
+                    place = open_terminal(where, run["session"], title[:60], tool="opencode")
+                    return self._json(200, {"ok": True, "where": place, "command": f"opencode -s {run['session']}"})
                 elif action == "cancel" and tid:
                     warnings = aiflow.cancel_tasks(store, [tid], note="из панели")
                     wake.set()

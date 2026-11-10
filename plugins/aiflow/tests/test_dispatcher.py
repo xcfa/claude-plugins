@@ -770,6 +770,45 @@ class Cost(ProjectCase):
         self.assertAlmostEqual(st["usage"]["claude-sonnet-5-5"]["cost"], 4.0)
 
 
+class ReviewerUsage(ProjectCase):
+    def run_of(self, **kw) -> dict:
+        return {"session": "ses_1", "round": 1, "model": "opencode-go/deepseek", "input": 1000, "output": 200,
+                "cache_read": 5000, "cache_write": 0, "cost": 0.02, **kw}
+
+    def test_reviewer_spend_joins_the_task_and_project_totals(self):
+        self.to_ready("a", 1, files=["a.py"])
+        aiflow.write_json(self.root / "runs" / "a" / "reviewer.json",
+                          {"runs": [self.run_of(), self.run_of(session="ses_2", round=2, cost=0.03)]})
+        self.tick()
+        st = aiflow.build_state(self.store)
+        task = st["tasks"][0]
+        self.assertAlmostEqual(task["usage"]["opencode-go/deepseek"]["cost"], 0.05)  # цена — от opencode, не из прайса
+        self.assertEqual(task["usage"]["opencode-go/deepseek"]["input"], 2000)
+        self.assertAlmostEqual(task["cost"], 0.05)
+        self.assertAlmostEqual(st["cost"], 0.05)
+        self.assertEqual(st["unpriced"], [])
+        self.assertEqual(task["reviewer_session"], "ses_2")
+
+    def test_last_round_is_counted_when_the_pr_merges(self):
+        self.to_ready("a", 1, files=["a.py"])
+        self.tick()
+        aiflow.write_json(self.root / "runs" / "a" / "reviewer.json", {"runs": [self.run_of()]})
+        self.gh.prs[1]["state"] = "MERGED"
+        self.tick()
+        self.assertEqual(self.state("a"), "merged")
+        self.assertAlmostEqual(aiflow.build_state(self.store)["tasks"][0]["cost"], 0.02)
+
+    def test_activity_shows_what_the_reviewer_is_doing(self):
+        import os
+        self.to_ready("a", 1, files=["a.py"])
+        self.tick()
+        aiflow.write_json(self.root / "runs" / "a" / "phase.json",
+                          {"pid": os.getpid(), "at": aiflow.iso(), "since": aiflow.iso(), "phase": "reviewer", "round": 2,
+                           "doing": "читает Import.cs", "steps": 7, "tokens": 66000})
+        task = aiflow.build_state(self.store, self.claude.agents())["tasks"][0]
+        self.assertEqual(task["activity"], "ревьюер opencode, раунд 2/5: читает Import.cs, шаг 7, 66k токенов")
+
+
 class Misc(ProjectCase):
     def test_graphql_pr_matches_gh_pr_view_shape(self):
         node = {"state": "OPEN", "isDraft": False, "headRefOid": "abc", "headRefName": "ai/a", "body": None,

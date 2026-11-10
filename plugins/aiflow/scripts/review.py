@@ -21,8 +21,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
+from queue import Empty, Queue
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import aiflow  # noqa: E402
@@ -42,17 +44,21 @@ CTX: dict = {"root": None, "task": None, "pr": None, "round": None}
 
 
 def set_phase(phase: str | None, **detail) -> None:
-    """Чем сейчас занят раунд — для панели: ожидание CI, ревьюер, мерж. None — раунд закончен."""
+    """Чем сейчас занят раунд — для панели: ожидание CI, ревьюер, мерж. None — раунд закончен.
+    since — когда фаза началась: подробности (что читает ревьюер) обновляются, отсчёт времени — нет."""
     root, task = CTX["root"], CTX["task"]
     if not (root and task) or CTX.get("phase") == (phase, detail):
         return
+    if (CTX.get("phase") or (None,))[0] != phase:
+        CTX["phase_since"] = aiflow.iso()
     CTX["phase"] = (phase, detail)
     path = root / "runs" / task["id"] / "phase.json"
     try:
         if phase is None:
             path.unlink(missing_ok=True)
         else:
-            aiflow.write_json(path, {"pid": os.getpid(), "at": aiflow.iso(), "phase": phase, "pr": CTX["pr"], **detail})
+            aiflow.write_json(path, {"pid": os.getpid(), "at": aiflow.iso(), "since": CTX["phase_since"],
+                                     "phase": phase, "pr": CTX["pr"], **detail})
     except OSError:
         pass  # подсказка для панели не должна ломать ревью
 
@@ -388,25 +394,181 @@ def reviewer_config(r: Runner, tmp: Path) -> dict:
     return {**r.plain_env, "OPENCODE_CONFIG": str(path)}
 
 
-def call_reviewer(r: Runner, pr: int, rnd: int, max_rounds: int, model: str, brief: str, tmp: Path) -> dict:
+class ReviewerStalled(RuntimeError):
+    pass
+
+
+def stream_events(cmd, *, env, cwd, input: str, timeout: float, idle: float, on_event=None) -> tuple[int, list[dict], str, str]:
+    """Запустить opencode run --format json и читать его события по мере появления.
+    Возвращает (код выхода, события, прочий stdout, stderr). Нет событий дольше idle секунд — процесс
+    завис: дерево убивается и бросается ReviewerStalled; общий предел timeout — subprocess.TimeoutExpired."""
+    group = aiflow.NO_WINDOW if os.name == "nt" else {"start_new_session": True}
+    proc = subprocess.Popen(cmd, cwd=cwd, env=env, text=True, encoding="utf-8", errors="replace",
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **group)
+    lines: Queue = Queue()
+    err: list[str] = []
+
+    def pump(stream, sink) -> None:
+        try:
+            for line in stream:
+                sink(line)
+        except (OSError, ValueError):
+            pass
+        finally:
+            sink(None)
+
+    threading.Thread(target=pump, args=(proc.stdout, lines.put), daemon=True).start()
+    threading.Thread(target=pump, args=(proc.stderr, lambda x: err.append(x) if x is not None else None), daemon=True).start()
+    try:
+        proc.stdin.write(input)
+        proc.stdin.close()
+    except (OSError, ValueError):
+        pass
+    events, other = [], []
+    started = last = time.time()
+    while True:
+        now = time.time()
+        if now - started > timeout:  # проверяется на каждом шаге: поток событий может не умолкать
+            aiflow.kill_tree(proc)
+            raise subprocess.TimeoutExpired(cmd, timeout)
+        if idle and now - last > idle:
+            aiflow.kill_tree(proc)
+            raise ReviewerStalled(f"ревьюер opencode молчит {int(idle // 60)} мин и был остановлен")
+        try:
+            line = lines.get(timeout=1)
+        except Empty:
+            continue
+        if line is None:
+            break
+        last = time.time()
+        text = ANSI_RE.sub("", line).strip()
+        if not text:
+            continue
+        try:
+            ev = json.loads(text)
+        except json.JSONDecodeError:
+            ev = None
+        if isinstance(ev, dict) and ev.get("type"):
+            events.append(ev)
+            if on_event:
+                on_event(ev)
+        else:
+            other.append(text)
+    try:
+        code = proc.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        aiflow.kill_tree(proc)
+        code = -1
+    for stream in (proc.stdout, proc.stderr):
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
+    return code, events, "\n".join(other), ANSI_RE.sub("", "".join(err)).strip()
+
+
+def events_usage(events: list[dict]) -> dict:
+    """Расход и цена прогона opencode — сумма по шагам (step_finish). Цену считает сам opencode."""
+    u = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "cost": 0.0, "steps": 0}
+    for ev in events:
+        part = ev.get("part") or {}
+        if ev.get("type") != "step_finish" or not isinstance(part.get("tokens"), dict):
+            continue
+        t = part["tokens"]
+        cache = t.get("cache") or {}
+        u["input"] += int(t.get("input") or 0)
+        u["output"] += int(t.get("output") or 0) + int(t.get("reasoning") or 0)  # рассуждения оплачиваются как выход
+        u["cache_read"] += int(cache.get("read") or 0)
+        u["cache_write"] += int(cache.get("write") or 0)
+        u["cost"] += float(part.get("cost") or 0)
+        u["steps"] += 1
+    return u
+
+
+def events_text(events: list[dict]) -> str:
+    """Ответ модели: текстовые части после последнего вызова инструмента."""
+    texts: list[str] = []
+    for ev in events:
+        part = ev.get("part") or {}
+        if ev.get("type") == "tool_use":
+            texts = []
+        elif ev.get("type") == "text" and part.get("text"):
+            texts.append(str(part["text"]))
+    return "\n".join(texts)
+
+
+def tool_note(part: dict) -> str:
+    """Короткая подпись действия ревьюера для панели."""
+    tool = str(part.get("tool") or "")
+    args = ((part.get("state") or {}).get("input") or {})
+    if tool == "read" and args.get("filePath"):
+        return "читает " + Path(str(args["filePath"])).name
+    if tool == "bash" and args.get("command"):
+        return "выполняет " + " ".join(str(args["command"]).split())[:48]
+    if tool in ("grep", "glob") and args.get("pattern"):
+        return "ищет " + str(args["pattern"])[:40]
+    return tool or "думает"
+
+
+def record_reviewer(root: Path | None, task: dict | None, entry: dict) -> None:
+    """Дописать прогон ревьюера в runs/<id>/reviewer.json: по нему очередь считает расход, панель
+    открывает сессию opencode."""
+    if not (root and task):
+        return
+    path = root / "runs" / task["id"] / "reviewer.json"
+    try:
+        data = aiflow.read_json(path, {}) or {}
+        runs = data.get("runs") if isinstance(data.get("runs"), list) else []
+        runs.append(entry)
+        aiflow.write_json(path, {"runs": runs[-200:]})
+    except OSError:
+        pass
+
+
+def call_reviewer(r: Runner, pr: int, rnd: int, max_rounds: int, model: str, brief: str, tmp: Path,
+                  idle_minutes: float = 5) -> dict:
     # Задание — через stdin: история ревью бывает длиннее лимита командной строки Windows (~32k),
     # а файл во временной папке лежит вне проекта, и opencode отклоняет его чтение (external_directory).
     message = (f"Review pull request #{pr}, round {rnd} of {max_rounds}. The brief follows this message: read the "
                "plan and the diff yourself as it says. Reply with exactly one JSON object following your instructions.")
     materials = brief
     env = reviewer_config(r, tmp)
-    cmd = [r.opencode, "run", message, "--agent", AGENT]
+    cmd = [r.opencode, "run", message, "--agent", AGENT, "--format", "json",
+           "--title", f"aiflow: ревью PR #{pr}, раунд {rnd}"]
     if model:
         cmd += ["--model", model]
     last = err = ""
-    for _ in range(PARSE_ATTEMPTS):
-        proc = r.run(cmd, env=env, check=False, timeout=OPENCODE_TIMEOUT, input=materials)
-        last = ANSI_RE.sub("", proc.stdout or "")
-        err = ANSI_RE.sub("", proc.stderr or "").strip()
+    for attempt in range(1, PARSE_ATTEMPTS + 1):
+        seen: list[dict] = []
+        started = aiflow.iso()
+
+        def progress(ev: dict) -> None:
+            seen.append(ev)
+            part = ev.get("part") or {}
+            doing = tool_note(part) if ev.get("type") == "tool_use" else None
+            if doing or ev.get("type") == "step_finish":
+                u = events_usage(seen)
+                set_phase("reviewer", round=rnd, session=ev.get("sessionID"), steps=u["steps"],
+                          tokens=u["input"] + u["output"] + u["cache_write"],
+                          doing=doing or (CTX.get("phase") or (None, {}))[1].get("doing"))
+
+        try:
+            code, events, other, err = stream_events(cmd, env=env, cwd=r.cwd, input=materials, timeout=OPENCODE_TIMEOUT,
+                                                    idle=idle_minutes * 60, on_event=progress)
+        finally:
+            # расход записывается и за неудавшийся прогон: токены на него потрачены
+            usage = events_usage(seen)
+            session = next((ev.get("sessionID") for ev in seen if ev.get("sessionID")), None)
+            if usage["steps"] or session:
+                record_reviewer(CTX["root"], CTX["task"], {
+                    "session": session, "round": rnd, "attempt": attempt, "at": started, "pr": pr,
+                    "model": model or "opencode", "dir": str(r.cwd), **usage})
+                CTX["reviewer_session"] = session
+        last = events_text(events) or other
         data = extract_json(last)
         if data is not None and "comments" in data:
             return data
-        if proc.returncode != 0 and not last.strip() and "--pure" not in cmd:
+        if code != 0 and not last.strip() and "--pure" not in cmd:
             # opencode упал до ответа модели. Бывает, что в каталоге проекта ломается один из
             # встроенных плагинов opencode; ревьюеру они не нужны — повторяем без них.
             cmd = cmd[:2] + ["--pure"] + cmd[2:]
@@ -804,7 +966,8 @@ def main(argv: list[str] | None = None) -> int:
             (tmp / "review-brief.md").write_text(brief, encoding="utf-8")  # для разбора, ревьюеру не нужен
 
             set_phase("reviewer", round=rnd)
-            data = call_reviewer(r, args.pr, rnd, max_rounds, cfg.get("reviewer_model") or "", brief, tmp)
+            data = call_reviewer(r, args.pr, rnd, max_rounds, cfg.get("reviewer_model") or "", brief, tmp,
+                                 float(cfg.get("reviewer_idle_minutes", 5) or 0))
             verdict, cs, summary = normalize(data, truncated)
             still_open = answer_threads(r, args.pr, pending, thread_verdicts(data), tmp) if pending else []
             verdict = final_verdict(verdict, cs, still_open, rnd, max_rounds, int(cfg.get("nit_rounds", 1) or 0))
@@ -850,7 +1013,7 @@ def main(argv: list[str] | None = None) -> int:
         what = Path(str(e.cmd[0] if isinstance(e.cmd, (list, tuple)) else e.cmd)).stem
         finish("error", 1, message=f"{what} не ответил за {int(e.timeout)} с и был остановлен")
     except (RuntimeError, json.JSONDecodeError, KeyError, OSError) as e:
-        finish("error", 1, message=str(e))
+        finish("error", 1, message=str(e))  # ReviewerStalled — тоже RuntimeError
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return 0

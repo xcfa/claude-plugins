@@ -329,7 +329,7 @@ async function act(action, key, id, value) {
     if (r.status === 403) return staleToken();
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || r.statusText);
-    if (action === "open_session") return toast(d.where === "уже открытом окне" ? "Окно сессии уже открыто — вывел его на передний план" : `Сессия открыта в новом окне (${d.where})`);
+    if (action === "open_session" || action === "open_reviewer") return toast(/уже открыт/.test(d.where || "") ? "Вкладка сессии уже открыта — вывел её на передний план" : `Сессия открыта: ${d.where}`);
     if (action === "cancel" && d.warnings && d.warnings.length) { toast("Снята, но: " + d.warnings.join("; ")); setTimeout(load, 600); return; }
     toast({ amend: "Дополнение принято — его получит сессия задачи", allow_paths: "Пути разрешены, задача продолжит работу", cancel: "Задача снята", approve: "План одобрен", retry: "Повтор поставлен", pause: "Очередь на паузе", resume: "Очередь продолжает", forget: "Проект убран из службы" }[action] || "Готово");
     setTimeout(load, 600);
@@ -474,8 +474,9 @@ function renderBoard(p) {
     });
     const pr = t.pr ? (t.pr_url ? `<a href="${esc(t.pr_url)}" target="_blank" rel="noopener">#${esc(t.pr)}</a>` : "#" + esc(t.pr)) : "—";
     const rounds = t.rounds ? `раунд ${esc(t.rounds)}/${esc(t.max_rounds)}` : (t.review_lock ? "на ревью" : "");
-    const cancel = isEnded(t) ? ""
-      : `<div class="acts-row"><button class="link" data-amend="${id}" data-project="${k}" title="Добавить правку к идущей задаче">Дополнить${t.amend_pending ? " (" + esc(t.amend_pending) + " ждёт)" : ""}</button> `
+    const rev = t.reviewer_session ? `<button class="link" data-act="open_reviewer" data-project="${k}" data-id="${id}" title="Открыть сессию ревьюера opencode в терминале">Ревьюер</button> ` : "";
+    const cancel = isEnded(t) ? (rev ? `<div class="acts-row">${rev}</div>` : "")
+      : `<div class="acts-row">${rev}<button class="link" data-amend="${id}" data-project="${k}" title="Добавить правку к идущей задаче">Дополнить${t.amend_pending ? " (" + esc(t.amend_pending) + " ждёт)" : ""}</button> `
       + `<button class="link danger" data-cancel="${id}" data-project="${k}" title="Остановить сессии задачи и закрыть её PR"${dis(p.key, t.id)}>Снять</button></div>`;
     html += `<div class="meta"><div class="num">${pr}${rounds ? ", " + rounds : ""}</div><div class="line2 num">${t.tokens ? tokens(t.tokens) + " токенов" + (t.cost ? " · " + money(t.cost) : "") : "—"}</div>${cancel}</div>`;
     return html;
