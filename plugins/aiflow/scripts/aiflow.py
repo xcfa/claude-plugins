@@ -1207,7 +1207,10 @@ def planner_prompt(store: Store, t: dict, cfg: dict) -> str:
         "--summary \"<одна строка>\" --details-file <указания исполнителю в $CLAUDE_JOB_DIR/tmp/>;\n"
         "— простая, сделать самому: сделай по разделу «Делаешь сам» и отчитайся "
         f"aiflow report {tid} --role planner --status ready_for_review --pr <номер> --summary \"<1–2 строки>\" "
-        f"(или --status done, если репозиторий менять не понадобилось). Инструкции исполнителя: {WORKER_MD}.\n"
+        f"(или --status done, если репозиторий менять не понадобилось). Инструкции исполнителя: {WORKER_MD}. "
+        f"Как только решил делать сам — до первой правки выполни aiflow report {tid} --role planner "
+        "--status self_execute --summary \"<что делаю, одна строка>\" и продолжай: так очередь покажет, что идёт "
+        "работа, а не планирование.\n"
         "Закончи ход после отчёта."
     )
 
@@ -1970,6 +1973,14 @@ class Dispatcher:
         rep = self.new_report(t, "planner")
         if rep:
             st = rep.get("status")
+            if st == "self_execute":
+                # планировщик оценил задачу как простую и делает её сам: это уже не планирование, а работа.
+                # Стадия та же (итог придёт отчётом ready_for_review или done), но панель показывает её как реализацию.
+                t["route"], t["complexity"] = "self", "simple"
+                t["route_note"] = short_reason(rep.get("summary") or "", 160)
+                self.emit(t, "self_start", f"{t['id']}: простая — планировщик делает сам"
+                          + (f": {t['route_note']}" if t["route_note"] else ""), key=f"selfstart:{rep['rid']}")
+                return
             if st == "delegate":
                 t["complexity"], t["direct"] = "simple", True
                 t["brief"] = rep.get("details") or rep.get("summary") or ""
@@ -2572,18 +2583,21 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
                 if h.get("from") in STAGES:
                     last_stage = STAGES.index(h["from"])
                     break
+        doing_self = st == "planning" and t.get("route") == "self"
         out.append({
             "id": t["id"], "title": t.get("title", ""), "state": st,
-            "label": "вопрос" if st == "discussing" and t.get("kind") == "ask" else STAGE_LABEL.get(st, st),
+            "label": "планировщик делает сам" if doing_self else
+                     "вопрос" if st == "discussing" and t.get("kind") == "ask" else STAGE_LABEL.get(st, st),
             "kind": t.get("kind") or "task", "answer": (t.get("answer") or {}).get("summary") if st == "answered" else None,
-            "stage": STAGES.index("planning") if st in ("discussing", "answered") else STAGES.index("plan_review") if st == "approved" else STAGES.index("merged") if st == "done" else STAGES.index(st) if st in STAGES else last_stage,
+            "stage": STAGES.index("in_progress") if doing_self else STAGES.index("planning") if st in ("discussing", "answered") else STAGES.index("plan_review") if st == "approved" else STAGES.index("merged") if st == "done" else STAGES.index(st) if st in STAGES else last_stage,
             "complexity": t.get("complexity"), "pr": pr,
             "pr_url": f"{repo_url}/pull/{pr}" if pr and repo_url else None,
             "rounds": review.get("round"), "max_rounds": cfg["max_rounds"],
             "allowed_paths": t.get("allowed_protected_paths") or [],
             "tokens": task_tokens(t), "usage": usage, "cost": round(cost, 4), "session": cur, "needs": needs,
             "action": t.get("human_action") if st == "needs_human" else None,
-            "activity": review_activity(store, t, cur.get("state"), int(cfg["max_rounds"])),
+            "activity": ("планировщик делает сам" + (f": {t['route_note']}" if t.get("route_note") else "")) if doing_self
+                        else review_activity(store, t, cur.get("state"), int(cfg["max_rounds"])),
             "ci": t.get("ci") if st in ("ready", "in_review") else None,
             "models": {f: t[f] for f in MODEL_FIELDS if t.get(f)},
             "reviewer_session": next((r.get("session") for r in reversed(reviewer_runs(store, t["id"])) if r.get("session")), None),
@@ -3461,7 +3475,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("id")
     r.add_argument("--role", required=True, choices=["planner", "worker"])
     r.add_argument("--status", required=True,
-                   choices=["plan_ready", "delegate", "answered", "ready_for_review", "done", "approved", "limit_reached", "error", "blocked"])
+                   choices=["plan_ready", "delegate", "self_execute", "answered", "ready_for_review", "done", "approved", "limit_reached", "error", "blocked"])
     r.add_argument("--pr", type=int)
     r.add_argument("--complexity", choices=["simple", "complex"], help="оценка реализации (планировщик)")
     r.add_argument("--summary")

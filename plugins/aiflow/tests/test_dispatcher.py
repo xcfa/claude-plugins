@@ -49,6 +49,37 @@ class Planning(ProjectCase):
         self.assertEqual(self.state("a"), "in_progress")
         self.assertIn("поправь README.md:3", self.claude.launched[-1]["prompt"])
 
+    def test_planner_doing_the_task_itself_is_shown_as_work_not_planning(self):
+        self.add("a")
+        self.tick()
+        row = aiflow.build_state(self.store)["tasks"][0]
+        self.assertEqual((row["label"], row["stage"]), ("планирование", aiflow.STAGES.index("planning")))
+        self.report("a", "planner", "self_execute", summary="переношу кнопку влево")
+        events = self.tick()
+        self.assertEqual(self.state("a"), "planning")  # итог придёт отчётом ready_for_review
+        self.assertIn("self_start", self.kinds(events))
+        row = aiflow.build_state(self.store)["tasks"][0]
+        self.assertEqual(row["label"], "планировщик делает сам")
+        self.assertEqual(row["stage"], aiflow.STAGES.index("in_progress"))
+        self.assertEqual(row["activity"], "планировщик делает сам: переношу кнопку влево")
+        self.gh.add_pr(7, "a", body="Что сделано")
+        self.report("a", "planner", "ready_for_review", 7)
+        self.claude.finish_turn(self.sid("a", "planner"))
+        self.tick()
+        self.assertEqual(self.state("a"), "in_review")
+        self.assertNotEqual(aiflow.build_state(self.store)["tasks"][0]["label"], "планировщик делает сам")
+
+    def test_planner_that_announced_and_went_silent_is_still_reminded(self):
+        self.add("a")
+        self.tick()
+        self.report("a", "planner", "self_execute", summary="делаю")
+        self.tick()
+        self.claude.finish_turn(self.sid("a", "planner"), minutes_ago=5)
+        self.age("a", 5)
+        self.tick()
+        self.assertEqual(len(self.claude.resumed), 1)
+        self.assertEqual(self.state("a"), "planning")
+
     def test_old_hidden_state_becomes_approved(self):
         """Запись старой версии: plan_review с флагом plan_approved."""
         self.to_plan_review("a", 7)

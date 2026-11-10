@@ -78,6 +78,7 @@ stateDiagram-v2
 | `new` | `planning` | свободный слот, все `depends_on` в `merged`, очередь не на паузе | запустить planner, записать id сессии |
 | `planning` | `plan_review` | отчёт planner'а `plan_ready` с номером PR (сложная задача) | проверить PR (открыт, ветка `ai/<id>`, в описании маркер плана) и записать его; неверный отчёт возвращается сессии |
 | `planning` | `in_progress` | отчёт planner'а `delegate` (простая задача) | запустить worker'а (Sonnet) без плана, с указаниями planner'а |
+| `planning` | `planning` | отчёт planner'а `self_execute` (простая, делает сам) | стадия та же, но панель и `aiflow status` показывают «планировщик делает сам» на шаге реализации |
 | `planning` | `ready` | отчёт planner'а `ready_for_review` (простая, сделал сам) | его сессия становится сессией исполнителя: в очередь ревью |
 | `planning` | `done` | отчёт planner'а `done` (простая, без изменений в репозитории) | задача выполнена |
 | `plan_review` | `plan_review` | новый комментарий человека в PR | разбудить planner'а с текстом комментариев |
