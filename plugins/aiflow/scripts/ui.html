@@ -48,6 +48,8 @@ header .sub b { font-weight: 600; color: var(--ink); }
 .project { margin-bottom: 40px; }
 .phead { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px 24px; flex-wrap: wrap; margin-bottom: 12px; }
 .phead h2 { font-size: 19px; font-weight: 650; margin: 0; letter-spacing: -0.005em; }
+.phead h2 a { color: inherit; text-decoration: none; }
+.phead h2 a:hover { text-decoration: underline; text-underline-offset: 4px; }
 .phead .sub { color: var(--muted); font-size: 13.5px; margin-top: 2px; }
 .phead .sub b { font-weight: 600; color: var(--ink); }
 .phead .sub.path { font-size: 12.5px; }
@@ -506,7 +508,7 @@ function renderProject(p) {
   const qbtn = `<button data-act="${pz ? "resume" : "pause"}" data-project="${k}"${dis(p.key, null)}>${pz ? "Продолжить очередь" : "Поставить на паузу"}</button>`;
   return `<section class="project">
     <div class="phead">
-      <div><h2>${esc(p.name)}</h2>
+      <div><h2>${/^https?:\/\//.test(p.repo_url || "") ? `<a href="${esc(p.repo_url)}" target="_blank" rel="noopener" title="Открыть репозиторий">${esc(p.name)}</a>` : esc(p.name)}</h2>
         <div class="sub">база <b>${esc(p.base)}</b>, до ${esc(p.concurrency)} сессий параллельно${mon}</div></div>
       <div class="queue">${qstate}${qbtn}${forget}</div>
     </div>
