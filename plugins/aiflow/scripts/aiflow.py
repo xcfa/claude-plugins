@@ -2043,6 +2043,15 @@ class Dispatcher:
             t["size_ok"] = True  # человек видел размер изменения и велел продолжать
         # Сначала — та же сессия с её контекстом и рабочим каталогом, в той же стадии.
         prev = next((h.get("from") for h in reversed(t.get("history") or []) if h.get("to") == "needs_human"), None)
+        locks = self.q.setdefault("review_locks", [])
+        if prev == "in_review" and self.sstate(self.cur(t, "worker")) == "working" and self.review_free(t, locks):
+            # Сессия исполнителя не останавливалась и уже ведёт ревью: будить её нечем и незачем.
+            # Задача сразу занимает своё место в ревью, а не числится в очереди без него.
+            locks.append(t["id"])
+            self.touch(t, "worker")
+            self.set_state(t, "in_review", "повтор: сессия уже ведёт ревью")
+            self.emit(t, "retry", f"{t['id']}: повтор — сессия уже ведёт ревью", key=f"retry:{iso()[:16]}")
+            return
         if prev == "in_review" and self.cur(t, "worker"):
             # Ревью идёт строго по одному: задача снова встаёт в очередь ревью, и монитор будит
             # эту же сессию worker'а (с её контекстом), когда освободится lock.

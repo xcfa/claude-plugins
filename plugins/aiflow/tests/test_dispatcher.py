@@ -384,6 +384,38 @@ class NeedsHuman(ProjectCase):
         self.assertEqual(self.state("a"), "needs_human")
         self.assertEqual(self.task("a")["human_reason"], "новая ошибка")
 
+    def to_human_with_working_session(self) -> None:
+        """Задача на ревью ушла к человеку, а её сессия продолжает работать."""
+        self.to_ready("a", 1, files=["a.py"])
+        self.tick()
+        self.report("a", "worker", "error", 1, summary="сбой ревьюера")
+        self.tick()
+        self.assertEqual(self.state("a"), "needs_human")
+        self.assertEqual(self.claude.sessions["w-a"]["state"], "working")
+        self.patch("a", human_watch=None)
+
+    def test_retry_with_a_working_session_goes_straight_back_to_review(self):
+        self.to_human_with_working_session()
+        woken = len(self.claude.resumed)
+        self.store.command({"cmd": "retry", "id": "a"})
+        self.tick()
+        self.assertEqual(self.state("a"), "in_review")
+        self.assertEqual(self.store.queue()["review_locks"], ["a"])
+        self.assertEqual(len(self.claude.resumed), woken)  # работающую сессию не будим
+        self.to_ready("b", 2, files=["a.py"])  # PR с теми же файлами ждёт: место занято
+        self.tick()
+        self.assertEqual(self.state("b"), "ready")
+
+    def test_retry_with_a_working_session_waits_when_review_is_taken(self):
+        self.to_human_with_working_session()
+        self.to_ready("b", 2, files=["a.py"])
+        self.tick()
+        self.assertEqual(self.state("b"), "in_review")
+        self.store.command({"cmd": "retry", "id": "a"})
+        self.tick()
+        self.assertEqual(self.state("a"), "ready")  # те же файлы на ревью — в очередь
+        self.assertEqual(self.store.queue()["review_locks"], ["b"])
+
     def test_reason_is_one_line_and_says_what_to_do(self):
         self.to_ready("a", 1, files=["a.py"])
         self.tick()
