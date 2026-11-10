@@ -142,6 +142,8 @@ def review_activity(store: "Store", t: dict, session_state: str | None, max_roun
             return "мерж" + took
     if t.get("approved_sha"):
         return "одобрен, ждёт мержа" + (f"; CI: {ci}" if ci else "")
+    if t.get("auto_review"):
+        return "aiflow запускает ревью"
     if session_state == "working":
         return "исполнитель: rebase, тесты или правки"
     return None
@@ -227,6 +229,9 @@ DEFAULT_CONFIG = {
     "max_rounds": 5,
     "nit_rounds": 1,  # в скольких первых раундах nit блокирует одобрение; дальше одобряется, если blocking нет
     "reviewer_idle_minutes": 5,  # ревьюер opencode не присылает событий дольше этого — завис: остановить
+    # ветка PR не отстаёт от базовой — aiflow запускает ревью сам, не будя сессию исполнителя: ход «rebase,
+    # тесты, aiflow review» без rebase механический, а пробуждение модели стоит загрузки всего её контекста
+    "auto_review": True,
     "max_ci_fixes": 5,  # сколько раз подряд aiflow review возвращает ci_failed, прежде чем звать человека
     "review_concurrency": 2,  # сколько PR на ревью сразу; параллельно — только PR без общих файлов
     "merge_wait_minutes": 60,  # одобренный PR не смержился за это время — к человеку, очередь ревью идёт дальше
@@ -739,6 +744,21 @@ class Store:
         return cmds
 
 
+def spawn_review_process(store: "Store", t: dict, cwd: str) -> int | None:
+    """Запустить `aiflow review --pr N` отдельным процессом в рабочей копии задачи. → pid или None."""
+    log = store.runs / t["id"] / "auto-review.log"
+    try:
+        out = open(log, "ab")
+        flags = {"creationflags": 0x08000000 | 0x00000200} if os.name == "nt" else {"start_new_session": True}
+        env = dict(os.environ, PYTHONUTF8="1")
+        proc = subprocess.Popen([sys.executable, "-X", "utf8", str(Path(__file__).resolve()), "review", "--pr", str(t["pr"])],
+                                cwd=cwd, stdin=subprocess.DEVNULL, stdout=out, stderr=out, env=env, **flags)
+        out.close()
+        return proc.pid
+    except OSError:
+        return None
+
+
 def write_report(root: Path, tid: str, role: str, status: str, pr: int | None = None,
                  summary: str = "", details: str = "", complexity: str | None = None) -> dict:
     store = Store(root)
@@ -866,11 +886,18 @@ class Claude:
         out = (p.stdout or "") + (p.stderr or "")
         return (self._short_id(out) if p.returncode == 0 else None), out.strip()
 
-    def resume(self, session_id: str, prompt: str, mode=None, cwd: str | None = None) -> tuple[str | None, str]:
-        """cwd — папка сессии: --resume работает там, откуда вызван, а не там, где сессия жила."""
+    def resume(self, session_id: str, prompt: str, mode=None, cwd: str | None = None, model=None,
+               effort=None) -> tuple[str | None, str]:
+        """cwd — папка сессии: --resume работает там, откуда вызван, а не там, где сессия жила.
+        model и effort — те же, с которыми сессия работала: без них продолженная сессия берёт модель по
+        умолчанию. Это и не та модель, и полная перезапись кэша диалога — кэш у каждой модели свой."""
         cmd = [self.bin, "--resume", session_id, "--bg"]
         if mode:
             cmd += ["--permission-mode", mode]
+        if model:
+            cmd += ["--model", model]
+        if effort:
+            cmd += ["--effort", effort]
         where = Path(cwd) if cwd and Path(cwd).is_dir() else self.root
         p = run(cmd + [prompt], cwd=where, timeout=180, env=self.env)
         out = (p.stdout or "") + (p.stderr or "")
@@ -960,6 +987,16 @@ class GH:
 
     def forget(self, n: int) -> None:
         self._prs.pop(int(n), None)
+
+    def behind(self, base: str, head: str) -> int | None:
+        """На сколько коммитов head отстаёт от base; None — узнать не удалось."""
+        if self._slug is None:
+            self._slug = gh_repo(self.root)
+        p = self.call("api", f"repos/{self._slug}/compare/{base}...{head}", "--jq", ".behind_by")
+        try:
+            return int((p.stdout or "").strip()) if p.returncode == 0 else None
+        except ValueError:
+            return None
 
     def pr_files(self, n: int) -> set[str] | None:
         """Файлы, изменённые в PR; None — узнать не удалось."""
@@ -1374,6 +1411,18 @@ def review_prompt(t: dict, cfg: dict) -> str:
     )
 
 
+def review_result_prompt(store: "Store", t: dict, cfg: dict, status: str) -> str:
+    """Ревью запустил сам aiflow, и оно требует работы модели: исправлений, rebase, ответа человеку."""
+    where = (f"по разделу «Ход 2: ревью» инструкций исполнителя ({WORKER_MD}; прочитай, если ещё не читал)"
+             if t.get("self_executed") else "по таблице статусов из твоих инструкций («Ход 2: ревью»)")
+    return (
+        f"aiflow уже запустил ревью PR #{t['pr']} (задача {t['id']}) без тебя: ветка не отставала от "
+        f"{cfg['base_branch']}. Результат — статус {status}, подробности в файле {store.runs / t['id'] / 'review.json'} "
+        f"(прочитай его). Действуй {where}: сделай, что требует этот статус, затем сам запускай "
+        f"aiflow review --pr {t['pr']} и продолжай до итогового статуса."
+    )
+
+
 def ci_fix_prompt(t: dict, failed: list[str]) -> str:
     return (
         f"PR #{t['pr']} одобрен, но после этого упали проверки CI: {', '.join(failed) or 'см. gh pr checks'}. "
@@ -1411,8 +1460,9 @@ def resume_prompt(t: dict, state: str, why: str, base: str) -> str:
 # ---------------------------------------------------------------- dispatcher
 
 class Dispatcher:
-    def __init__(self, store: Store, claude=None, gh=None):
-        """claude и gh можно подменить (тесты): по умолчанию — настоящие CLI."""
+    def __init__(self, store: Store, claude=None, gh=None, spawn_review=None):
+        """claude, gh и запуск фонового ревью можно подменить (тесты): по умолчанию — настоящие."""
+        self.spawn_review = spawn_review or spawn_review_process
         self.store = store
         self.root = store.root
         self.claude = claude or Claude(self.root)
@@ -1641,11 +1691,15 @@ class Dispatcher:
             self.store.log(t["id"], {"launch_failed": out[-800:]})
             self.emit(t, "error", f"{t['id']}: не удалось запустить {role}: {out[-200:]}", key=f"launchfail:{role}:{out[-60:]}")
             return False
-        self.adopt(t, role, sid, name)
+        self.adopt(t, role, sid, name, model, effort)
         return True
 
-    def adopt(self, t: dict, role: str, sid: str, name: str) -> None:
+    def adopt(self, t: dict, role: str, sid: str, name: str, model=None, effort=None) -> None:
         entry = {"id": sid, "name": name, "started_at": iso(), "session_id": None}
+        if model:
+            entry["model"] = model
+        if effort:
+            entry["effort"] = effort
         t.setdefault("sessions", {}).setdefault(role, []).append(entry)
         t.pop("launching", None)
         self.store.log(t["id"], {"launched": entry, "role": role})
@@ -1658,9 +1712,11 @@ class Dispatcher:
         if not sid_full:
             return False
         cwd = entry.get("cwd") or (self.sess(entry) or {}).get("cwd") if entry else None
-        new_id, out = self.claude.resume(sid_full, prompt, mode=self.cfg.get("permission_mode"), cwd=cwd)
+        model, effort = self.session_model(t, role, entry)
+        new_id, out = self.claude.resume(sid_full, prompt, mode=self.cfg.get("permission_mode"), cwd=cwd,
+                                         model=model, effort=effort)
         if new_id and new_id != entry["id"]:
-            self.adopt(t, role, new_id, entry.get("name", f"{role}: {t['id']}"))
+            self.adopt(t, role, new_id, entry.get("name", f"{role}: {t['id']}"), model, effort)
             if cwd:
                 self.cur(t, role)["cwd"] = cwd
         elif not new_id:
@@ -1669,13 +1725,27 @@ class Dispatcher:
         self.store.log(t["id"], {"woke": role})
         return True
 
+    def session_model(self, t: dict, role: str, entry: dict) -> tuple:
+        """Модель и effort, с которыми сессия была запущена. У записей старых версий их нет — тогда
+        по настройкам: сессию планировщика, который сделал задачу сам и ведёт её ревью, запускали как
+        планировщика."""
+        if entry.get("model"):
+            return entry["model"], entry.get("effort")
+        as_planner = role == "planner" or str(entry.get("name") or "").startswith("planner:")
+        if as_planner:
+            ask, talk = t.get("kind") == "ask", t.get("kind") in TALK_KINDS
+            return planner_choice(self.cfg, t, (
+                self.cfg.get("ask_model" if ask else "discuss_model") or ("sonnet" if ask else "opus"),
+                self.cfg.get("ask_effort" if ask else "discuss_effort") or None) if talk else None)
+        return worker_choice(self.cfg, t)
+
     def resolve_launching(self, t: dict) -> None:
         info = t.get("launching")
         if not info:
             return
         for sid, s in self.sessions.items():
             if s.get("name") == info.get("name"):
-                self.adopt(t, info["role"], sid, info["name"])
+                self.adopt(t, info["role"], sid, info["name"], *self.session_model(t, info["role"], {}))
                 return
         if age_minutes(info.get("at")) > 5:
             t.pop("launching", None)
@@ -2136,6 +2206,8 @@ class Dispatcher:
             self.emit(t, "cancelled", f"{t['id']}: PR #{t['pr']} закрыт, задача снята", key="cancelled")
             return
         labels = {lb.get("name") for lb in pr.get("labels") or []}
+        if self.watch_auto_review(t):
+            return
         rep = self.new_report(t, "worker")
         if rep:
             st = rep.get("status")
@@ -2290,6 +2362,7 @@ class Dispatcher:
         t.pop("limit_hits", None)
         t.pop("approved_sha", None)
         t.pop("approved_at", None)
+        t.pop("auto_review", None)
         if t.pop("size_hold", None):
             t["size_ok"] = True  # человек видел размер изменения и велел продолжать
         # Сначала — та же сессия с её контекстом и рабочим каталогом, в той же стадии.
@@ -2458,18 +2531,74 @@ class Dispatcher:
             if self.sstate(self.cur(t, "worker")) == "working" or not self.review_free(t, locks, tuple(skipped)):
                 skipped.append(t)  # сессия ещё не закончила ход либо PR пересекается с идущим ревью
                 continue
-            woke = self.wake(t, "worker", review_prompt(t, self.cfg))
-            if not woke:
-                model, effort = worker_choice(self.cfg, t)
-                woke = self.launch(t, "worker", review_prompt(t, self.cfg) + "\n\nКонтекст задачи: "
-                                   + worker_prompt(self.store, t, self.cfg), model=model, effort=effort)
+            woke = self.start_auto_review(t) or self.wake_for_review(t, review_prompt(t, self.cfg))
             if woke:
                 locks.append(t["id"])
-                self.touch(t, "worker")
+                if not t.get("auto_review"):
+                    self.touch(t, "worker")
                 self.set_state(t, "in_review")
             else:
                 skipped.append(t)
             self.store.save_task(t)
+
+    def wake_for_review(self, t: dict, prompt: str) -> bool:
+        """Разбудить исполнителя на ревью; не вышло — запустить нового с контекстом задачи."""
+        if self.wake(t, "worker", prompt):
+            return True
+        model, effort = worker_choice(self.cfg, t)
+        return self.launch(t, "worker", prompt + "\n\nКонтекст задачи: " + worker_prompt(self.store, t, self.cfg),
+                           model=model, effort=effort)
+
+    def start_auto_review(self, t: dict) -> bool:
+        """Запустить aiflow review самому, не будя модель. Только когда ветка PR не отстаёт от базовой:
+        тогда rebase и прогон тестов перед ревью не нужны (CI их и так гоняет), и ход исполнителя сводится
+        к одной команде. Отстаёт или не удалось узнать — будим исполнителя, как раньше."""
+        if not self.cfg.get("auto_review", True):
+            return False
+        e = self.cur(t, "worker")
+        cwd = (e or {}).get("cwd") or (self.sess(e) or {}).get("cwd")
+        if not cwd or not Path(cwd).is_dir():
+            return False  # ревью читает код из рабочей копии задачи
+        try:
+            head = self.gh.pr(t["pr"], "headRefOid").get("headRefOid")
+        except AiflowError:
+            return False
+        if not head or self.gh.behind(self.cfg["base_branch"], head) != 0:
+            return False
+        pid = self.spawn_review(self.store, t, cwd)
+        if not pid:
+            return False
+        t["auto_review"] = {"pid": pid, "at": iso(), "head": head}
+        self.store.log(t["id"], {"auto_review": t["auto_review"]})
+        return True
+
+    def watch_auto_review(self, t: dict) -> bool:
+        """Ревью, запущенное самим aiflow. True — оно ещё идёт или его итог только что разобран."""
+        info = t.get("auto_review")
+        if not info:
+            return False
+        rv = self.store.review(t["id"]) or {}
+        finished = after(rv.get("at"), info.get("at")) or (rv.get("at") == info.get("at") and rv.get("status"))
+        if not finished:
+            if owner_alive(info) or age_minutes(info.get("at")) < 1:
+                return True  # идёт: сессия исполнителя при этом простаивает, и это нормально
+            t.pop("auto_review", None)  # процесс исчез без результата — пусть ревью ведёт исполнитель
+            self.store.log(t["id"], {"auto_review_lost": info})
+            if not self.wake_for_review(t, review_prompt(t, self.cfg)):
+                self.to_human(t, "ревью не запустилось, а исполнителя не удалось разбудить", "session")
+            else:
+                self.touch(t, "worker")
+            return True
+        t.pop("auto_review", None)
+        status = rv.get("status")
+        if status in ("changes_requested", "ci_failed", "merge_conflict", "human_input"):
+            # нужна работа модели: будим исполнителя с готовым результатом, дальше цикл ведёт он
+            if self.wake_for_review(t, review_result_prompt(self.store, t, self.cfg, status)):
+                self.touch(t, "worker")
+            else:
+                self.to_human(t, f"ревью: {status}, а исполнителя не удалось разбудить", "session")
+            return True
+        return False  # итоговые статусы пришли отчётом — их разберёт обычная ветка
 
     def collect_usage(self, tasks: list[dict]) -> None:
         for t in tasks:

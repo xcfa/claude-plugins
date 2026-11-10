@@ -49,13 +49,13 @@ class FakeClaude:
         self.launched.append({"agent": agent, "name": name, "prompt": prompt, "sid": sid, **kw})
         return sid, ""
 
-    def resume(self, session_id, prompt, mode=None, cwd=None):
+    def resume(self, session_id, prompt, mode=None, cwd=None, model=None, effort=None):
         if self.fail_resume:
             return None, "resume failed"
         for sid, s in self.sessions.items():
             if s["sessionId"] == session_id:
                 s["state"] = "working"
-                self.resumed.append({"sid": sid, "prompt": prompt})
+                self.resumed.append({"sid": sid, "prompt": prompt, "model": model, "effort": effort})
                 return sid, ""
         return None, "no such session"
 
@@ -82,6 +82,7 @@ class FakeGH:
         self.push_run: dict | None = None
         self.calls: list[tuple] = []
         self.down = False  # GitHub не отвечает
+        self.behind_by: int | None = None  # на сколько ветки PR отстают от базовой; None — неизвестно
 
     def add_pr(self, n: int, tid: str, *, body: str = PLAN, draft: bool = False, state: str = "OPEN",
                branch: str | None = None, files=()) -> dict:
@@ -103,6 +104,9 @@ class FakeGH:
 
     def pr_files(self, n):
         return self.files.get(int(n))
+
+    def behind(self, base, head):
+        return self.behind_by
 
     def add_label(self, n, label):
         self.prs[int(n)]["labels"].append({"name": label})
@@ -144,6 +148,8 @@ class ProjectCase(unittest.TestCase):
         aiflow._BASE_SEEN[(str(self.root), "master")] = (time.time(), True)  # без git ls-remote
         self.claude = FakeClaude()
         self.gh = FakeGH()
+        self.spawned: list[dict] = []  # запуски aiflow review самим aiflow
+        self.spawn_pid: int | None = os.getpid()
 
     def _restore_env(self):
         for k, v in self._env.items():
@@ -160,8 +166,12 @@ class ProjectCase(unittest.TestCase):
         self.store.save_task(t)
         return t
 
+    def spawn(self, store, t, cwd):
+        self.spawned.append({"task": t["id"], "pr": t["pr"], "cwd": cwd})
+        return self.spawn_pid
+
     def tick(self) -> list[dict]:
-        return aiflow.Dispatcher(self.store, self.claude, self.gh).tick()
+        return aiflow.Dispatcher(self.store, self.claude, self.gh, spawn_review=self.spawn).tick()
 
     def report(self, tid: str, role: str, status: str, pr: int | None = None, **kw) -> None:
         aiflow.write_report(self.root, tid, role, status, pr, kw.get("summary", ""), kw.get("details", ""),

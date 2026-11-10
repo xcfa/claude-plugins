@@ -858,6 +858,166 @@ class ReviewerUsage(ProjectCase):
         self.assertEqual(task["activity"], "ревьюер opencode, раунд 2/5: читает Import.cs, шаг 7, 66k токенов")
 
 
+class SessionModel(ProjectCase):
+    def test_woken_session_keeps_the_model_it_was_started_with(self):
+        self.add("a")
+        self.tick()
+        entry = self.task("a")["sessions"]["planner"][-1]
+        self.assertEqual((entry["model"], entry["effort"]), ("opus", "medium"))
+        self.claude.finish_turn(self.sid("a", "planner"), minutes_ago=5)
+        self.tick()  # напоминание об отчёте — это пробуждение
+        self.assertEqual((self.claude.resumed[-1]["model"], self.claude.resumed[-1]["effort"]), ("opus", "medium"))
+
+    def test_planner_that_did_the_task_reviews_on_its_own_model(self):
+        """Иначе сессия Opus просыпается на ревью под моделью по умолчанию и заново кэширует весь диалог."""
+        self.add("a")
+        self.tick()
+        self.gh.add_pr(7, "a", body="Что сделано")
+        self.report("a", "planner", "ready_for_review", 7)
+        self.claude.finish_turn(self.sid("a", "planner"))
+        self.tick()
+        self.assertEqual(self.state("a"), "in_review")
+        self.assertEqual(self.claude.resumed[-1]["model"], "opus")
+
+    def test_named_model_survives_a_wake(self):
+        self.add("a", planner_model="fable", planner_effort="high")
+        self.tick()
+        self.claude.finish_turn(self.sid("a", "planner"), minutes_ago=5)
+        self.tick()
+        self.assertEqual((self.claude.resumed[-1]["model"], self.claude.resumed[-1]["effort"]), ("fable", "high"))
+
+    def test_sessions_recorded_before_this_version_get_the_configured_model(self):
+        self.to_ready("a", 1, files=["a.py"])  # запись исполнителя без поля model
+        self.tick()
+        self.assertEqual(self.claude.resumed[-1]["model"], "sonnet")
+        self.to_ready("b", 2, files=["b.py"])
+        t = self.task("b")
+        t["self_executed"] = True
+        t["sessions"]["worker"][-1]["name"] = "planner: b"  # сессия планировщика, который сделал задачу сам
+        self.store.save_task(t)
+        self.tick()
+        self.assertEqual(self.claude.resumed[-1]["model"], "opus")
+
+
+class AutoReview(ProjectCase):
+    """Ревью без пробуждения модели, когда ветка PR не отстаёт от базовой."""
+
+    def ready(self, tid: str = "a", pr: int = 1) -> None:
+        self.to_ready(tid, pr, files=[f"{tid}.py"])
+        t = self.task(tid)
+        t["sessions"]["worker"][-1]["cwd"] = str(self.tmp)  # рабочая копия задачи
+        self.store.save_task(t)
+
+    def finish_review(self, status: str, tid: str = "a") -> None:
+        aiflow.write_json(self.root / "runs" / tid / "review.json", {"at": ago(-0.05), "pr": 1, "status": status})
+
+    def test_up_to_date_branch_is_reviewed_without_waking_the_session(self):
+        self.ready()
+        self.gh.behind_by = 0
+        self.tick()
+        self.assertEqual(self.state("a"), "in_review")
+        self.assertEqual(self.spawned, [{"task": "a", "pr": 1, "cwd": str(self.tmp)}])
+        self.assertEqual(self.claude.resumed, [])
+        self.assertEqual(self.store.queue()["review_locks"], ["a"])
+        row = aiflow.build_state(self.store, self.claude.agents())["tasks"][0]
+        self.assertEqual(row["activity"], "aiflow запускает ревью")
+
+    def test_idle_session_during_auto_review_is_not_a_problem(self):
+        self.ready()
+        self.gh.behind_by = 0
+        self.tick()
+        self.age("a", 30)  # сессия давно «закончила ход» — так и должно быть, ревью ведёт aiflow
+        self.patch("a", auto_review={**self.task("a")["auto_review"], "at": aiflow.iso()})
+        with mock.patch.object(aiflow, "process_start", lambda pid: None):
+            self.tick()
+        self.assertEqual(self.state("a"), "in_review")
+        self.assertEqual(self.claude.resumed, [])
+
+    def test_approval_arrives_as_usual(self):
+        self.ready()
+        self.gh.behind_by = 0
+        self.tick()
+        self.finish_review("approved")
+        self.report("a", "worker", "approved", 1)
+        self.tick()
+        t = self.task("a")
+        self.assertEqual(t["approved_sha"], "sha1")
+        self.assertNotIn("auto_review", t)
+        self.assertEqual(self.claude.resumed, [])
+        self.gh.prs[1]["state"] = "MERGED"
+        self.tick()
+        self.assertEqual(self.state("a"), "merged")
+
+    def test_findings_wake_the_worker_with_the_result(self):
+        self.ready()
+        self.gh.behind_by = 0
+        self.tick()
+        self.finish_review("changes_requested")
+        self.tick()
+        self.assertEqual(self.state("a"), "in_review")
+        self.assertEqual(len(self.claude.resumed), 1)
+        prompt = self.claude.resumed[0]["prompt"]
+        self.assertIn("changes_requested", prompt)
+        self.assertIn("review.json", prompt)
+        self.assertNotIn("auto_review", self.task("a"))
+        self.tick()
+        self.assertEqual(len(self.claude.resumed), 1)  # дальше цикл ведёт исполнитель
+
+    def test_terminal_failure_goes_to_human_without_a_wake(self):
+        self.ready()
+        self.gh.behind_by = 0
+        self.tick()
+        self.finish_review("error")
+        self.report("a", "worker", "error", 1, summary="ревьюер не вернул валидный JSON")
+        self.tick()
+        self.assertEqual(self.state("a"), "needs_human")
+        self.assertEqual(self.claude.resumed, [])
+
+    def test_branch_behind_base_wakes_the_worker_for_a_rebase(self):
+        self.ready()
+        self.gh.behind_by = 2
+        self.tick()
+        self.assertEqual(self.spawned, [])
+        self.assertIn("git rebase", self.claude.resumed[0]["prompt"])
+        self.assertEqual(self.state("a"), "in_review")
+
+    def test_unknown_or_disabled_falls_back_to_the_worker(self):
+        self.ready()
+        self.gh.behind_by = None  # GitHub не сказал, отстаёт ли ветка
+        self.tick()
+        self.assertEqual((self.spawned, len(self.claude.resumed)), ([], 1))
+        aiflow.write_json(self.root / "runs" / "config.json", {"auto_review": False})
+        self.ready("b", 2)
+        self.gh.behind_by = 0
+        self.tick()
+        self.assertEqual(self.spawned, [])
+        self.assertEqual(self.state("b"), "in_review")
+
+    def test_review_process_that_died_hands_over_to_the_worker(self):
+        self.ready()
+        self.gh.behind_by = 0
+        self.spawn_pid = 0x7FFFFFF0  # такого процесса нет
+        self.tick()
+        self.patch("a", auto_review={**self.task("a")["auto_review"], "at": ago(3)})
+        self.tick()
+        self.assertEqual(len(self.claude.resumed), 1)
+        self.assertNotIn("auto_review", self.task("a"))
+        self.assertEqual(self.state("a"), "in_review")
+
+    def test_retry_forgets_a_stale_auto_review(self):
+        self.ready()
+        self.gh.behind_by = 0
+        self.tick()
+        self.finish_review("error")
+        self.report("a", "worker", "error", 1, summary="сбой")
+        self.tick()
+        self.gh.behind_by = 3
+        self.store.command({"cmd": "retry", "id": "a"})
+        self.tick()
+        self.assertNotIn("auto_review", self.task("a"))
+        self.assertEqual(self.state("a"), "in_review")
+
+
 class Models(ProjectCase):
     def test_model_named_at_intake_is_used_for_the_planner(self):
         t = aiflow.normalize_task({"id": "a", "text": "t", "planner_model": "fable", "planner_effort": "high"})
