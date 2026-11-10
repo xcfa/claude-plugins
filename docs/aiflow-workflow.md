@@ -165,7 +165,7 @@ stateDiagram-v2
 | 1b | Дифф тот же, что ревьюер уже одобрил (сверка по `git patch-id`, например после rebase) | шаги 2 и 6–9 пропускаются, остальные проверки и мерж идут как обычно |
 | 2 | Число AI-ревью с маркером `<!-- ai-review -->` меньше `max_rounds` | метка `needs-human`, `limit_reached` |
 | 3 | Нет комментариев человека с `<!-- human -->` без ответа | `human_input`, раунд не расходуется; один и тот же комментарий без ответа три раза подряд — `error` |
-| 4 | CI: ждёт появления проверок на свежем коммите (`ci_appear_seconds`) и их завершения. Проверок нет вовсе — это не «прошло»: при `require_ci` (`auto` — если в репозитории есть workflow) это `error` | `ci_failed` с именами job и хвостом логов, раунд не расходуется; `max_ci_fixes` раз подряд — `limit_reached` |
+| 4 | CI: ждёт появления проверок на свежем коммите (`ci_appear_minutes`, по умолчанию 10: GitHub создаёт запуск не сразу) и их завершения. Проверок нет вовсе — это не «прошло»: при `require_ci` (`auto` — если в репозитории есть workflow) это `no_ci` → «нужен человек» | `ci_failed` с именами job и хвостом логов, раунд не расходуется; `max_ci_fixes` раз подряд — `limit_reached` |
 | 5 | Изменённые файлы не попадают в защищённые пути (кроме `allowed_protected_paths`) | blocking-ревью без вызова модели |
 | 5a | Задача без плана: изменение не больше `direct_max_files` файлов и `direct_max_lines` строк | `too_large` → «нужен человек»; «Повторить» разрешает это изменение |
 | 6 | Задание ревьюеру через stdin: номер PR, история раундов с тредами, дополнения, открытые треды; для задачи без плана — её текст и указания планировщика (это контракт вместо плана). План (`gh pr view`) и дифф (`gh pr diff`) ревьюер читает сам — ему открыты только эти команды и git на чтение | — |
@@ -185,7 +185,7 @@ stateDiagram-v2
 | `paused` | Очередь на паузе: закончить ход, разбудят позже |
 | `human_input` | Учесть комментарий человека, ответить, снова ревью |
 | `approved` | Готово |
-| `limit_reached`, `already_closed`, `too_large`, `error` | Остановиться, кратко описать открытые замечания и причину |
+| `limit_reached`, `already_closed`, `too_large`, `no_ci`, `error` | Остановиться, кратко описать открытые замечания и причину |
 
 **Правила ревьюера:** blocking — только ошибки, расхождения с планом и критериями приёмки, безопасность, потеря данных, сломанные контракты, отсутствие поведенческих тестов на новую логику; nit исправляется в первом раунде, дальше мерж не блокирует (`nit_rounds`); открытые треды прошлых раундов ревьюер закрывает ответом «Accepted: …» или оставляет открытыми с «Not accepted: …»; решения из «Решений» не оспариваются, если не противоречат плану и не вводят ошибку; отклонённое с аргументами замечание не поднимается повторно без новых доводов; тесты должны проверять поведение, а не реализацию; изменения защищённых путей вне плана — всегда blocking; соответствие UI макету не проверяется.
 
@@ -261,7 +261,7 @@ claude plugin install aiflow@aiflow-local
 7. Один раз открыть `claude` в репозитории интерактивно и принять доверие к папке.
 8. `! aiflow doctor`.
 
-**Основные настройки `runs/config.json`:** `concurrency` (2), `tick_seconds` (45), `base_branch`, `permission_mode` (`auto` — безопасные действия одобряет классификатор Claude Code, запреты `deny` из `.claude/settings.json` действуют; `acceptEdits` — спрашивать о каждой команде вне `allow`), `planner_model` и `planner_effort` (Opus на `medium`; из старого словаря по сложности берётся значение для `complex`), `worker_model` и `worker_effort` (строкой или по сложности), `worker_opus_effort` (`medium`), `reviewer_model`, `max_rounds` (5), `nit_rounds` (1), `max_ci_fixes` (5), `review_concurrency` (2; `1` — ревью строго по одному), `merge_wait_minutes` (60), `require_ci` (`auto`), `ci_appear_seconds` (90), `direct_max_files` (6) и `direct_max_lines` (300), `auto_resume` (1), `notify` (`important` — оркестратору только события, которые ждут вас; `all`; `none`), `desktop_notify` (`true` — те же важные события системными уведомлениями), `ci_timeout_minutes`, `rate_limit_pause_minutes`, `watch_integration` (следить за CI базовой ветки после мержа), `protected_paths`.
+**Основные настройки `runs/config.json`:** `concurrency` (2), `tick_seconds` (45), `base_branch`, `permission_mode` (`auto` — безопасные действия одобряет классификатор Claude Code, запреты `deny` из `.claude/settings.json` действуют; `acceptEdits` — спрашивать о каждой команде вне `allow`), `planner_model` и `planner_effort` (Opus на `medium`; из старого словаря по сложности берётся значение для `complex`), `worker_model` и `worker_effort` (строкой или по сложности), `worker_opus_effort` (`medium`), `reviewer_model`, `max_rounds` (5), `nit_rounds` (1), `max_ci_fixes` (5), `review_concurrency` (2; `1` — ревью строго по одному), `merge_wait_minutes` (60), `require_ci` (`auto`), `ci_appear_minutes` (10), `direct_max_files` (6) и `direct_max_lines` (300), `auto_resume` (1), `notify` (`important` — оркестратору только события, которые ждут вас; `all`; `none`), `desktop_notify` (`true` — те же важные события системными уведомлениями), `ci_timeout_minutes`, `rate_limit_pause_minutes`, `watch_integration` (следить за CI базовой ветки после мержа), `protected_paths`.
 
 ## 12. Ваша работа день за днём
 

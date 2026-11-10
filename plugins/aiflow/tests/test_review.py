@@ -160,11 +160,12 @@ class ReviewMain(ProjectCase):
     def test_no_checks_is_not_a_pass_when_ci_is_required(self):
         (self.root / ".github" / "workflows").mkdir(parents=True)
         (self.root / ".github" / "workflows" / "ci.yml").write_text("name: CI\n", encoding="utf-8")
-        aiflow.write_json(self.root / "runs" / "config.json", {"ci_appear_seconds": 0.2})
+        aiflow.write_json(self.root / "runs" / "config.json", {"ci_appear_minutes": 0.005})
         self.r.checks = [[]]
         res = self.run_review()
-        self.assertEqual(res["status"], "error")
-        self.assertIn("нет ни одной проверки CI", res["message"])
+        self.assertEqual(res["status"], "no_ci")
+        self.assertIn("ни одной проверки CI", res["message"])
+        self.assertEqual(self.last_report()["status"], "no_ci")
         self.assertEqual(self.reviewer_calls, [])
         self.assertEqual(self.r.merges, [])
 
@@ -173,6 +174,11 @@ class ReviewMain(ProjectCase):
         (self.root / ".github" / "workflows" / "ci.yml").write_text("name: CI\n", encoding="utf-8")
         self.r.checks = [[], [], [{"name": "build", "bucket": "pass"}]]
         self.assertEqual(self.run_review()["status"], "approved")
+
+    def test_default_wait_covers_a_slow_github(self):
+        """GitHub создавал запуск CI через 3,5 минуты после push: ждать по умолчанию надо заметно дольше."""
+        self.assertGreaterEqual(aiflow.DEFAULT_CONFIG["ci_appear_minutes"], 8)
+        self.assertNotIn("ci_appear_seconds", aiflow.DEFAULT_CONFIG)
 
     def test_repository_without_ci_still_works(self):
         self.r.checks = [[]]

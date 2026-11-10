@@ -299,6 +299,14 @@ class InReview(ProjectCase):
         self.assertTrue(self.task("a")["size_ok"])
         self.assertEqual(self.state("a"), "in_review")
 
+    def test_missing_ci_gets_its_own_advice(self):
+        self.start()
+        self.report("a", "worker", "no_ci", 1, summary="за 10 мин после push на PR не появилось ни одной проверки CI")
+        self.tick()
+        self.assertEqual(self.state("a"), "needs_human")
+        self.assertIn("Actions", self.task("a")["human_action"])
+        self.assertNotIn("opencode", self.task("a")["human_action"])
+
     def test_review_turn_without_result_is_reminded_first(self):
         self.start()
         self.claude.finish_turn("w-a", minutes_ago=10)

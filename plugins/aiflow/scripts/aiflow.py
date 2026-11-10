@@ -82,9 +82,12 @@ WHAT_TO_DO = {
     "closed": "PR уже закрыт. Если задача не нужна — «Снять»; если нужна — откройте PR заново и «Повторить».",
     "stall": "Сессия числится занятой, но ревью давно не двигается: скорее всего, зависла её команда. «Открыть "
              "сессию», остановите команду (Esc) и напишите «продолжай»; либо «Повторить».",
+    "noci": "Проверки CI на PR так и не появились. Посмотрите вкладку Actions: работает ли раннер и запускается ли "
+            "workflow на pull_request для этих файлов. Когда проверки появятся — «Повторить». Если CI для этого "
+            "репозитория не нужен — require_ci: false в runs/config.json.",
     "paths": "Задаче нужен защищённый путь: «Разрешить пути…», либо попросите убрать эту правку комментарием в PR.",
 }
-REVIEW_ACTIONS = {"error": "tool", "limit_reached": "rounds", "too_large": "size", "already_closed": "closed",
+REVIEW_ACTIONS = {"error": "tool", "no_ci": "noci", "limit_reached": "rounds", "too_large": "size", "already_closed": "closed",
                   "blocked": "asks"}
 
 
@@ -149,7 +152,9 @@ DEFAULT_CONFIG = {
     "review_concurrency": 2,  # сколько PR на ревью сразу; параллельно — только PR без общих файлов
     "merge_wait_minutes": 60,  # одобренный PR не смержился за это время — к человеку, очередь ревью идёт дальше
     "require_ci": "auto",  # auto — проверки CI обязательны, если в репозитории есть workflow; true; false
-    "ci_appear_seconds": 90,  # сколько ждать появления проверок на свежем коммите
+    # сколько ждать появления проверок на свежем коммите: GitHub создаёт запуск не сразу, под нагрузкой —
+    # через несколько минут после push
+    "ci_appear_minutes": 10,
     "direct_max_files": 6,  # предел изменения для задачи без плана; больше — решает человек
     "direct_max_lines": 300,
     "notify": "important",
@@ -2033,7 +2038,7 @@ class Dispatcher:
             elif st == "too_large":
                 t["size_hold"] = True  # «Повторить» от человека снимет предел для этой задачи
                 return self.to_human(t, rep.get("summary") or "изменение больше предела для задачи без плана", "size")
-            elif st in ("limit_reached", "error", "already_closed", "blocked"):
+            elif st in ("limit_reached", "error", "no_ci", "already_closed", "blocked"):
                 action = "ci" if st == "limit_reached" and "CI" in (rep.get("summary") or "") else REVIEW_ACTIONS[st]
                 return self.to_human(t, rep.get("summary") or f"ревью: {st}", action)
         if self.cfg["labels"]["needs_human"] in labels:

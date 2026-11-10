@@ -35,7 +35,7 @@ PARSE_ATTEMPTS = 3
 OPENCODE_TIMEOUT = 15 * 60
 TERMINAL = {"approved", "limit_reached", "already_closed", "error"}
 # статусы, о которых узнаёт очередь (runs/<task>/report.json): итоговые и те, где решает не worker
-REPORTED = TERMINAL | {"paused", "too_large"}
+REPORTED = TERMINAL | {"paused", "too_large", "no_ci"}
 HUMAN_INPUT_REPEATS = 3  # столько раз подряд возвращаем один и тот же комментарий человека
 
 CTX: dict = {"root": None, "task": None, "pr": None, "round": None}
@@ -516,15 +516,16 @@ def read_checks(r: Runner, pr: int) -> list[dict]:
 
 def wait_checks(r: Runner, pr: int, timeout_min: int, required: bool = False, appear_seconds: float = 0,
                 sleep=None) -> tuple[str, list[dict]]:
-    """Дождаться проверок CI. Сразу после push их ещё может не быть: если проверки обязательны,
-    ждём их появления appear_seconds, и «проверок нет» — не «прошло», а отдельный исход none."""
+    """Дождаться проверок CI. После push их какое-то время нет: GitHub создаёт запуск не сразу, под
+    нагрузкой — через несколько минут. Если проверки обязательны, ждём их появления appear_seconds,
+    и «проверок нет» — не «прошло», а отдельный исход none."""
     deadline = time.time() + appear_seconds
     while True:
         r.gh_run("pr", "checks", str(pr), "--watch", "--interval", "30", check=False, timeout=timeout_min * 60 + 60)
         checks = read_checks(r, pr)
         if checks or not required or time.time() >= deadline:
             break
-        (sleep or time.sleep)(10)
+        (sleep or time.sleep)(15)
     if not checks:
         return "none", []
     if any(c.get("bucket") == "pending" for c in checks):
@@ -731,12 +732,12 @@ def main(argv: list[str] | None = None) -> int:
 
         # CI до ревью: раунд не расходуется
         required = ci_required(cfg, r.cwd)
-        state, failed = wait_checks(r, args.pr, int(cfg["ci_timeout_minutes"]), required,
-                                    float(cfg.get("ci_appear_seconds") or 0))
+        appear = float(cfg.get("ci_appear_minutes", 10) or 0)
+        state, failed = wait_checks(r, args.pr, int(cfg["ci_timeout_minutes"]), required, appear * 60)
         if state == "none" and required:
             CTX["round"] = done
-            finish("error", 1, message="на PR нет ни одной проверки CI, а без неё мержить нельзя: настройте workflow "
-                                       "на pull_request или поставьте require_ci: false в runs/config.json")
+            finish("no_ci", 1, waited_minutes=appear,
+                   message=f"за {appear:g} мин после push на PR не появилось ни одной проверки CI, а без неё мержить нельзя")
         if state == "pending":
             CTX["round"] = done
             finish("error", 1, message=f"CI не завершился за {cfg['ci_timeout_minutes']} мин")
