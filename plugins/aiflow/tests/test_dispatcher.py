@@ -809,6 +809,74 @@ class ReviewerUsage(ProjectCase):
         self.assertEqual(task["activity"], "ревьюер opencode, раунд 2/5: читает Import.cs, шаг 7, 66k токенов")
 
 
+class Models(ProjectCase):
+    def test_model_named_at_intake_is_used_for_the_planner(self):
+        t = aiflow.normalize_task({"id": "a", "text": "t", "planner_model": "fable", "planner_effort": "high"})
+        self.store.save_task(t)
+        self.add("b")
+        self.tick()
+        by_name = {x["name"]: x for x in self.claude.launched}
+        self.assertEqual((by_name["planner: a"]["model"], by_name["planner: a"]["effort"]), ("fable", "high"))
+        self.assertEqual((by_name["planner: b"]["model"], by_name["planner: b"]["effort"]), ("opus", "medium"))
+
+    def test_model_can_be_set_for_a_queued_task(self):
+        self.store.command({"cmd": "pause"})
+        self.tick()
+        self.add("a")
+        now_set, notes = aiflow.set_models(self.store, "a", {"planner_model": "fable", "worker_model": "claude-opus-5-5",
+                                                             "worker_effort": "MAX"})
+        self.assertEqual(notes, [])
+        self.assertEqual(now_set["worker_effort"], "max")
+        self.store.command({"cmd": "resume"})
+        self.tick()
+        self.assertEqual(self.claude.launched[-1]["model"], "fable")
+        self.report("a", "planner", "delegate", summary="мелочь")
+        self.tick()
+        worker = self.claude.launched[-1]
+        self.assertEqual((worker["agent"], worker["model"], worker["effort"]), ("aiflow:worker", "claude-opus-5-5", "max"))
+
+    def test_setting_a_model_for_a_running_planner_warns(self):
+        self.add("a")
+        self.tick()
+        now_set, notes = aiflow.set_models(self.store, "a", {"planner_model": "fable", "worker_model": "opus"})
+        self.assertEqual(len(notes), 1)
+        self.assertIn("планировщик", notes[0])
+        self.assertEqual(self.task("a")["planner_model"], "fable")
+
+    def test_default_returns_the_project_setting(self):
+        self.add("a", planner_model="fable")
+        aiflow.set_models(self.store, "a", {"planner_model": "default"})
+        self.assertNotIn("planner_model", self.task("a"))
+        self.tick()
+        self.assertEqual(self.claude.launched[-1]["model"], "opus")
+
+    def test_question_and_discussion_use_the_named_model_too(self):
+        t = aiflow.normalize_task({"id": "q", "text": "где у нас экспорт?", "kind": "ask", "planner_model": "fable"})
+        self.store.save_task(t)
+        self.add("d", kind="discuss")
+        self.tick()
+        by_name = {x["name"]: x for x in self.claude.launched}
+        self.assertEqual(by_name["planner: q"]["model"], "fable")
+        self.assertEqual(by_name["planner: d"]["model"], "opus")  # discuss_model проекта
+
+    def test_bad_values_are_rejected(self):
+        with self.assertRaisesRegex(aiflow.AiflowError, "имя модели"):
+            aiflow.normalize_task({"id": "a", "text": "t", "planner_model": "fable; rm -rf"})
+        with self.assertRaisesRegex(aiflow.AiflowError, "effort"):
+            aiflow.normalize_task({"id": "a", "text": "t", "worker_effort": "huge"})
+        self.add("a")
+        with self.assertRaisesRegex(aiflow.AiflowError, "укажите"):
+            aiflow.set_models(self.store, "a", {})
+        self.patch("a", state="merged")
+        with self.assertRaisesRegex(aiflow.AiflowError, "завершена"):
+            aiflow.set_models(self.store, "a", {"planner_model": "fable"})
+        self.assertEqual(aiflow.check_model_field("worker_model", "claude-sonnet-5-5[1m]"), "claude-sonnet-5-5[1m]")
+
+    def test_models_are_visible_in_the_state(self):
+        self.add("a", planner_model="fable")
+        self.assertEqual(aiflow.build_state(self.store)["tasks"][0]["models"], {"planner_model": "fable"})
+
+
 class Coordinator(ProjectCase):
     def session(self, sid: str, name: str, state: str = "done", **extra) -> None:
         self.claude.sessions[sid] = {"id": sid, "name": name, "state": state, "sessionId": f"uuid-{sid}",

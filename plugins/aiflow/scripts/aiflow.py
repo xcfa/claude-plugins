@@ -152,6 +152,9 @@ def short_reason(text: str, limit: int = 220) -> str:
     line = next((x.strip() for x in str(text or "").splitlines() if x.strip()), "")
     return line if len(line) <= limit else line[:limit - 1].rstrip() + "…"
 
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+
 def by_complexity(value, cx: str):
     """Настройка модели/effort: словарь {"simple": …, "complex": …} или одно значение на все задачи."""
     if isinstance(value, dict):
@@ -159,11 +162,32 @@ def by_complexity(value, cx: str):
     return value or None
 
 
-def planner_choice(cfg: dict, t: dict) -> tuple:
-    """Модель и effort планировщика. Сложность до него не известна — её оценивает он сам,
-    поэтому из старого словаря {"simple": …, "complex": …} берётся значение для complex."""
-    return (t.get("planner_model") or by_complexity(cfg["planner_model"], "complex"),
-            by_complexity(cfg["planner_effort"], "complex"))
+# Имя модели для `claude --model`: псевдоним (fable, opus, sonnet, haiku) или полный id.
+MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-\[\]]{0,63}$")
+MODEL_FIELDS = ("planner_model", "planner_effort", "worker_model", "worker_effort")
+
+
+def check_model_field(field: str, value) -> str | None:
+    """Проверить значение настройки модели задачи; пустое и «default» — «как в настройках проекта»."""
+    v = str(value or "").strip()
+    if not v or v.lower() in ("default", "по умолчанию", "none"):
+        return None
+    if field.endswith("_effort"):
+        if v.lower() not in EFFORTS:
+            raise AiflowError(f"{field}: effort должен быть одним из {', '.join(EFFORTS)}")
+        return v.lower()
+    if not MODEL_NAME_RE.match(v):
+        raise AiflowError(f"{field}: {v!r} не похоже на имя модели (fable, opus, sonnet, haiku или полный id)")
+    return v
+
+
+def planner_choice(cfg: dict, t: dict, kind_default: tuple | None = None) -> tuple:
+    """Модель и effort планировщика: сначала заданные задаче, затем настройки проекта. Сложность до него
+    не известна — её оценивает он сам, поэтому из старого словаря {"simple": …, "complex": …} берётся
+    значение для complex. kind_default — настройки для вопроса или обсуждения (ask_*, discuss_*)."""
+    model, effort = kind_default or (by_complexity(cfg["planner_model"], "complex"),
+                                     by_complexity(cfg["planner_effort"], "complex"))
+    return t.get("planner_model") or model, t.get("planner_effort") or effort
 
 
 def is_direct(t: dict) -> bool:
@@ -179,8 +203,6 @@ def worker_choice(cfg: dict, t: dict) -> tuple:
     if not effort and "opus" in str(model or "").lower():
         effort = cfg.get("worker_opus_effort") or None
     return model, effort or by_complexity(cfg["worker_effort"], cx)
-
-EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 DEFAULT_CONFIG = {
     "concurrency": 2,
@@ -2338,9 +2360,10 @@ class Dispatcher:
                 # разговор ждёт человека, а не модель: слот concurrency не занимает
                 ask = t.get("kind") == "ask"
                 prompt = (ask_prompt if ask else discuss_prompt)(self.store, t, self.cfg) + launch_amendments(t)
-                ok = self.launch(t, "planner", prompt,
-                                 model=self.cfg.get("ask_model" if ask else "discuss_model") or ("sonnet" if ask else "opus"),
-                                 effort=self.cfg.get("ask_effort" if ask else "discuss_effort") or None)
+                model, effort = planner_choice(self.cfg, t, (
+                    self.cfg.get("ask_model" if ask else "discuss_model") or ("sonnet" if ask else "opus"),
+                    self.cfg.get("ask_effort" if ask else "discuss_effort") or None))
+                ok = self.launch(t, "planner", prompt, model=model, effort=effort)
                 if ok:
                     mark_delivered(t, "launch")
                     self.set_state(t, "discussing")
@@ -2562,6 +2585,7 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
             "action": t.get("human_action") if st == "needs_human" else None,
             "activity": review_activity(store, t, cur.get("state"), int(cfg["max_rounds"])),
             "ci": t.get("ci") if st in ("ready", "in_review") else None,
+            "models": {f: t[f] for f in MODEL_FIELDS if t.get(f)},
             "reviewer_session": next((r.get("session") for r in reversed(reviewer_runs(store, t["id"])) if r.get("session")), None),
             "depends_on": t.get("depends_on") or [], "state_at": t.get("state_at"),
             "launching": bool(t.get("launching")), "review_lock": t["id"] in (q.get("review_locks") or []),
@@ -2771,16 +2795,15 @@ def normalize_task(raw: dict) -> dict:
     text = str(raw.get("text") or "").strip()
     if not text:
         raise AiflowError(f"{tid}: пустой text")
-    effort = raw.get("worker_effort") or None
-    if effort is not None and effort not in EFFORTS:
-        raise AiflowError(f"{tid}: worker_effort должен быть одним из {', '.join(EFFORTS)}")
+    try:
+        models = {f: check_model_field(f, raw.get(f)) for f in MODEL_FIELDS}
+    except AiflowError as e:
+        raise AiflowError(f"{tid}: {e}") from None
     return {
         "id": tid, "title": str(raw.get("title") or tid).strip(), "text": text, "complexity": cx, "kind": kind,
         "depends_on": [str(d) for d in raw.get("depends_on") or []],
         "ui": raw.get("ui") or None,
-        "planner_model": raw.get("planner_model") or None,
-        "worker_model": raw.get("worker_model") or None,
-        "worker_effort": effort,
+        **models,
         "allowed_protected_paths": [],
         "state": "new", "pr": None, "sessions": {"planner": [], "worker": []},
         "usage": {}, "created_at": iso(), "state_at": iso(),
@@ -3074,6 +3097,52 @@ def cmd_amend(args, root: Path) -> int:
           + ("сессия вопроса или обсуждения" if t.get("state") in ("discussing", "answered") else
              "планировщик" if t.get("state") in ("new", "planning", "plan_review") and not t.get("plan_approved")
              else "исполнитель") + ".")
+    return 0
+
+
+def set_models(store: Store, tid: str, changes: dict) -> tuple[dict, list[str]]:
+    """Задать задаче модель и effort планировщика и исполнителя (None — вернуть настройки проекта).
+    Действует на сессии, которые ещё не запущены. → (итоговые настройки, предупреждения)."""
+    clean = {f: check_model_field(f, v) for f, v in changes.items() if f in MODEL_FIELDS}
+    if not clean:
+        raise AiflowError("укажите, что менять: --planner, --planner-effort, --worker или --worker-effort")
+    lock = FileLock(store.runs / "tick.lock", stale_minutes=15)
+    if not lock.acquire(wait_seconds=120):
+        raise AiflowError("очередь занята дольше 2 минут, повторите позже")
+    try:
+        t = store.task(tid)
+        if not t:
+            raise AiflowError(f"нет задачи {tid}")
+        if t.get("state") in TERMINAL:
+            raise AiflowError(f"задача {tid} уже завершена")
+        notes = []
+        started = {role: bool((t.get("sessions") or {}).get(role)) for role in ("planner", "worker")}
+        for field, value in clean.items():
+            role = field.split("_")[0]
+            if value is None:
+                t.pop(field, None)
+            else:
+                t[field] = value
+            if started[role] and not (role == "planner" and t.get("state") == "new"):
+                who = "планировщик" if role == "planner" else "исполнитель"
+                notes.append(f"{who} этой задачи уже запущен: новая настройка подействует только на следующую его сессию")
+        t.setdefault("history", []).append({"at": iso(), "from": t.get("state"), "to": t.get("state"),
+                                            "note": "модели: " + ", ".join(f"{f}={v or 'по умолчанию'}" for f, v in clean.items())})
+        store.save_task(t)
+        store.event("config", tid, f"{tid}: " + ", ".join(f"{f} = {v or 'по умолчанию'}" for f, v in clean.items()))
+        return {f: t.get(f) for f in MODEL_FIELDS}, list(dict.fromkeys(notes))
+    finally:
+        lock.release()
+
+
+def cmd_model(args, root: Path) -> int:
+    changes = {f: v for f, v in (("planner_model", args.planner), ("planner_effort", args.planner_effort),
+                                 ("worker_model", args.worker), ("worker_effort", args.worker_effort)) if v is not None}
+    now_set, notes = set_models(Store(root), args.id, changes)
+    shown = ", ".join(f"{f} = {v}" for f, v in now_set.items() if v) or "всё по настройкам проекта"
+    print(f"{args.id}: {shown}")
+    for n in notes:
+        print("Внимание: " + n)
     return 0
 
 
@@ -3427,6 +3496,12 @@ def main(argv: list[str] | None = None) -> int:
     am.add_argument("id")
     am.add_argument("text", nargs="*")
     am.add_argument("--file", help="файл с текстом дополнения; - — stdin")
+    md = sub.add_parser("model", help="задать задаче модель и effort планировщика и исполнителя")
+    md.add_argument("id")
+    md.add_argument("--planner", help="модель планировщика: fable, opus, sonnet, haiku или полный id; default — как в проекте")
+    md.add_argument("--planner-effort", help="effort планировщика: " + ", ".join(EFFORTS))
+    md.add_argument("--worker", help="модель исполнителя")
+    md.add_argument("--worker-effort", help="effort исполнителя")
     cn = sub.add_parser("cancel", help="снять задачи: остановить их сессии и закрыть PR")
     cn.add_argument("ids", nargs="+")
     cn.add_argument("--keep-pr", action="store_true", help="не закрывать PR")
@@ -3461,7 +3536,7 @@ def main(argv: list[str] | None = None) -> int:
         handlers = {
             "init": cmd_init, "enqueue": cmd_enqueue, "report": cmd_report, "status": cmd_status,
             "tick": cmd_tick, "run": cmd_run, "pause": cmd_pause, "resume": cmd_resume,
-            "retry": cmd_retry, "cancel": cmd_cancel, "allow-path": cmd_allow_path, "approve": cmd_approve, "amend": cmd_amend, "reply": cmd_reply, "review": cmd_review,
+            "retry": cmd_retry, "cancel": cmd_cancel, "allow-path": cmd_allow_path, "model": cmd_model, "approve": cmd_approve, "amend": cmd_amend, "reply": cmd_reply, "review": cmd_review,
             "ui": cmd_ui, "stop": cmd_stop,
         }
         return handlers[args.cmd](args, root)
