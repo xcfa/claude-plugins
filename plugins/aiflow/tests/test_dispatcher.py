@@ -783,6 +783,25 @@ class Cost(ProjectCase):
         self.assertAlmostEqual(aiflow.usage_cost("claude-opus-5-5", {"input": self.M}, table), 40)
         self.assertNotIn("bad", table)
 
+    def test_session_in_two_roles_is_counted_once(self):
+        """Планировщик сделал задачу сам: его сессия записана и как исполнитель — расход не должен обнулиться."""
+        folder = self.tmp / "claude" / "projects" / "p"
+        folder.mkdir(parents=True)
+        msg = {"message": {"id": "m1", "model": "claude-opus-5-5", "usage": {"input_tokens": 1000, "output_tokens": 500}}}
+        (folder / "uuid-s1.jsonl").write_text(json.dumps(msg) + "
+", encoding="utf-8")
+        self.add("a")
+        self.tick()
+        self.gh.add_pr(7, "a", body="Что сделано")
+        self.report("a", "planner", "ready_for_review", 7)
+        self.claude.finish_turn(self.sid("a", "planner"))
+        self.tick()
+        self.tick()
+        self.assertEqual(self.task("a")["sessions"]["worker"][-1]["id"], self.sid("a", "planner"))
+        row = aiflow.build_state(self.store)["tasks"][0]
+        self.assertEqual(row["usage"]["claude-opus-5-5"]["output"], 500)
+        self.assertEqual(row["tokens"], 1500)
+
     def test_task_and_project_totals(self):
         new = {"input": self.M, "output": 0, "cache_read": 0, "cache_write": 0, "cache_write_1h": 0}
         old = {"input": 0, "output": 0, "cache_read": 0, "cache_write": self.M}  # запись старой версии, без разбивки

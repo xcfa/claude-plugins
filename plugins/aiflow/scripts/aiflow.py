@@ -2478,7 +2478,11 @@ class Dispatcher:
             entries = sorted(((e.get("started_at") or "", role, e) for role, lst in (t.get("sessions") or {}).items()
                               for e in lst if e.get("session_id")), key=lambda x: x[0])
             seen: set[str] = set()
+            counted: set[str] = set()
             for _, role, e in entries:  # по времени: общая история достаётся сессии, где она появилась
+                if e["session_id"] in counted:
+                    continue  # одна сессия в двух ролях (планировщик сделал задачу сам): считаем один раз
+                counted.add(e["session_id"])
                 u = transcript_usage(e["session_id"], seen)
                 if u:
                     t.setdefault("usage", {})[e["session_id"]] = {"role": role, **u}
