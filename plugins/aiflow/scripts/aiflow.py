@@ -43,7 +43,8 @@ TALK_KINDS = ("discuss", "ask")  # разговор в сессии планир
 IMPLEMENTING = {"planning", "in_progress"}
 TERMINAL = {"merged", "done", "cancelled"}
 FINISHED = {"merged", "done"}  # задача выполнена: зависимые могут стартовать
-COMPLEXITIES = ("trivial", "simple", "complex")  # trivial — без плана, сразу исполнитель
+COMPLEXITIES = ("trivial", "simple", "complex")  # оценивает планировщик; trivial вручную — сразу исполнитель
+WORKER_MD = Path(__file__).resolve().parent.parent / "agents" / "worker.md"
 TASK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
 MARKERS = ("<!-- aiflow", "<!-- ai-review", "<!-- human")
 HUMAN_MARKER = "<!-- human -->"
@@ -61,9 +62,21 @@ def by_complexity(value, cx: str):
     return value or None
 
 
+def planner_choice(cfg: dict, t: dict) -> tuple:
+    """Модель и effort планировщика. Сложность до него не известна — её оценивает он сам,
+    поэтому из старого словаря {"simple": …, "complex": …} берётся значение для complex."""
+    return (t.get("planner_model") or by_complexity(cfg["planner_model"], "complex"),
+            by_complexity(cfg["planner_effort"], "complex"))
+
+
+def is_direct(t: dict) -> bool:
+    """Задача без плана: исполнитель делает её сразу (поручил планировщик или trivial вручную)."""
+    return bool(t.get("direct")) or t.get("complexity") == "trivial"
+
+
 def worker_choice(cfg: dict, t: dict) -> tuple:
     """Модель и effort worker'а: настройки задачи, затем Opus-effort, затем по сложности."""
-    cx = t.get("complexity", "simple")
+    cx = t.get("complexity") or "simple"
     model = t.get("worker_model") or by_complexity(cfg["worker_model"], cx)
     effort = t.get("worker_effort")
     if not effort and "opus" in str(model or "").lower():
@@ -80,8 +93,8 @@ DEFAULT_CONFIG = {
     # auto — безопасные действия одобряет классификатор Claude Code, без вопросов вам; deny из
     # .claude/settings.json действуют и в нём. acceptEdits — спрашивать о каждой команде вне allow.
     "permission_mode": "auto",
-    "planner_model": {"complex": "opus", "simple": "sonnet"},
-    "planner_effort": {"complex": "medium", "simple": "medium"},
+    "planner_model": "opus",  # каждую задачу сначала получает он: план, поручение Sonnet или сам
+    "planner_effort": "medium",
     "discuss_model": "opus",  # сессия обсуждения идеи (задача kind: discuss)
     "discuss_effort": "high",
     "ask_model": "sonnet",  # вопрос о коде (задача kind: ask)
@@ -828,13 +841,20 @@ def task_tokens(t: dict) -> int:
 # ---------------------------------------------------------------- prompts
 
 def planner_prompt(store: Store, t: dict, cfg: dict) -> str:
+    tid = t["id"]
     return (
-        f"aiflow task {t['id']}: {t.get('title', '')}\n"
-        f"Файл задачи: {store.task_path(t['id'])} — прочитай его целиком.\n"
-        f"Сложность: {t.get('complexity', 'simple')}. Базовая ветка: {cfg['base_branch']}. "
-        f"Ветка задачи: ai/{t['id']}.\n"
-        f"Когда draft PR с планом создан, выполни: "
-        f"aiflow report {t['id']} --role planner --status plan_ready --pr <номер> --summary \"<одна строка>\""
+        f"aiflow task {tid}: {t.get('title', '')}\n"
+        f"Файл задачи: {store.task_path(tid)} — прочитай его целиком.\n"
+        f"Базовая ветка: {cfg['base_branch']}. Ветка задачи: ai/{tid}.\n"
+        "Сначала оцени задачу (раздел «Оценка задачи» твоих инструкций) и выбери один путь:\n"
+        f"— сложная: draft PR с планом, затем aiflow report {tid} --role planner --status plan_ready "
+        "--pr <номер> --complexity complex --summary \"<одна строка>\";\n"
+        f"— простая, поручить исполнителю (Sonnet): aiflow report {tid} --role planner --status delegate "
+        "--summary \"<одна строка>\" --details-file <указания исполнителю в $CLAUDE_JOB_DIR/tmp/>;\n"
+        "— простая, сделать самому: сделай по разделу «Делаешь сам» и отчитайся "
+        f"aiflow report {tid} --role planner --status ready_for_review --pr <номер> --summary \"<1–2 строки>\" "
+        f"(или --status done, если репозиторий менять не понадобилось). Инструкции исполнителя: {WORKER_MD}.\n"
+        "Закончи ход после отчёта."
     )
 
 
@@ -856,7 +876,7 @@ def amend_prompt(t: dict, role: str, state: str, items: list[dict], live: bool) 
                        "--summary \"<ответ в 1–3 строки>\". Хотят обсудить — обсуждай и закончи ход.")
     if role == "planner":
         if not t.get("pr"):
-            return head + ("Учти это в плане, который сейчас пишешь." if live else
+            return head + ("Учти это в плане, который сейчас пишешь (или в работе, если делаешь задачу сам)." if live else
                            f"Учти это в плане, доведи его до конца и отчитайся aiflow report {t['id']} --role planner "
                            "--status plan_ready --pr <номер> --summary \"<одна строка>\", как в твоих инструкциях.")
         tail = ("Учти дополнение в плане: обнови описание PR (gh pr edit --body-file), допиши «Историю изменений плана», "
@@ -930,11 +950,14 @@ def worker_prompt(store: Store, t: dict, cfg: dict, retry: bool = False) -> str:
 
 
 def direct_prompt(store: Store, t: dict, cfg: dict) -> str:
-    """Задача trivial: без планировщика и плана, исполнитель делает её сразу."""
+    """Задача без плана: исполнитель делает её сразу — по указаниям планировщика, если они есть."""
+    brief = (t.get("brief") or "").strip()
+    head = (f"Планировщик уже изучил код и поручил задачу тебе. Его указания:\n\n{brief}\n\n"
+            if brief else "")
     return (
         f"aiflow task {t['id']}: {t.get('title', '')}\n"
-        f"Файл задачи: {store.task_path(t['id'])} — прочитай его целиком. Сложность: trivial — плана нет, "
-        "выполни задачу сразу по разделу «Задача без плана» твоих инструкций.\n"
+        f"Файл задачи: {store.task_path(t['id'])} — прочитай его целиком. Плана нет: "
+        "выполни задачу сразу по разделу «Задача без плана» твоих инструкций.\n" + head +
         f"Базовая ветка: {cfg['base_branch']}. Ветка задачи, если понадобится менять репозиторий: ai/{t['id']}.\n"
         f"Если репозиторий менять не нужно, по готовности выполни: aiflow report {t['id']} --role worker "
         "--status done --summary \"<что сделано и как проверено>\" и закончи ход.\n"
@@ -984,11 +1007,13 @@ def ask_prompt(store: Store, t: dict, cfg: dict) -> str:
 
 
 def review_prompt(t: dict, cfg: dict) -> str:
+    where = (f"по разделу «Ход 2: ревью» инструкций исполнителя ({WORKER_MD}; прочитай, если ещё не читал)"
+             if t.get("self_executed") else "как описано в твоих инструкциях")
     return (
         f"Твоя очередь на ревью PR #{t['pr']} (задача {t['id']}). "
         f"git fetch origin; git rebase origin/{cfg['base_branch']}; разреши конфликты; прогони тесты; "
         "git push --force-with-lease. Затем запусти aiflow review --pr "
-        f"{t['pr']} и действуй по статусу, как описано в твоих инструкциях, до терминального статуса."
+        f"{t['pr']} и действуй по статусу {where}, до терминального статуса."
     )
 
 
@@ -1007,9 +1032,10 @@ STAGE_ROLE = {"planning": "planner", "discussing": "planner", "answered": "plann
 RESUME_FINISH = {
     "discussing": "Продолжи обсуждение с пользователем: PR — только когда договоритесь, итог — aiflow report {id} "
                   "--role planner (plan_ready или done), как в первом сообщении этой сессии.",
-    "planning": "Доведи план до конца и отчитайся aiflow report {id} --role planner --status plan_ready, как в твоих инструкциях.",
+    "planning": "Доведи выбранный путь до конца и отчитайся aiflow report {id} --role planner (plan_ready, delegate, "
+                "ready_for_review или done), как в первом сообщении этой сессии.",
     "in_progress": "Доведи реализацию до конца и отчитайся aiflow report {id} --role worker --status ready_for_review "
-                   "(или --status done, если это задача trivial без изменений в репозитории), как в твоих инструкциях.",
+                   "(или --status done, если это задача без плана и без изменений в репозитории), как в твоих инструкциях.",
     "in_review": "Продолжи цикл ревью PR #{pr} (aiflow review --pr {pr}) до терминального статуса, как в твоих инструкциях.",
 }
 
@@ -1485,8 +1511,40 @@ class Dispatcher:
     def adv_planning(self, t: dict) -> None:
         rep = self.new_report(t, "planner")
         if rep:
-            if rep.get("status") == "plan_ready" and rep.get("pr"):
+            st = rep.get("status")
+            if st == "delegate":
+                t["complexity"], t["direct"] = "simple", True
+                t["brief"] = rep.get("details") or rep.get("summary") or ""
+                note = rep.get("summary") or ""
+                self.emit(t, "delegated", f"{t['id']}: простая — планировщик поручил исполнителю"
+                          + (f": {note}" if note else ""), key=f"delegated:{rep['rid']}")
+                if not self.start_direct(t):
+                    self.set_state(t, "new", "поручено исполнителю, ждёт запуска")
+                return
+            if st == "ready_for_review":
+                if not rep.get("pr"):
+                    return self.to_human(t, "планировщик отчитался ready_for_review без номера PR")
+                # планировщик сделал задачу сам: его сессия становится сессией исполнителя для ревью
+                t["pr"], t["complexity"], t["self_executed"] = int(rep["pr"]), "simple", True
+                e = self.cur(t, "planner")
+                if e:
+                    t.setdefault("sessions", {}).setdefault("worker", []).append(dict(e))
+                t.setdefault("comments_seen_at", iso())
+                t.setdefault("comments_floor", iso())
+                t["ready_at"] = iso()
+                self.set_state(t, "ready", "планировщик сделал задачу сам")
+                self.emit(t, "self_done", f"{t['id']}: простая — планировщик сделал сам, PR #{t['pr']} в очереди "
+                          "на ревью", key=f"self:{rep['rid']}")
+                return
+            if st == "done" and not t.get("pr"):
+                t["complexity"] = t.get("complexity") or "simple"
+                self.set_state(t, "done", rep.get("summary") or "выполнено")
+                self.emit(t, "done", f"{t['id']}: выполнено — {rep.get('summary') or 'без изменений в репозитории'}",
+                          key="done")
+                return
+            if st == "plan_ready" and rep.get("pr"):
                 t["pr"] = int(rep["pr"])
+                t["complexity"] = rep.get("complexity") or t.get("complexity") or "complex"
                 t["plan_seen_at"] = iso()
                 self.set_state(t, "plan_review")
                 why = ""
@@ -1735,7 +1793,7 @@ class Dispatcher:
             self.set_state(t, prev, "повтор: та же сессия")
             return
         t["retry_pending"] = True
-        if t.get("complexity") == "trivial":
+        if is_direct(t):
             self.set_state(t, "new" if not t.get("pr") else "plan_review", "повтор")
         elif t.get("pr") and t.get("plan_approved"):
             self.set_state(t, "plan_review", "повтор: новый worker")
@@ -1748,6 +1806,24 @@ class Dispatcher:
         self.set_state(t, "merged")
         self.emit(t, "merged", f"{t['id']}: смержено в {self.cfg['base_branch']} — PR #{t['pr']}", key="merged")
         self.adv_merged(t)
+
+    def start_direct(self, t: dict) -> bool:
+        """Исполнитель для задачи без плана: сразу делает её по тексту и указаниям планировщика."""
+        retry = bool(t.pop("retry_pending", False))
+        model, effort = worker_choice(self.cfg, t)
+        prompt = direct_prompt(self.store, t, self.cfg) + launch_amendments(t)
+        t.setdefault("comments_seen_at", iso())
+        t.setdefault("comments_floor", iso())
+        if retry:
+            prompt += ("\nЭто повторная попытка после остановки: последний отчёт — "
+                       + json.dumps(self.store.report(t["id"]) or {}, ensure_ascii=False))
+        if not self.launch(t, "worker", prompt, model=model, effort=effort):
+            if retry:
+                t["retry_pending"] = True
+            return False
+        mark_delivered(t, "launch")
+        self.set_state(t, "in_progress")
+        return True
 
     def deps_ok(self, t: dict, by_id: dict[str, dict]) -> bool:
         return all((by_id.get(d) or {}).get("state") in FINISHED for d in t.get("depends_on") or [])
@@ -1774,34 +1850,20 @@ class Dispatcher:
                     self.set_state(t, "discussing")
                 self.store.save_task(t)
                 continue
-            if st == "new" and self.deps_ok(t, by_id) and t.get("complexity") == "trivial":
-                retry = bool(t.pop("retry_pending", False))
-                model, effort = worker_choice(self.cfg, t)
-                prompt = direct_prompt(self.store, t, self.cfg) + launch_amendments(t)
-                t.setdefault("comments_seen_at", iso())
-                t.setdefault("comments_floor", iso())
-                if retry:
-                    prompt += ("\nЭто повторная попытка после остановки: последний отчёт — "
-                               + json.dumps(self.store.report(t["id"]) or {}, ensure_ascii=False))
-                ok = self.launch(t, "worker", prompt, model=model, effort=effort)
-                if ok:
-                    mark_delivered(t, "launch")
-                    self.set_state(t, "in_progress")
+            if st == "new" and self.deps_ok(t, by_id) and is_direct(t):
+                if self.start_direct(t):
                     active += 1
-                elif retry:
-                    t["retry_pending"] = True
                 self.store.save_task(t)
             elif st == "new" and self.deps_ok(t, by_id):
-                cx = t.get("complexity", "simple")
+                model, effort = planner_choice(self.cfg, t)
                 ok = self.launch(t, "planner", planner_prompt(self.store, t, self.cfg) + launch_amendments(t),
-                                 model=t.get("planner_model") or by_complexity(self.cfg["planner_model"], cx),
-                                 effort=by_complexity(self.cfg["planner_effort"], cx))
+                                 model=model, effort=effort)
                 if ok:
                     mark_delivered(t, "launch")
                     self.set_state(t, "planning")
                     active += 1
                 self.store.save_task(t)
-            elif st == "plan_review" and (t.get("plan_approved") or t.get("complexity") == "trivial"):
+            elif st == "plan_review" and (t.get("plan_approved") or is_direct(t)):
                 retry = bool(t.pop("retry_pending", False))
                 model, effort = worker_choice(self.cfg, t)
                 t.setdefault("comments_floor", iso())
@@ -2133,8 +2195,8 @@ def normalize_task(raw: dict) -> dict:
     kind = raw.get("kind") or "task"
     if kind not in ("task",) + TALK_KINDS:
         raise AiflowError(f"{tid}: kind должен быть task, discuss или ask")
-    cx = raw.get("complexity", "complex" if kind == "discuss" else "simple")
-    if cx not in COMPLEXITIES:
+    cx = raw.get("complexity") or None  # обычно не задаётся: оценивает планировщик
+    if cx is not None and cx not in COMPLEXITIES:
         raise AiflowError(f"{tid}: complexity должен быть одним из {', '.join(COMPLEXITIES)}")
     text = str(raw.get("text") or "").strip()
     if not text:
@@ -2194,7 +2256,8 @@ def cmd_enqueue(args, root: Path) -> int:
                 arch.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(old, arch)
             store.save_task(t)
-            store.event("enqueued", t["id"], f"{t['id']}: поставлена в очередь ({t['complexity']})")
+            store.event("enqueued", t["id"], f"{t['id']}: поставлена в очередь"
+                        + (f" ({t['complexity']})" if t.get("complexity") else ""))
     finally:
         lock.release()
     print(f"В очереди: {len(tasks)} — " + ", ".join(ids))
@@ -2730,9 +2793,9 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("id")
     r.add_argument("--role", required=True, choices=["planner", "worker"])
     r.add_argument("--status", required=True,
-                   choices=["plan_ready", "answered", "ready_for_review", "done", "approved", "limit_reached", "error", "blocked"])
+                   choices=["plan_ready", "delegate", "answered", "ready_for_review", "done", "approved", "limit_reached", "error", "blocked"])
     r.add_argument("--pr", type=int)
-    r.add_argument("--complexity", choices=["simple", "complex"], help="оценка реализации (итог обсуждения)")
+    r.add_argument("--complexity", choices=["simple", "complex"], help="оценка реализации (планировщик)")
     r.add_argument("--summary")
     r.add_argument("--details-file")
     s = sub.add_parser("status", help="состояние очереди")
