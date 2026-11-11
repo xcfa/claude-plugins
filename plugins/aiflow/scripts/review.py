@@ -785,12 +785,17 @@ def diff_size(diff: str) -> int:
                if (ln.startswith("+") and not ln.startswith("+++ ")) or (ln.startswith("-") and not ln.startswith("--- ")))
 
 
+MAX_SIZE_ITEMS = 5
+
+
 def too_large(task: dict | None, cfg: dict, files: list[str], diff: str) -> str:
     """Задача без плана обходится без одобрения человека, поэтому её размер ограничивает код, а не
     оценка модели. Возвращает причину или пустую строку. size_ok ставит человек («Повторить»)."""
     if not no_plan(task) or task.get("size_ok"):
         return ""
-    max_files, max_lines = int(cfg.get("direct_max_files") or 0), int(cfg.get("direct_max_lines") or 0)
+    # задача из нескольких мелких пунктов: предел — на пункт, но не больше пяти пределов на PR
+    k = min(MAX_SIZE_ITEMS, max(1, int(task.get("items") or 1)))
+    max_files, max_lines = int(cfg.get("direct_max_files") or 0) * k, int(cfg.get("direct_max_lines") or 0) * k
     lines = diff_size(diff)
     if (max_files and len(files) > max_files) or (max_lines and lines > max_lines):
         return (f"задача шла без плана, а изменение — {len(files)} файлов и {lines} строк (предел: {max_files} файлов, "

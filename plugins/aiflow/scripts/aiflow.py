@@ -3023,8 +3023,13 @@ def normalize_task(raw: dict) -> dict:
         models = {f: check_model_field(f, raw.get(f)) for f in MODEL_FIELDS}
     except AiflowError as e:
         raise AiflowError(f"{tid}: {e}") from None
+    try:
+        items = max(1, int(raw.get("items") or 1))  # сколько независимых мелких пунктов в одной задаче
+    except (TypeError, ValueError):
+        raise AiflowError(f"{tid}: items должен быть числом пунктов задачи") from None
     return {
         "id": tid, "title": str(raw.get("title") or tid).strip(), "text": text, "complexity": cx, "kind": kind,
+        "items": items,
         "depends_on": [str(d) for d in raw.get("depends_on") or []],
         "ui": raw.get("ui") or None,
         **models,

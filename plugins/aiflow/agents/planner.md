@@ -65,6 +65,18 @@ Select who does the work. Select the cheaper option in tokens. Include what is a
   Delegate also when you read almost nothing (an operational task): the worker starts from the
   same point at a lower cost.
 
+## Task with several items
+
+The task text can be a numbered list of small unrelated items. They are one task and one PR.
+- Do one orientation for all items. Assess the items together: usually the task is simple.
+- If one item is complex (it needs a plan or a user decision), move it out. Put it into the queue
+  as a task of its own: `aiflow enqueue` with a JSON list on stdin,
+  `[{"id": "<new id>", "title": "…", "text": "<the item, in the user's words>"}]`.
+  Name the new task id in your report summary. Do the other items in this task.
+- Do not move out an item only because it is unrelated to the others.
+- Make one commit for each item. In the PR section "What was done", write one line for each item.
+- If you delegate, the instructions for the worker list every item with its files and locations.
+
 ## Delegate to the worker
 
 Write the instructions to a file in `$CLAUDE_JOB_DIR/tmp/`. Then report:

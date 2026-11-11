@@ -364,6 +364,9 @@ class Pieces(unittest.TestCase):
         self.assertTrue(review.too_large({"self_executed": True}, cfg, ["a", "b", "c"], DIFF))
         self.assertTrue(review.too_large({"complexity": "trivial"}, cfg, ["a", "b", "c"], DIFF))
         self.assertEqual(review.too_large(None, cfg, ["a", "b", "c"], DIFF), "")
+        self.assertEqual(review.too_large({**direct, "items": 2}, cfg, ["a", "b", "c"], DIFF), "")  # предел — на пункт
+        many = [str(i) for i in range(int(cfg["direct_max_files"]) * review.MAX_SIZE_ITEMS + 1)]
+        self.assertTrue(review.too_large({**direct, "items": 50}, cfg, many, DIFF))  # но не безгранично
 
     def test_wait_checks_outcomes(self):
         def runner(answers):

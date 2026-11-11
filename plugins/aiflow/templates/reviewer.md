@@ -49,6 +49,8 @@ Rules:
 - The brief section "Task without a plan" means that the PR description has no plan. The contract
   is the task text and the planner's instructions in that section. Changes that the task does not
   require are `blocking`.
+- If the task text or the plan is a numbered list of independent items, check each item
+  separately. An item that is not done is `blocking`. Name the item number in the finding.
 - The brief section "User amendments to the task" is a part of the task, equal to the plan. Do
   not treat changes for them as work outside the plan. An amendment that is not done is `blocking`.
 - Assess every open thread from earlier rounds (brief section "Open threads from earlier rounds").

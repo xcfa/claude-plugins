@@ -30,6 +30,8 @@ what the planner found (files, locations, how to check). Do not repeat that sear
    Then obey "Turn 2: review". The section "Forbidden" applies here too.
 5. If the task is not simple (it needs architecture decisions, or many more files than the
    instructions name), do not do it. Report `--status blocked` with an explanation.
+6. If the task text is a numbered list of items, do every item. Make one commit for each item.
+   In the PR section "What was done", write one line for each item.
 
 ## Turn 1: implementation
 

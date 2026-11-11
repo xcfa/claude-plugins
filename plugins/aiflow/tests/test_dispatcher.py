@@ -1314,6 +1314,12 @@ class Misc(ProjectCase):
         empty = aiflow.pr_from_graphql({"state": "MERGED", "commits": {"nodes": [{"commit": {"statusCheckRollup": None}}]}})
         self.assertEqual(empty["statusCheckRollup"], [])
 
+    def test_task_keeps_the_number_of_its_items(self):
+        self.assertEqual(aiflow.normalize_task({"id": "a", "text": "1. x\n2. y", "items": 2})["items"], 2)
+        self.assertEqual(aiflow.normalize_task({"id": "a", "text": "t"})["items"], 1)
+        with self.assertRaisesRegex(aiflow.AiflowError, "items"):
+            aiflow.normalize_task({"id": "a", "text": "t", "items": "много"})
+
     def test_auto_approve_is_gone(self):
         t = aiflow.normalize_task({"id": "a", "text": "t", "complexity": "simple", "auto_approve_plan": True})
         self.assertNotIn("auto_approve_plan", t)

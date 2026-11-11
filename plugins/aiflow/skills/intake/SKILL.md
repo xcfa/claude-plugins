@@ -29,16 +29,21 @@ user's language and words.
      `aiflow status`). Its session already has the context and writes the plan.
 2. If a task is so unclear that it cannot be planned, ask 1 to 3 questions in one message and
    wait for the reply. If not, do not ask.
-3. Decide how many tasks there are. One aiflow task is one PR: its own plan, implementation,
-   review and merge. Thus the default is: one message is one task.
-   - Split only if the user listed unrelated things (a numbered list, "and also …", different
-     parts of the product), and each of them is useful and can merge without the others.
+3. Decide how many tasks there are. One aiflow task is one PR: its own planner session, code
+   reading, review and CI run. For a small change this fixed cost is much larger than the change.
+   Thus the default is: one message is one task, also when it lists several unrelated things.
+   - A list of small unrelated things (fixes, renames, small UI changes) is one task. Write its
+     `text` as a numbered list, one item for each thing, in the user's words. Set `"items"` to the
+     number of items. The planner reads the code one time and all items go into one PR.
+   - Split only if the user asks for separate tasks ("as separate tasks", "each in its own PR"),
+     or if an item is clearly a feature of its own (a new screen, a new integration, a schema
+     change). Then that item is a separate task and the small items stay together.
    - Do not split one feature into layers (config, backend, UI), variants (PostgreSQL, SQLite,
      SQL Server are one task "support for several databases"), stages, or "preparation +
      implementation". If the parts change the same files or abstractions, or one part has no
      value without the other, it is one task. The planner divides it into steps in one PR.
    - If you are not sure, make one task. If the task looks too large for one PR, still make one:
-     the planner proposes a split in the plan, and the user decides.
+     the planner proposes a split in the plan, or moves a heavy item into a task of its own.
    Give each task an id: lowercase Latin letters, digits, hyphens, 48 characters maximum.
    Use `depends_on` only between tasks that the user listed separately, when one needs the
    merged result of the other.
@@ -66,6 +71,6 @@ user's language and words.
    JSON
    ```
 8. Tell the user in one or two lines how many tasks are in the queue. The planner decides what
-   happens to them (a plan for discussion, or work immediately). If there are two or more tasks,
-   say in one sentence why they are independent. If the user disagrees, `aiflow cancel <id>…`
+   happens to them (a plan for discussion, or work immediately). If you put several things into
+   one task, say so. If there are two or more tasks, say in one sentence why you split them. If the user disagrees, `aiflow cancel <id>…`
    cancels tasks that have not started; then put them in again as one task.
