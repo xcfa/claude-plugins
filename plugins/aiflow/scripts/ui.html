@@ -80,6 +80,8 @@ button:disabled:hover { border-color: var(--rule); }
 .cell.passed::before { background: var(--ink); opacity: .55; }
 .cell.half::before { background: linear-gradient(to right, color-mix(in srgb, var(--ink) 55%, transparent) 50%, var(--track) 50%); opacity: 1; }
 .cell.first.half::before { background: var(--track); }
+.cell.none::before { display: none; }
+.cell.passed-end::before { background: var(--ink); opacity: .55; }
 .dot { position: absolute; left: 50%; top: 50%; width: 9px; height: 9px; border-radius: 50%; transform: translate(-50%, -50%); background: var(--track); }
 .dot.passed { background: var(--ink); opacity: .55; }
 .dot.here { width: 18px; height: 18px; border: 3px solid var(--surface); box-shadow: 0 0 0 2px currentColor; background: currentColor; opacity: 1; }
@@ -475,8 +477,11 @@ function renderBoard(p) {
       : name;
     html += `<div class="task">${head}<div class="state-label here ${tn}">${esc(t.label)}${t.needs ? " — " + esc(t.needs) : ""}</div>${t.answer ? `<div class="why" title="${esc(t.answer)}">${esc(t.answer)}</div>` : ""}</div>`;
     STATIONS.forEach((_, i) => {
-      const pos = i < stage ? "passed" : i === stage ? "half" : "";
-      const edge = i === 0 ? "first" : i === STATIONS.length - 1 ? "last" : "";
+      // вопрос или обсуждение: шагов после последнего своего у задачи нет — ни точек, ни линии
+      const end = t.last_station;
+      if (end != null && i > end) { html += `<div class="cell none"></div>`; return; }
+      const pos = i < stage ? "passed" : i === stage ? (i === end ? "passed-end" : "half") : "";
+      const edge = i === 0 ? "first" : (i === STATIONS.length - 1 || i === end) ? "last" : "";
       let dot = `<span class="dot ${i < stage ? "passed" : ""}"></span>`;
       if (i === stage && t.state !== "cancelled") {
         const live = t.session && t.session.state === "working" ? "live" : "";

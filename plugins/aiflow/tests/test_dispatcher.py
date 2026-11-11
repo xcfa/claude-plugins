@@ -1156,6 +1156,40 @@ class SearchRule(ProjectCase):
         self.assertNotIn("aiflow:explorer", self.claude.launched[-1]["prompt"])
 
 
+class BoardSteps(ProjectCase):
+    """У вопроса и обсуждения нет шагов после «плана» — панель их не рисует."""
+
+    def row(self, tid: str = "a") -> dict:
+        return next(t for t in aiflow.build_state(self.store)["tasks"] if t["id"] == tid)
+
+    def test_question_stops_at_its_own_last_step(self):
+        plan = aiflow.STAGES.index("planning")
+        self.add("a", kind="ask")
+        self.assertEqual(self.row()["last_station"], plan)
+        self.tick()
+        self.assertEqual((self.row()["stage"], self.row()["last_station"]), (plan, plan))
+        self.report("a", "planner", "answered", summary="вот ответ")
+        self.tick()
+        self.assertEqual((self.row()["state"], self.row()["stage"], self.row()["last_station"]), ("answered", plan, plan))
+        self.patch("a", state="done")
+        self.assertEqual((self.row()["stage"], self.row()["last_station"]), (plan, plan))  # не «смержено»
+
+    def test_question_that_became_a_plan_shows_the_whole_path(self):
+        self.add("a", kind="ask")
+        self.tick()
+        self.gh.add_pr(7, "a")
+        self.report("a", "planner", "plan_ready", 7, complexity="complex")
+        self.tick()
+        self.assertEqual(self.state("a"), "plan_review")
+        self.assertIsNone(self.row()["last_station"])
+
+    def test_ordinary_task_always_shows_every_step(self):
+        self.add("a")
+        self.assertIsNone(self.row()["last_station"])
+        self.patch("a", state="done")
+        self.assertEqual(self.row()["stage"], aiflow.STAGES.index("merged"))
+
+
 class Models(ProjectCase):
     def test_model_named_at_intake_is_used_for_the_planner(self):
         t = aiflow.normalize_task({"id": "a", "text": "t", "planner_model": "fable", "planner_effort": "high"})

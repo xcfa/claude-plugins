@@ -2748,6 +2748,7 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
                 cur = {"role": role, "id": e["id"], "state": live.get("state"), "waiting": live.get("waitingFor")}
                 break
         review = store.review(t["id"]) or {}
+        pr = t.get("pr")
         needs = None
         if st == "plan_review" and not t.get("plan_approved"):
             needs = "обсудить и одобрить план"
@@ -2758,7 +2759,6 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
                      else "обсуждение ждёт вас — откройте сессию")
         elif cur.get("state") == "blocked":
             needs = f"сессия ждёт ответа ({cur.get('waiting') or 'вопрос'})"
-        pr = t.get("pr")
         last_stage = None
         if st not in STAGES:
             for h in reversed(t.get("history") or []):
@@ -2766,12 +2766,18 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
                     last_stage = STAGES.index(h["from"])
                     break
         doing_self = st == "planning" and t.get("route") == "self"
+        stage = STAGES.index("in_progress") if doing_self else STAGES.index("planning") if st in ("discussing", "answered") else STAGES.index("plan_review") if st == "approved" else STAGES.index("merged") if st == "done" else STAGES.index(st) if st in STAGES else last_stage
+        # Вопрос или обсуждение без PR дальше «плана» не идёт: остальные шаги доски к нему не относятся,
+        # и панель их не рисует. Появился PR — задача идёт обычным путём, и шаги показываются все.
+        last_station = STAGES.index("planning") if t.get("kind") in TALK_KINDS and not pr else None
+        if last_station is not None and stage is not None:
+            stage = min(stage, last_station)
         out.append({
             "id": t["id"], "title": t.get("title", ""), "state": st,
             "label": "планировщик делает сам" if doing_self else
                      "вопрос" if st == "discussing" and t.get("kind") == "ask" else STAGE_LABEL.get(st, st),
             "kind": t.get("kind") or "task", "answer": (t.get("answer") or {}).get("summary") if st == "answered" else None,
-            "stage": STAGES.index("in_progress") if doing_self else STAGES.index("planning") if st in ("discussing", "answered") else STAGES.index("plan_review") if st == "approved" else STAGES.index("merged") if st == "done" else STAGES.index(st) if st in STAGES else last_stage,
+            "stage": stage, "last_station": last_station,
             "complexity": t.get("complexity"), "pr": pr,
             "pr_url": f"{repo_url}/pull/{pr}" if pr and repo_url else None,
             "rounds": review.get("round"), "max_rounds": cfg["max_rounds"],
