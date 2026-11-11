@@ -1,14 +1,15 @@
 ---
 name: resume
-description: Поднять службу aiflow (после перезагрузки машины или перезапуска сессии) и показать состояние.
+description: Start the aiflow service (after a machine restart or a session restart) and show the state.
 disable-model-invocation: true
 ---
-Выполни `aiflow up`, затем `aiflow status`. `aiflow up` поднимает службу aiflow (она ведёт очередь
-отдельно от сессий) и добавляет в неё этот проект; если служба уже работает, команда ничего не меняет.
-Если `aiflow up` завершится с ошибкой «команда не найдена» или служба окажется старой версии, запусти
-`"${CLAUDE_PLUGIN_ROOT}/bin/aiflow" up` — в PATH может стоять старая версия aiflow.
+Run `aiflow up`, then `aiflow status`. `aiflow up` starts the aiflow service (it runs the queue
+separately from sessions) and adds this project to it. If the service already runs, the command
+changes nothing. If `aiflow up` fails with "command not found", or the service is an old version,
+run `"${CLAUDE_PLUGIN_ROOT}/bin/aiflow" up`: PATH can contain an old aiflow version.
 
-Инструмент Monitor не запускай и `aiflow run --events` сам не выполняй: о событиях пользователь узнаёт
-из системных уведомлений и панели.
+Do not start the Monitor tool. Do not run `aiflow run --events` yourself. The user gets the
+events from system notifications and the panel.
 
-Затем одной-тремя строками сообщи пользователю, что ждёт его решения. Больше ничего не запускай.
+Then tell the user, in one to three lines and in the user's language, what waits for their
+decision. Start nothing else.

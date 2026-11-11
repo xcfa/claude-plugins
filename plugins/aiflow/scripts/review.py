@@ -208,11 +208,11 @@ def open_threads(threads: list[dict], states: dict[int, dict], login: str) -> li
 def format_open_threads(items: list[dict]) -> str:
     if not items:
         return ""
-    parts = ["# Открытые треды прошлых раундов", "",
-             "Для каждого треда верни вердикт в поле threads (comment_id — число в квадратных скобках).", ""]
+    parts = ["# Open threads from earlier rounds", "",
+             "For each thread, return a verdict in the field threads (comment_id is the number in square brackets).", ""]
     for t in items:
         parts.append(f"[{t['comment_id']}] `{t['path']}:{t['line']}` {t['body']}")
-        parts += [f"  ↳ {x}" for x in t["replies"]] or ["  ↳ (ответа исполнителя нет)"]
+        parts += [f"  ↳ {x}" for x in t["replies"]] or ["  ↳ (no reply from the worker)"]
         parts.append("")
     return "\n".join(parts)
 
@@ -247,24 +247,24 @@ def strip_markers(text: str) -> str:
 
 
 def build_history(reviews: list[dict], threads: list[dict], comments: list[dict], limit: int = 30000) -> str:
-    items = [(rv.get("submitted_at") or "", "Ревьюер (итог раунда)", rv.get("body") or "") for rv in reviews]
+    items = [(rv.get("submitted_at") or "", "Reviewer (round result)", rv.get("body") or "") for rv in reviews]
     roots = {c["id"]: c for c in threads if not c.get("in_reply_to_id")}
     for root_id, c in roots.items():
         replies = [x for x in threads if x.get("in_reply_to_id") == root_id]
         lines = [f"`{c.get('path')}:{c.get('line')}` {c.get('user')}: {strip_markers(c.get('body') or '')}"]
         lines += [f"  ↳ {x.get('user')}: {strip_markers(x.get('body') or '')}" for x in replies]
-        items.append((c.get("created_at") or "", "Тред", "\n".join(lines)))
+        items.append((c.get("created_at") or "", "Thread", "\n".join(lines)))
     for c in comments:
         body = c.get("body") or ""
         if REPLY_MARKER in body:
-            items.append((c.get("createdAt") or "", "Исполнитель", body))
+            items.append((c.get("createdAt") or "", "Worker", body))
         elif body.lstrip().startswith(HUMAN_MARKER):
-            items.append((c.get("createdAt") or "", "Человек", body))
+            items.append((c.get("createdAt") or "", "Human", body))
     if not items:
-        return "Это первый раунд, истории нет."
+        return "This is the first round. There is no history."
     items.sort(key=lambda x: x[0])
     text = "\n\n".join(f"### {who} ({ts})\n\n{strip_markers(body)}" for ts, who, body in items)
-    return text if len(text) <= limit else "[… начало истории обрезано]\n" + text[-limit:]
+    return text if len(text) <= limit else "[… the start of the history is cut]\n" + text[-limit:]
 
 
 def diff_lines(diff: str) -> dict[str, set[int]]:
@@ -312,8 +312,8 @@ def format_amendments(task: dict | None) -> str:
     items = (task or {}).get("amendments") or []
     if not items:
         return ""
-    return ("# Дополнения пользователя к задаче\n\nЭто часть задачи наравне с планом: изменения по ним — не работа "
-            "вне плана. Проверь, что они выполнены.\n\n" + aiflow.amend_list(items) + "\n")
+    return ("# User amendments to the task\n\nThey are a part of the task, equal to the plan: changes for them are "
+            "not work outside the plan. Check that they are done.\n\n" + aiflow.amend_list(items) + "\n")
 
 
 BIG_DIFF_CHARS = 30000  # больше — вывод gh pr diff у ревьюера может обрезаться: требуем подтверждения
@@ -323,14 +323,14 @@ def build_brief(n: int, pr: dict, base: str, history: str, big_diff: bool) -> st
     """Задание ревьюеру. План и дифф он читает сам (gh pr view / gh pr diff): так aiflow не гоняет
     через себя сотни килобайт, а модель читает столько, сколько нужно. Здесь — только то, чего в PR
     не видно напрямую: раунд, история ревью, дополнения и открытые треды."""
-    read = (f"# PR #{n}: {pr.get('title', '')}\n\nБазовая ветка: {base}. Текущий каталог — ветка PR.\n"
-            f"Прочитай сам: описание PR с планом — `gh pr view {n}`; изменения — `gh pr diff {n}`. "
-            f"Если вывод обрезан, читай по файлам: `gh pr diff {n} --name-only`, затем "
-            f"`git diff origin/{base}...HEAD -- <файл>`. Код вокруг изменений — чтением файлов репозитория.\n")
+    read = (f"# PR #{n}: {pr.get('title', '')}\n\nBase branch: {base}. The current directory is the PR branch.\n"
+            f"Read yourself: the PR description with the plan (`gh pr view {n}`) and the changes (`gh pr diff {n}`). "
+            f"If the output is truncated, read file by file: `gh pr diff {n} --name-only`, then "
+            f"`git diff origin/{base}...HEAD -- <file>`. For the code around the changes, read the repository files.\n")
     if big_diff:
-        read += ("Дифф большой: прочитай его целиком (по файлам) и верни \"diff_fully_read\": true; "
-                 "не смог — false.\n")
-    return read + f"\n# История ревью\n\n{history}\n"
+        read += ("The diff is large: read all of it (file by file) and return \"diff_fully_read\": true. "
+                 "If you could not, return false.\n")
+    return read + f"\n# Review history\n\n{history}\n"
 
 
 def extract_json(text: str) -> dict | None:
@@ -771,11 +771,11 @@ def task_contract(task: dict | None) -> str:
     """Для задачи без плана контракт — её текст и указания планировщика: в PR их нет."""
     if not no_plan(task):
         return ""
-    out = ("# Задача без плана\n\nПлана в описании PR нет: контракт — текст задачи ниже. Проверь, что изменения "
-           "делают именно это и ничего сверх.\n\n" + str(task.get("text") or "").strip() + "\n")
+    out = ("# Task without a plan\n\nThe PR description has no plan: the contract is the task text below. Check that "
+           "the changes do exactly this and nothing more.\n\n" + str(task.get("text") or "").strip() + "\n")
     brief = str(task.get("brief") or "").strip()
     if brief:
-        out += "\n## Указания планировщика исполнителю\n\n" + brief + "\n"
+        out += "\n## The planner's instructions for the worker\n\n" + brief + "\n"
     return out
 
 
@@ -825,8 +825,8 @@ def clear_streak(root: Path, tid: str) -> None:
 
 
 def pause_message(reasons: list[str]) -> str:
-    return (f"очередь aiflow на паузе ({', '.join(reasons)}): ревью и мерж отложены. Закончи ход одной строкой — "
-            "тебя разбудят, когда очередь продолжит")
+    return (f"the aiflow queue is paused ({', '.join(reasons)}): the review and the merge wait. End your turn with "
+            "one line. aiflow wakes you when the queue continues")
 
 
 # ------------------------------------------------------------------ main
@@ -910,7 +910,8 @@ def main(argv: list[str] | None = None) -> int:
                 finish("error", 1, message="комментарий человека возвращается исполнителю уже "
                                            f"{HUMAN_INPUT_REPEATS} раза, а ответа с <!-- ai-review-reply --> нет")
             finish("human_input", comments=human,
-                   message="учти комментарии человека, ответь комментарием с <!-- ai-review-reply --> и снова запусти ревью")
+                   message="do what the human comments ask, reply with a comment that starts with <!-- ai-review-reply --> "
+                           "and run the review again")
 
         # CI до ревью: раунд не расходуется
         required = ci_required(cfg, r.cwd)
@@ -978,8 +979,9 @@ def main(argv: list[str] | None = None) -> int:
                 if late:
                     CTX["round"] = done
                     finish("human_input", comments=late,
-                           message="во время ревью пришли комментарии человека: учти их, ответь комментарием с "
-                                   "<!-- ai-review-reply --> и снова запусти ревью (раунд не израсходован)")
+                           message="human comments came during the review: do what they ask, reply with a comment "
+                                   "that starts with <!-- ai-review-reply --> and run the review again (this did not "
+                                   "use a round)")
             posted = publish(r, args.pr, head, verdict, rnd, max_rounds, summary, cs, lines, tmp, identity)
             result = {"round": rnd, "max_rounds": max_rounds, "summary": summary, "comments": posted,
                       "open_threads": [{"comment_id": t["comment_id"], "file": t["path"], "line": t["line"],
@@ -997,16 +999,16 @@ def main(argv: list[str] | None = None) -> int:
         try:
             reasons = sorted(store.queue().get("pauses") or {})
             if reasons:
-                finish("paused", **result, reasons=reasons, message="одобрено, но " + pause_message(reasons))
+                finish("paused", **result, reasons=reasons, message="approved, but " + pause_message(reasons))
             if behind_base(r, cfg["base_branch"], head) > 0:
                 finish("merge_conflict", **result,
-                       message="одобрено, но базовая ветка ушла вперёд: git fetch, rebase, тесты, push и снова "
-                               "aiflow review — те же изменения повторно ревьюиться не будут")
+                       message="approved, but the base branch moved ahead: git fetch, rebase, tests, push and "
+                               "aiflow review again. The same changes get no second review")
             merge = try_merge(r, args.pr, head)
         finally:
             gate.release()
         if merge == "conflict":
-            finish("merge_conflict", **result, message="одобрено, но конфликт с базовой веткой: нужен rebase")
+            finish("merge_conflict", **result, message="approved, but there is a conflict with the base branch: rebase")
         finish("approved", merge=merge, **result)
 
     except subprocess.TimeoutExpired as e:

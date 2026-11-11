@@ -224,6 +224,7 @@ DEFAULT_CONFIG = {
     "ask_model": "sonnet",  # вопрос о коде (задача kind: ask)
     "ask_effort": "medium",
     "answered_ttl_hours": 24,  # вопрос с ответом без продолжения закрывается сам
+    "done_keep_hours": 24,  # сессия задачи, законченной без PR, живёт ещё столько: её итог читают в ней самой
     "worker_model": "sonnet",
     "worker_effort": {"complex": "high", "simple": "medium", "trivial": "medium"},  # или одна строка на все задачи
     "worker_opus_effort": "medium",  # effort worker'а на Opus (worker_model: opus), без учёта сложности
@@ -1240,6 +1241,11 @@ def task_usage(t: dict) -> dict[str, dict]:
     return out
 
 
+def done_note(t: dict) -> str | None:
+    """Итог задачи, законченной без PR: строка отчёта, с которой она перешла в done."""
+    return next((h.get("note") for h in reversed(t.get("history") or []) if h.get("to") == "done" and h.get("note")), None)
+
+
 def task_tokens(t: dict) -> int:
     return sum(u["input"] + u["output"] + u["cache_write"] for u in task_usage(t).values())
 
@@ -1259,10 +1265,10 @@ def search_rule(cfg: dict) -> str:
     целиком решают CLAUDE.md и агенты проекта, и вторая, конкурирующая инструкция от aiflow только мешает."""
     if explorer_mode(cfg) == "project":
         return ""
-    return ("Как искать по коду: вопросы «где это», «кто использует», «сколько таких» отдавай сабагенту "
-            "aiflow:explorer (несколько — параллельно) и сам читай только файлы, от которых зависит решение. "
-            "Если ищешь сам: символ — где определён, кто использует, реализует, вызывает — инструментом LSP, когда он "
-            "есть для языка (отложенный — загрузи через ToolSearch), а не текстовым поиском.")
+    return ("How to search the code: send questions such as \"where is this\", \"who uses this\", \"how many\" to the "
+            "aiflow:explorer subagent (several in parallel). Read yourself only the files that the decision depends on. "
+            "If you search yourself, for a symbol (where it is defined, who uses, implements or calls it) use the LSP "
+            "tool when it is available for the language (if it is deferred, load it through ToolSearch), not a text search.")
 
 
 def with_search_rule(prompt: str, cfg: dict) -> str:
@@ -1271,7 +1277,7 @@ def with_search_rule(prompt: str, cfg: dict) -> str:
     rule = search_rule(cfg)
     if not rule:
         return prompt
-    at = prompt.find("Файл задачи")
+    at = prompt.find("Task file")
     end = prompt.find("\n", at) if at != -1 else -1
     if end == -1:
         return rule + "\n" + prompt
@@ -1282,64 +1288,69 @@ def planner_prompt(store: Store, t: dict, cfg: dict) -> str:
     tid = t["id"]
     return with_search_rule((
         f"aiflow task {tid}: {t.get('title', '')}\n"
-        f"Файл задачи: {store.task_path(tid)} — прочитай его целиком.\n"
-        f"Базовая ветка: {cfg['base_branch']}. Ветка задачи: ai/{tid}.\n"
-        "Сначала оцени задачу (раздел «Оценка задачи» твоих инструкций) и выбери один путь:\n"
-        f"— сложная: прочитай правила плана ({PLANNER_PLAN_MD}) и сделай draft PR с планом, затем "
+        f"Task file: {store.task_path(tid)}. Read it in full.\n"
+        f"Base branch: {cfg['base_branch']}. Task branch: ai/{tid}.\n"
+        "First assess the task (section \"Task assessment\" of your instructions) and select one route:\n"
+        f"- complex: read the plan rules ({PLANNER_PLAN_MD}) and make a draft PR with a plan. Then run "
         f"aiflow report {tid} --role planner --status plan_ready "
-        "--pr <номер> --complexity complex --summary \"<одна строка>\";\n"
-        f"— простая, поручить исполнителю (Sonnet): aiflow report {tid} --role planner --status delegate "
-        "--summary \"<одна строка>\" --details-file <указания исполнителю в $CLAUDE_JOB_DIR/tmp/>;\n"
-        "— простая, сделать самому: сделай по разделу «Делаешь сам» и отчитайся "
-        f"aiflow report {tid} --role planner --status ready_for_review --pr <номер> --summary \"<1–2 строки>\" "
-        f"(или --status done, если репозиторий менять не понадобилось). Инструкции исполнителя: {WORKER_MD}. "
-        f"Как только решил делать сам — до первой правки выполни aiflow report {tid} --role planner "
-        "--status self_execute --summary \"<что делаю, одна строка>\" и продолжай: так очередь покажет, что идёт "
-        "работа, а не планирование.\n"
-        "Закончи ход после отчёта."
+        "--pr <number> --complexity complex --summary \"<one line>\";\n"
+        f"- simple, delegate to the worker (Sonnet): aiflow report {tid} --role planner --status delegate "
+        "--summary \"<one line>\" --details-file <instructions for the worker, in $CLAUDE_JOB_DIR/tmp/>;\n"
+        "- simple, do it yourself: obey the section \"Do it yourself\" and report "
+        f"aiflow report {tid} --role planner --status ready_for_review --pr <number> --summary \"<1-2 lines>\" "
+        f"(or --status done if the repository did not have to change). Worker instructions: {WORKER_MD}. "
+        f"When you decide to do it yourself, before the first edit run aiflow report {tid} --role planner "
+        "--status self_execute --summary \"<what you do, one line>\" and continue: then the queue shows work, "
+        "not planning.\n"
+        "End your turn after the report."
     ), cfg)
 
 
 def amend_list(items: list[dict]) -> str:
-    return "\n\n".join(f"Дополнение №{a['n']} ({a.get('author') or 'пользователь'}, {a['at'][:16].replace('T', ' ')}):\n"
+    return "\n\n".join(f"Amendment {a['n']} ({a.get('author') or 'user'}, {a['at'][:16].replace('T', ' ')}):\n"
                        f"{a['text'].strip()}" for a in items)
 
 
 def amend_prompt(t: dict, role: str, state: str, items: list[dict], live: bool) -> str:
     """Дополнения пользователя к задаче. live — сессия сейчас работает (доставка хуком)."""
-    head = f"Пользователь дополнил задачу {t['id']}:\n\n{amend_list(items)}\n\n"
+    head = f"The user amended task {t['id']}:\n\n{amend_list(items)}\n\n"
     if state == "discussing":
-        return head + "Учти это в обсуждении и ответь пользователю."
+        return head + "Include this in the discussion and reply to the user."
     if state == "answered":
-        return head + ("Это продолжение твоего ответа на вопрос. Просят изменить код — составь план по правилам "
-                       f"плана ({PLANNER_PLAN_MD}; ветка ai/{t['id']}, draft PR) и выполни aiflow report {t['id']} --role planner "
-                       "--status plan_ready --pr <номер> --complexity simple|complex --summary \"<одна строка>\". "
-                       f"Новый вопрос — ответь и выполни aiflow report {t['id']} --role planner --status answered "
-                       "--summary \"<ответ в 1–3 строки>\". Хотят обсудить — обсуждай и закончи ход.")
+        return head + ("This continues your answer to the question. If the user asks for a code change, write a plan "
+                       f"by the plan rules ({PLANNER_PLAN_MD}; branch ai/{t['id']}, draft PR) and run "
+                       f"aiflow report {t['id']} --role planner "
+                       "--status plan_ready --pr <number> --complexity simple|complex --summary \"<one line>\". "
+                       f"If it is a new question, answer it and run aiflow report {t['id']} --role planner "
+                       "--status answered --summary \"<the answer in 1-3 lines>\". If the user wants to discuss, "
+                       "discuss and end your turn.")
     if role == "planner":
         if not t.get("pr"):
-            return head + ("Учти это в плане, который сейчас пишешь (или в работе, если делаешь задачу сам)." if live else
-                           f"Учти это в плане, доведи его до конца и отчитайся aiflow report {t['id']} --role planner "
-                           "--status plan_ready --pr <номер> --summary \"<одна строка>\", как в твоих инструкциях.")
-        tail = ("Учти дополнение в плане: обнови описание PR (gh pr edit --body-file), допиши «Историю изменений плана», "
-                "ответь в PR одним комментарием, первая строка которого <!-- aiflow:planner -->")
-        return head + tail + (", и продолжай по инструкциям." if live else
-                              f", затем выполни aiflow report {t['id']} --role planner --status plan_ready "
-                              f"--pr {t['pr']} --summary \"<что изменено>\".")
-    head += ("Это часть задачи наравне с планом. Учти дополнение в реализации; если уже сделанное ему противоречит — "
-             "переделай. По готовности ответь в PR комментарием, первая строка которого <!-- ai-review-reply -->: "
-             "что сделано по дополнению (или почему не сделано). ")
+            return head + ("Include this in the plan that you write now (or in the work, if you do the task yourself)."
+                           if live else
+                           f"Include this in the plan, complete the plan and report aiflow report {t['id']} "
+                           "--role planner --status plan_ready --pr <number> --summary \"<one line>\", as in your "
+                           "instructions.")
+        tail = ("Include the amendment in the plan: update the PR description (gh pr edit --body-file), add a line to "
+                "\"Plan change history\", and reply in the PR with one comment whose first line is "
+                "<!-- aiflow:planner -->.")
+        return head + tail + (" Then continue by your instructions." if live else
+                              f" Then run aiflow report {t['id']} --role planner --status plan_ready "
+                              f"--pr {t['pr']} --summary \"<what changed>\".")
+    head += ("This is a part of the task, equal to the plan. Include the amendment in the implementation. If finished "
+             "work contradicts it, redo that work. When it is done, reply in the PR with a comment whose first line is "
+             "<!-- ai-review-reply -->: what you did for the amendment, or why you did not. ")
     if live:
-        return head + ("Если ты сейчас в цикле ревью — внеси правку, прогони тесты, запушь, ответь и снова запусти "
-                       "aiflow review. Если то же дополнение уже вернул aiflow review как human_input, второй раз его "
-                       "не обрабатывай. Дальше продолжай по инструкциям.")
+        return head + ("If you are in the review cycle now: edit, run the tests, push, reply and run aiflow review "
+                       "again. If aiflow review already returned the same amendment as human_input, do not process it "
+                       "a second time. Then continue by your instructions.")
     pr = t.get("pr")
     if not pr:
-        return head + ("Дальше — как в разделе «Задача без плана» твоих инструкций: отчёт done или PR и "
-                       "ready_for_review.")
-    return head + ("Тесты, коммит, git push, затем выполни "
-                   f"aiflow report {t['id']} --role worker --status ready_for_review --pr {pr} --summary \"<1–2 строки>\" "
-                   "и закончи ход. Ревью сам не запускай — тебя разбудят, когда подойдёт очередь.")
+        return head + ("Then obey the section \"Task without a plan\" of your instructions: report done, or open a PR "
+                       "and report ready_for_review.")
+    return head + ("Run the tests, commit, git push, then run "
+                   f"aiflow report {t['id']} --role worker --status ready_for_review --pr {pr} --summary \"<1-2 lines>\" "
+                   "and end your turn. Do not start the review yourself: aiflow wakes you when it is your turn.")
 
 
 def launch_amendments(t: dict) -> str:
@@ -1347,9 +1358,9 @@ def launch_amendments(t: dict) -> str:
     items = [a for a in t.get("amendments") or [] if not a.get("delivered_at")]
     if not items:
         return ""
-    return ("\n\nДополнения пользователя к задаче (часть задачи наравне с текстом и планом):\n\n" + amend_list(items)
-            + "\n\nЕсли в задаче есть PR, после реализации ответь в нём комментарием, первая строка которого "
-              "<!-- ai-review-reply -->: что сделано по дополнениям.")
+    return ("\n\nUser amendments to the task (a part of the task, equal to its text and plan):\n\n" + amend_list(items)
+            + "\n\nIf the task has a PR, after the implementation reply in it with a comment whose first line is "
+              "<!-- ai-review-reply -->: what you did for the amendments.")
 
 
 def mark_delivered(t: dict, via: str) -> None:
@@ -1359,34 +1370,34 @@ def mark_delivered(t: dict, via: str) -> None:
 
 
 def revise_prompt(t: dict, comments: list[dict]) -> str:
-    quoted = "\n\n".join(f"— {c.get('author', {}).get('login', '?')} ({c.get('createdAt', '')}):\n{c.get('body', '').strip()}"
+    quoted = "\n\n".join(f"- {c.get('author', {}).get('login', '?')} ({c.get('createdAt', '')}):\n{c.get('body', '').strip()}"
                          for c in comments)
     return (
-        f"Новые комментарии к плану в PR #{t['pr']} (задача {t['id']}):\n\n{quoted}\n\n"
-        "Учти их: обнови план в описании PR (gh pr edit --body-file), допиши «Историю изменений плана», "
-        "ответь в PR одним комментарием, первая строка которого <!-- aiflow:planner -->, "
-        f"затем выполни aiflow report {t['id']} --role planner --status plan_ready --pr {t['pr']} "
-        "--summary \"<что изменено>\"."
+        f"New comments on the plan in PR #{t['pr']} (task {t['id']}):\n\n{quoted}\n\n"
+        "Include them: update the plan in the PR description (gh pr edit --body-file), add a line to "
+        "\"Plan change history\", and reply in the PR with one comment whose first line is <!-- aiflow:planner -->. "
+        f"Then run aiflow report {t['id']} --role planner --status plan_ready --pr {t['pr']} "
+        "--summary \"<what changed>\"."
     )
 
 
 def worker_prompt(store: Store, t: dict, cfg: dict, retry: bool = False) -> str:
     base = (
         f"aiflow task {t['id']}: {t.get('title', '')}\n"
-        f"PR #{t['pr']}, ветка ai/{t['id']}, базовая ветка {cfg['base_branch']}. "
-        f"План — в описании PR (gh pr view {t['pr']}). Файл задачи: {store.task_path(t['id'])}.\n"
+        f"PR #{t['pr']}, branch ai/{t['id']}, base branch {cfg['base_branch']}. "
+        f"The plan is in the PR description (gh pr view {t['pr']}). Task file: {store.task_path(t['id'])}.\n"
     )
     if retry:
         rep = store.report(t["id"]) or {}
         base += (
-            "Это повторная попытка после остановки. Прочитай открытые треды ревью в PR и последний отчёт: "
+            "This is a new attempt after a stop. Read the open review threads in the PR and the last report: "
             f"{json.dumps(rep, ensure_ascii=False)}\n"
-            "Если PR уже был на ревью, исправь открытые blocking-замечания и снова отчитайся ready_for_review.\n"
+            "If the PR was already in review, fix the open blocking findings and report ready_for_review again.\n"
         )
     base += (
-        f"Когда реализация готова, PR переведён в ready и проверки пройдены, выполни "
-        f"aiflow report {t['id']} --role worker --status ready_for_review --pr {t['pr']} --summary \"<1–2 строки>\" "
-        "и закончи ход. Ревью сам не запускай — тебя разбудят, когда подойдёт очередь."
+        "When the implementation is complete, the PR is ready (not a draft) and the checks pass, run "
+        f"aiflow report {t['id']} --role worker --status ready_for_review --pr {t['pr']} --summary \"<1-2 lines>\" "
+        "and end your turn. Do not start the review yourself: aiflow wakes you when it is your turn."
     )
     return with_search_rule(base, cfg)
 
@@ -1394,18 +1405,18 @@ def worker_prompt(store: Store, t: dict, cfg: dict, retry: bool = False) -> str:
 def direct_prompt(store: Store, t: dict, cfg: dict) -> str:
     """Задача без плана: исполнитель делает её сразу — по указаниям планировщика, если они есть."""
     brief = (t.get("brief") or "").strip()
-    head = (f"Планировщик уже изучил код и поручил задачу тебе. Его указания:\n\n{brief}\n\n"
+    head = (f"The planner already studied the code and delegated the task to you. Its instructions:\n\n{brief}\n\n"
             if brief else "")
     return with_search_rule((
         f"aiflow task {t['id']}: {t.get('title', '')}\n"
-        f"Файл задачи: {store.task_path(t['id'])} — прочитай его целиком. Плана нет: "
-        "выполни задачу сразу по разделу «Задача без плана» твоих инструкций.\n" + head +
-        f"Базовая ветка: {cfg['base_branch']}. Ветка задачи, если понадобится менять репозиторий: ai/{t['id']}.\n"
-        f"Если репозиторий менять не нужно, по готовности выполни: aiflow report {t['id']} --role worker "
-        "--status done --summary \"<что сделано и как проверено>\" и закончи ход.\n"
-        f"Если изменения в репозитории нужны: ветка, коммит, push, PR (gh pr create, не draft), затем "
-        f"aiflow report {t['id']} --role worker --status ready_for_review --pr <номер> --summary \"<1–2 строки>\" "
-        "и закончи ход. Ревью сам не запускай — тебя разбудят, когда подойдёт очередь."
+        f"Task file: {store.task_path(t['id'])}. Read it in full. There is no plan: "
+        "do the task now by the section \"Task without a plan\" of your instructions.\n" + head +
+        f"Base branch: {cfg['base_branch']}. Task branch, if the repository must change: ai/{t['id']}.\n"
+        f"If the repository does not have to change, when the work is done run: aiflow report {t['id']} --role worker "
+        "--status done --summary \"<what was done and how it was checked>\" and end your turn.\n"
+        "If the repository must change: branch, commit, push, PR (gh pr create, not a draft), then "
+        f"aiflow report {t['id']} --role worker --status ready_for_review --pr <number> --summary \"<1-2 lines>\" "
+        "and end your turn. Do not start the review yourself: aiflow wakes you when it is your turn."
     ), cfg)
 
 
@@ -1414,20 +1425,20 @@ def discuss_prompt(store: Store, t: dict, cfg: dict) -> str:
     tid = t["id"]
     return with_search_rule((
         f"aiflow discussion {tid}: {t.get('title', '')}\n"
-        f"Файл задачи: {store.task_path(tid)} — прочитай его целиком. Базовая ветка: {cfg['base_branch']}.\n"
-        f"Режим обсуждения: прочитай правила разговора ({PLANNER_TALK_MD}); когда дойдёт до плана — правила плана "
-        f"({PLANNER_PLAN_MD}). Пользователь хочет обсудить, как лучше "
-        "это сделать, а не получить план сразу. Изучи код и документацию в объёме, нужном для содержательного "
-        "разговора (вопросы к документации — сабагенту aiflow:researcher). Затем напиши пользователю: как ты понял "
-        "задачу, 2–3 варианта с плюсами и минусами, свою рекомендацию и вопросы — и закончи ход: пользователь "
-        "ответит в этой сессии. Ветку, PR и файлы не создавай, пока пользователь явно не скажет, что договорились.\n"
-        "Чем закончить, когда договорились:\n"
-        f"— делаем одну задачу: оформи план по правилам плана (ветка ai/{tid}, draft PR) и выполни "
-        f"aiflow report {tid} --role planner --status plan_ready --pr <номер> --complexity simple|complex "
-        "--summary \"<одна строка>\";\n"
-        "— делаем несколько независимых задач: поставь их одной командой aiflow enqueue (формат — как в "
-        f"/aiflow:intake) и выполни aiflow report {tid} --role planner --status done --summary \"поставлены: <id>…\";\n"
-        f"— решили ничего не делать: aiflow report {tid} --role planner --status done --summary \"<итог обсуждения>\"."
+        f"Task file: {store.task_path(tid)}. Read it in full. Base branch: {cfg['base_branch']}.\n"
+        f"Discussion mode: read the talk rules ({PLANNER_TALK_MD}). When the work becomes a plan, read the plan rules "
+        f"({PLANNER_PLAN_MD}). The user wants to discuss how to do this, not to get a plan immediately. "
+        "Study the code and the documentation as much as a useful conversation needs (send documentation questions "
+        "to the aiflow:researcher subagent). Then write to the user: how you understand the task, 2 or 3 options "
+        "with advantages and disadvantages, your recommendation and your questions. Then end your turn: the user "
+        "replies in this session. Do not create a branch, a PR or files until the user clearly says that you agree.\n"
+        "How to finish when you agree:\n"
+        f"- one task: write the plan by the plan rules (branch ai/{tid}, draft PR) and run "
+        f"aiflow report {tid} --role planner --status plan_ready --pr <number> --complexity simple|complex "
+        "--summary \"<one line>\";\n"
+        "- two or more independent tasks: put them into the queue with one aiflow enqueue command (the format is in "
+        f"/aiflow:intake) and run aiflow report {tid} --role planner --status done --summary \"queued: <id>…\";\n"
+        f"- nothing to do: aiflow report {tid} --role planner --status done --summary \"<result of the discussion>\"."
     ), cfg)
 
 
@@ -1436,47 +1447,47 @@ def ask_prompt(store: Store, t: dict, cfg: dict) -> str:
     tid = t["id"]
     return with_search_rule((
         f"aiflow question {tid}: {t.get('title', '')}\n"
-        f"Файл задачи: {store.task_path(tid)} — прочитай его целиком. Базовая ветка: {cfg['base_branch']}.\n"
-        f"Это вопрос, а не задача: прочитай правила разговора ({PLANNER_TALK_MD}). Найди ответ в коде и документации "
-        "(вопросы к документации — сабагенту aiflow:researcher) и ответь пользователю здесь: по существу, с путями "
-        "и номерами строк. Ветку, PR и файлы не создавай. Затем выполни "
-        f"aiflow report {tid} --role planner --status answered --summary \"<ответ в 1–3 строки>\" "
-        "--details-file <файл с полным ответом в $CLAUDE_JOB_DIR/tmp/> и закончи ход.\n"
-        f"Если потом пользователь попросит что-то изменить — составь план по правилам плана ({PLANNER_PLAN_MD}; "
-        f"ветка ai/{tid}, draft PR) и выполни aiflow report {tid} --role planner --status plan_ready "
-        "--pr <номер> --complexity simple|complex --summary \"<одна строка>\". Новый вопрос — снова ответ и "
-        "--status answered."
+        f"Task file: {store.task_path(tid)}. Read it in full. Base branch: {cfg['base_branch']}.\n"
+        f"This is a question, not a task: read the talk rules ({PLANNER_TALK_MD}). Find the answer in the code and the "
+        "documentation (send documentation questions to the aiflow:researcher subagent). Answer the user here: "
+        "directly, with paths and line numbers. Do not create a branch, a PR or files. Then run "
+        f"aiflow report {tid} --role planner --status answered --summary \"<the answer in 1-3 lines>\" "
+        "--details-file <file with the full answer, in $CLAUDE_JOB_DIR/tmp/> and end your turn.\n"
+        f"If the user then asks for a change, write a plan by the plan rules ({PLANNER_PLAN_MD}; "
+        f"branch ai/{tid}, draft PR) and run aiflow report {tid} --role planner --status plan_ready "
+        "--pr <number> --complexity simple|complex --summary \"<one line>\". For a new question, answer again and "
+        "report --status answered."
     ), cfg)
 
 
 def review_prompt(t: dict, cfg: dict) -> str:
-    where = (f"по разделу «Ход 2: ревью» инструкций исполнителя ({WORKER_MD}; прочитай, если ещё не читал)"
-             if t.get("self_executed") else "как описано в твоих инструкциях")
+    where = (f"by the section \"Turn 2: review\" of the worker instructions ({WORKER_MD}; read it if you did not)"
+             if t.get("self_executed") else "as your instructions tell you")
     return (
-        f"Твоя очередь на ревью PR #{t['pr']} (задача {t['id']}). "
-        f"git fetch origin; git rebase origin/{cfg['base_branch']}; разреши конфликты; прогони тесты; "
-        "git push --force-with-lease. Затем запусти aiflow review --pr "
-        f"{t['pr']} и действуй по статусу {where}, до терминального статуса."
+        f"It is your turn for the review of PR #{t['pr']} (task {t['id']}). "
+        f"git fetch origin; git rebase origin/{cfg['base_branch']}; resolve the conflicts; run the tests; "
+        "git push --force-with-lease. Then run aiflow review --pr "
+        f"{t['pr']} and act on the status {where}, until a final status."
     )
 
 
 def review_result_prompt(store: "Store", t: dict, cfg: dict, status: str) -> str:
     """Ревью запустил сам aiflow, и оно требует работы модели: исправлений, rebase, ответа человеку."""
-    where = (f"по разделу «Ход 2: ревью» инструкций исполнителя ({WORKER_MD}; прочитай, если ещё не читал)"
-             if t.get("self_executed") else "по таблице статусов из твоих инструкций («Ход 2: ревью»)")
+    where = (f"by the section \"Turn 2: review\" of the worker instructions ({WORKER_MD}; read it if you did not)"
+             if t.get("self_executed") else "by the status table in your instructions (\"Turn 2: review\")")
     return (
-        f"aiflow уже запустил ревью PR #{t['pr']} (задача {t['id']}) без тебя: ветка не отставала от "
-        f"{cfg['base_branch']}. Результат — статус {status}, подробности в файле {store.runs / t['id'] / 'review.json'} "
-        f"(прочитай его). Действуй {where}: сделай, что требует этот статус, затем сам запускай "
-        f"aiflow review --pr {t['pr']} и продолжай до итогового статуса."
+        f"aiflow already ran the review of PR #{t['pr']} (task {t['id']}) without you: the branch was not behind "
+        f"{cfg['base_branch']}. The result is the status {status}. The details are in the file "
+        f"{store.runs / t['id'] / 'review.json'} (read it). Act {where}: do what this status needs, then run "
+        f"aiflow review --pr {t['pr']} yourself and continue until a final status."
     )
 
 
 def ci_fix_prompt(t: dict, failed: list[str]) -> str:
     return (
-        f"PR #{t['pr']} одобрен, но после этого упали проверки CI: {', '.join(failed) or 'см. gh pr checks'}. "
-        "Посмотри gh pr checks и логи упавших job, исправь, прогони тесты, запушь и снова запусти "
-        f"aiflow review --pr {t['pr']}."
+        f"PR #{t['pr']} is approved, but CI checks failed after that: {', '.join(failed) or 'see gh pr checks'}. "
+        "Look at gh pr checks and the logs of the failed jobs. Fix, run the tests, push and run "
+        f"aiflow review --pr {t['pr']} again."
     )
 
 
@@ -1485,24 +1496,25 @@ _BASE_SEEN: dict[tuple[str, str], tuple[float, bool]] = {}
 STAGE_ROLE = {"planning": "planner", "discussing": "planner", "answered": "planner", "in_progress": "worker", "in_review": "worker"}
 
 RESUME_FINISH = {
-    "discussing": "Продолжи обсуждение с пользователем: PR — только когда договоритесь, итог — aiflow report {id} "
-                  "--role planner (plan_ready или done), как в первом сообщении этой сессии.",
-    "planning": "Доведи выбранный путь до конца и отчитайся aiflow report {id} --role planner (plan_ready, delegate, "
-                "ready_for_review или done), как в первом сообщении этой сессии.",
-    "in_progress": "Доведи реализацию до конца и отчитайся aiflow report {id} --role worker --status ready_for_review "
-                   "(или --status done, если это задача без плана и без изменений в репозитории), как в твоих инструкциях.",
-    "in_review": "Продолжи цикл ревью PR #{pr} (aiflow review --pr {pr}) до терминального статуса, как в твоих инструкциях.",
+    "discussing": "Continue the discussion with the user. Open a PR only when you agree. The result is aiflow report "
+                  "{id} --role planner (plan_ready or done), as in the first message of this session.",
+    "planning": "Complete the route that you selected and report aiflow report {id} --role planner (plan_ready, "
+                "delegate, ready_for_review or done), as in the first message of this session.",
+    "in_progress": "Complete the implementation and report aiflow report {id} --role worker --status ready_for_review "
+                   "(or --status done for a task without a plan and without repository changes), as in your instructions.",
+    "in_review": "Continue the review cycle of PR #{pr} (aiflow review --pr {pr}) until a final status, as in your "
+                 "instructions.",
 }
 
 
 def resume_prompt(t: dict, state: str, why: str, base: str) -> str:
-    """Промпт для возобновления той же сессии после остановки."""
+    """Промпт для возобновления той же сессии после остановки. why — причина по-русски, как в панели."""
     return (
-        f"Работу над задачей {t['id']} прервали ({why}). Базовая ветка сейчас: {base} — "
-        "если раньше была указана другая, работай от этой. Продолжи с того места, где остановился: "
-        "проверь git status и git log в своём рабочем каталоге — незакоммиченные правки на месте, "
-        "доделай начатое, не начинай заново. "
-        + RESUME_FINISH.get(state, "Продолжи по своим инструкциям.").format(id=t["id"], pr=t.get("pr"))
+        f"The work on task {t['id']} was interrupted ({why}). The base branch now is {base}: "
+        "if a different one was given before, use this one. Continue from where you stopped: "
+        "check git status and git log in your working directory. Uncommitted edits are still there. "
+        "Complete what you started. Do not start again. "
+        + RESUME_FINISH.get(state, "Continue by your instructions.").format(id=t["id"], pr=t.get("pr"))
     )
 
 
@@ -1573,23 +1585,27 @@ class Dispatcher:
             t["report_seen"] = t.get("report_prev")  # GitHub не ответил: разберём отчёт в следующий проход
             raise
         want = f"ai/{t['id']}"
-        problem = ""
+        problem = fix = ""  # problem — человеку (панель, событие), fix — сессии
         if pr.get("state") != "OPEN":
             problem = f"PR #{n} не открыт ({pr.get('state')})"
+            fix = f"PR #{n} is not open ({pr.get('state')})"
         elif pr.get("headRefName") != want:
             problem = f"PR #{n} открыт из ветки {pr.get('headRefName')}, а ветка задачи — {want}"
+            fix = f"PR #{n} is from the branch {pr.get('headRefName')}, but the task branch is {want}"
         elif plan and "<!-- ai-plan" not in (pr.get("body") or ""):
             problem = f"в описании PR #{n} нет плана по шаблону (маркер <!-- ai-plan v1 -->)"
+            fix = f"the description of PR #{n} has no plan by the template (marker <!-- ai-plan v1 -->)"
         elif not plan and pr.get("isDraft"):
-            problem = f"PR #{n} ещё draft: переведи его командой gh pr ready {n}"
+            problem = f"PR #{n} ещё draft"
+            fix = f"PR #{n} is still a draft: run gh pr ready {n}"
         if not problem:
             (t.get("bounced") or {}).pop(role, None)
             return True
         counts = t.setdefault("bounced", {})
         counts[role] = counts.get(role, 0) + 1
         self.store.log(t["id"], {"report_rejected": problem})
-        text = (f"Отчёт {rep.get('status')} по задаче {t['id']} не принят: {problem}. Исправь и отчитайся снова "
-                f"командой aiflow report {t['id']} --role {role} с верным номером PR.")
+        text = (f"The report {rep.get('status')} for task {t['id']} was rejected: {fix}. Correct this and report "
+                f"again with aiflow report {t['id']} --role {role} and the correct PR number.")
         if counts[role] > 2 or not self.wake(t, role, text):
             self.to_human(t, f"отчёт {role} не принят: {problem}", "report")
             return False
@@ -1614,10 +1630,10 @@ class Dispatcher:
             return
         counts = t.setdefault("nudged", {})
         if counts.get(role, 0) < 1:
-            text = (f"Ты закончил ход по задаче {t['id']} без итогового отчёта, поэтому очередь не знает результата. "
-                    "Если работа не закончена — доделай. Если нужен ответ или решение человека — выполни "
-                    f"aiflow report {t['id']} --role {role} --status blocked --summary \"<что нужно>\". "
-                    + RESUME_FINISH.get(state, "Отчитайся по своим инструкциям.").format(id=t["id"], pr=t.get("pr")))
+            text = (f"You ended your turn on task {t['id']} without a final report, so the queue does not know the "
+                    "result. If the work is not complete, complete it. If you need a reply or a decision from a human, "
+                    f"run aiflow report {t['id']} --role {role} --status blocked --summary \"<what you need>\". "
+                    + RESUME_FINISH.get(state, "Report by your instructions.").format(id=t["id"], pr=t.get("pr")))
             if self.wake(t, role, text):
                 counts[role] = counts.get(role, 0) + 1
                 self.touch(t, role)
@@ -2086,7 +2102,7 @@ class Dispatcher:
         ttl = float(self.cfg.get("answered_ttl_hours") or 24)
         if age_minutes(t.get("state_at")) > ttl * 60:
             self.set_state(t, "done", "вопрос закрыт: продолжения не было")
-            self.adv_merged(t)
+            self.adv_merged(t)  # своё время на чтение ответа (answered_ttl_hours) уже прошло
 
     def adv_planning(self, t: dict) -> None:
         rep = self.new_report(t, "planner")
@@ -2348,7 +2364,12 @@ class Dispatcher:
                         self.claude.rm(e["id"])
             t["cleaned"] = True
 
-    adv_done = adv_merged  # задача trivial без PR: итог в событии и в report.json
+    def adv_done(self, t: dict) -> None:
+        """Задача закончилась без PR (обзор, ответ, обсуждение, операционная): её итог — в самой сессии.
+        Сессию убираем не сразу, а через done_keep_hours: пользователь читает её и может продолжить разговор."""
+        if not t.get("pr") and age_minutes(t.get("state_at")) < float(self.cfg.get("done_keep_hours") or 0) * 60:
+            return
+        self.adv_merged(t)
 
     def adv_cancelled(self, t: dict) -> None:
         self.release_lock(t)
@@ -2462,11 +2483,11 @@ class Dispatcher:
         t.setdefault("comments_seen_at", iso())
         t.setdefault("comments_floor", iso())
         if t.get("pr"):
-            prompt += (f"\nУ задачи уже есть PR #{t['pr']} из ветки ai/{t['id']}: работай в этой ветке "
-                       f"(git fetch origin; git switch ai/{t['id']}), новый PR не открывай. Доведи работу до конца и "
-                       f"отчитайся ready_for_review с --pr {t['pr']}.")
+            prompt += (f"\nThe task already has PR #{t['pr']} from the branch ai/{t['id']}: work in this branch "
+                       f"(git fetch origin; git switch ai/{t['id']}). Do not open a new PR. Complete the work and "
+                       f"report ready_for_review with --pr {t['pr']}.")
         if retry:
-            prompt += ("\nЭто повторная попытка после остановки: последний отчёт — "
+            prompt += ("\nThis is a new attempt after a stop. The last report: "
                        + json.dumps(self.store.report(t["id"]) or {}, ensure_ascii=False))
         if not self.launch(t, "worker", prompt, model=model, effort=effort):
             if retry:
@@ -2595,7 +2616,7 @@ class Dispatcher:
         if self.wake(t, "worker", prompt):
             return True
         model, effort = worker_choice(self.cfg, t)
-        return self.launch(t, "worker", prompt + "\n\nКонтекст задачи: " + worker_prompt(self.store, t, self.cfg),
+        return self.launch(t, "worker", prompt + "\n\nTask context: " + worker_prompt(self.store, t, self.cfg),
                            model=model, effort=effort)
 
     def start_auto_review(self, t: dict) -> bool:
@@ -2712,7 +2733,7 @@ def open_orchestrator(store: "Store", claude=None) -> tuple[str, bool]:
     if sid:
         return sid, False
     sid, out = claude.launch("aiflow:orchestrator", ORCHESTRATOR_NAME,
-                             "Готов к задачам. Пользователь напишет их через /aiflow:intake.",
+                             "Be ready for tasks. The user gives them through /aiflow:intake.",
                              mode=store.config().get("permission_mode"))
     if not sid:
         raise AiflowError("не удалось запустить сессию координатора: " + out[-200:])
@@ -2776,7 +2797,7 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
             "id": t["id"], "title": t.get("title", ""), "state": st,
             "label": "планировщик делает сам" if doing_self else
                      "вопрос" if st == "discussing" and t.get("kind") == "ask" else STAGE_LABEL.get(st, st),
-            "kind": t.get("kind") or "task", "answer": (t.get("answer") or {}).get("summary") if st == "answered" else None,
+            "kind": t.get("kind") or "task", "answer": (t.get("answer") or {}).get("summary") if st == "answered" else done_note(t) if st == "done" else None,
             "stage": stage, "last_station": last_station,
             "complexity": t.get("complexity"), "pr": pr,
             "pr_url": f"{repo_url}/pull/{pr}" if pr and repo_url else None,

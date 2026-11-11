@@ -1,73 +1,71 @@
 ---
 name: intake
-description: Разобрать сообщение пользователя на задачи и поставить их в очередь aiflow. Запускает монитор очереди в этой сессии.
+description: Split the user's message into tasks and put them into the aiflow queue.
 disable-model-invocation: true
-argument-hint: <задачи одним сообщением>
+argument-hint: <tasks in one message>
 ---
-Задачи пользователя:
+The user's tasks:
 
 $ARGUMENTS
 
-Ты разбираешь задачи и ставишь их в очередь. Код не читаешь, агентов не запускаешь.
+You split the message into tasks and put them into the queue. Do not read code. Do not start
+agents. Reply to the user in the user's language. Keep the task `text` and `title` in the
+user's language and words.
 
-1. Выполни `aiflow doctor --quick`. Если есть строки с ✗ — покажи их и остановись.
-   Если пользователь просит не сделать, а обсудить («надо обсудить, как лучше…»,
-   «давай подумаем, как сделать…», «есть идея, обсудим»), это одна задача
-   `"kind": "discuss"`: поставь её без уточняющих вопросов и без деления, с полным
-   текстом пользователя. Для неё запустится сессия Opus для разговора; PR появится,
-   только когда вы договоритесь. Ответь: «Сессия обсуждения запускается — откройте её
-   кнопкой «Открыть сессию» в панели, когда она напишет первые соображения».
-   Пример: `{"id": "search-design", "title": "Обсудить поиск", "kind": "discuss", "text": "…"}`.
-   Если это вопрос о коде, а не просьба что-то сделать («где у нас …», «как работает …»,
-   «почему …»), это задача `"kind": "ask"`: ответит сессия планировщика, ответ придёт
-   событием. Плана не будет, пока пользователь не попросит изменение.
-   Если сообщение продолжает недавний вопрос или обсуждение («перенеси это туда-то»
-   после ответа, где лежит функционал), не ставь новую задачу: выполни
-   `aiflow amend <id> --file <файл>` для той задачи (стадия «ответ дан» или
-   «обсуждение идеи» в `aiflow status`) — её сессия уже знает контекст и составит план.
-2. Если задача неясна настолько, что её нельзя спланировать, задай 1–3 уточняющих
-   вопроса одним сообщением и дождись ответа. Иначе не спрашивай.
-3. Определи, сколько здесь задач. Задача aiflow — это один PR: свой план, своя
-   реализация, своё ревью и мерж. Поэтому по умолчанию одно сообщение — одна задача.
-   - Делить можно, только если пользователь сам перечислил несвязанные вещи
-     (нумерованный список, «и ещё…», разные части продукта), и каждая из них полезна
-     и мержится сама по себе, без остальных.
-   - Не дели одну фичу на слои (конфиг, бэкенд, UI), варианты (PostgreSQL, SQLite,
-     SQL Server — это одна задача «поддержка нескольких СУБД»), этапы или
-     «подготовку + реализацию». Если части меняют одни и те же файлы или
-     абстракции, или одна бессмысленна без другой, — это одна задача. Разбить её
-     на шаги — работа планировщика внутри одного PR.
-   - Сомневаешься — одна задача. Если задача выглядит слишком большой для одного
-     PR, всё равно ставь одну: планировщик предложит разбиение в плане, и
-     пользователь решит.
-   Каждой задаче дай id: латиница в нижнем регистре, цифры, дефисы, до 48 символов.
-   `depends_on` — только между задачами, которые пользователь перечислил отдельно,
-   когда одной нужен смерженный результат другой.
-4. Сложность не оценивай и поле `complexity` не ставь: каждую задачу сначала получает
-   планировщик (Opus). Он изучит код и сам решит — план на обсуждение, поручение
-   исполнителю (Sonnet) или сделать сам. Даже «подними контейнер» ставь обычной задачей.
-5. Для задач с интерфейсом заполни `ui`: ссылка на артборд Claude Design, если
-   пользователь её дал, иначе `"нет макета"`.
-6. Модели и effort берутся из настроек проекта. Если пользователь прямо назвал модель для
-   задачи («план пусть делает fable», «исполнитель на opus», «думай на max»), поставь её в
-   задачу: `"planner_model"` и `"planner_effort"` — кто планирует (а также отвечает на вопрос
-   и ведёт обсуждение), `"worker_model"` и `"worker_effort"` — кто реализует. Модель —
-   `fable`, `opus`, `sonnet`, `haiku` или полный id; effort — `low`, `medium`, `high`,
-   `xhigh`, `max`. Без такой просьбы эти поля не ставь и модель сам не выбирай.
-   Пример: `{"id": "search", "text": "…", "planner_model": "fable"}`.
-   Для задачи, которая уже в очереди, — `aiflow model <id> --planner fable` (см. твои команды).
-7. Поставь задачи в очередь одной командой:
+1. Run `aiflow doctor --quick`. If it prints lines with ✗, show them and stop.
+   Then decide what kind of request this is:
+   - **Discussion.** The user asks to discuss, not to do ("let us discuss how to …", "I have an
+     idea, let us talk"). Create one task with `"kind": "discuss"`. Ask no questions, do not split
+     it, and give the user's full text. An Opus session starts for the conversation. A PR comes
+     only when they agree. Tell the user that the discussion session is starting and that they
+     can open it with the button «Открыть сессию» in the panel when it writes its first thoughts.
+     Example: `{"id": "search-design", "title": "Discuss search", "kind": "discuss", "text": "…"}`.
+   - **Question.** The user asks about the code and does not ask to do something ("where is …",
+     "how does … work", "why …"). Create a task with `"kind": "ask"`. A planner session answers,
+     and the answer comes as an event. There is no plan until the user asks for a change.
+   - **Continuation.** The message continues a recent question or discussion ("move it to …"
+     after an answer about where the feature is). Do not create a new task. Run
+     `aiflow amend <id> --file <file>` for that task (stage «ответ дан» or «обсуждение идеи» in
+     `aiflow status`). Its session already has the context and writes the plan.
+2. If a task is so unclear that it cannot be planned, ask 1 to 3 questions in one message and
+   wait for the reply. If not, do not ask.
+3. Decide how many tasks there are. One aiflow task is one PR: its own plan, implementation,
+   review and merge. Thus the default is: one message is one task.
+   - Split only if the user listed unrelated things (a numbered list, "and also …", different
+     parts of the product), and each of them is useful and can merge without the others.
+   - Do not split one feature into layers (config, backend, UI), variants (PostgreSQL, SQLite,
+     SQL Server are one task "support for several databases"), stages, or "preparation +
+     implementation". If the parts change the same files or abstractions, or one part has no
+     value without the other, it is one task. The planner divides it into steps in one PR.
+   - If you are not sure, make one task. If the task looks too large for one PR, still make one:
+     the planner proposes a split in the plan, and the user decides.
+   Give each task an id: lowercase Latin letters, digits, hyphens, 48 characters maximum.
+   Use `depends_on` only between tasks that the user listed separately, when one needs the
+   merged result of the other.
+4. Do not assess complexity and do not set the field `complexity`. The planner (Opus) gets every
+   task first. It studies the code and decides: a plan for discussion, a delegation to the worker
+   (Sonnet), or its own work. Also put "start the container" in as an ordinary task.
+5. For tasks with an interface, fill in `ui`: the link to the Claude Design artboard if the user
+   gave one; if not, `"нет макета"`.
+6. Models and effort come from the project settings. If the user directly named a model for a
+   task ("let fable write the plan", "worker on opus", "think at max"), put it into the task:
+   `"planner_model"` and `"planner_effort"` for the session that plans (it also answers questions
+   and holds discussions), `"worker_model"` and `"worker_effort"` for the session that implements.
+   A model is `fable`, `opus`, `sonnet`, `haiku` or a full id. An effort is `low`, `medium`,
+   `high`, `xhigh` or `max`. Without such a request, do not set these fields and do not select a model.
+   Example: `{"id": "search", "text": "…", "planner_model": "fable"}`.
+   For a task that is already in the queue, use `aiflow model <id> --planner fable`.
+7. Put the tasks into the queue with one command:
    ```
    aiflow enqueue <<'JSON'
    [
      {"id": "csv-export", "title": "Экспорт отчётов в CSV",
-      "text": "Полный текст задачи из сообщения плюс уточнения", "depends_on": [],
+      "text": "The full task text from the message, plus the clarifications", "depends_on": [],
       "ui": null}
    ]
    JSON
    ```
-8. Ответь пользователю одной-двумя строками: сколько задач поставлено. Что с ними
-   будет (план на обсуждение или сразу работа), решит планировщик. Если задач больше одной, в одной фразе скажи,
-   почему они независимы. Если пользователь считает иначе — `aiflow cancel <id>…`
-   снимает ещё не начатые задачи, после чего поставь их заново одной задачей. Монитор уже запущен этим вызовом и сообщит,
-   когда планы будут готовы.
+8. Tell the user in one or two lines how many tasks are in the queue. The planner decides what
+   happens to them (a plan for discussion, or work immediately). If there are two or more tasks,
+   say in one sentence why they are independent. If the user disagrees, `aiflow cancel <id>…`
+   cancels tasks that have not started; then put them in again as one task.

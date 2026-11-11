@@ -268,7 +268,7 @@ class ReviewMain(ProjectCase):
 
     def test_task_with_plan_has_no_extra_contract(self):
         self.run_review()
-        self.assertNotIn("Задача без плана", self.reviewer_calls[0])
+        self.assertNotIn("Task without a plan", self.reviewer_calls[0])
 
     def test_big_change_without_plan_goes_to_a_human(self):
         self.patch("a", direct=True)

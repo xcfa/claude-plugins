@@ -1,6 +1,6 @@
 ---
 name: ui
-description: Открыть панель aiflow в браузере — доска задач, что ждёт пользователя, события очереди.
+description: Open the aiflow panel in the browser — the task board, what waits for the user, queue events.
 ---
-Выполни `aiflow ui --open --detach` (поднимает службу aiflow, если нужно, и открывает панель
-отдельным окном) и сообщи пользователю адрес панели одной строкой.
+Run `aiflow ui --open --detach`. It starts the aiflow service if necessary and opens the panel
+in a separate window. Tell the user the panel address in one line.

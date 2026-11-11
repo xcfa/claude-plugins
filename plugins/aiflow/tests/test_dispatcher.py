@@ -304,7 +304,7 @@ class InReview(ProjectCase):
         self.gh.prs[1]["statusCheckRollup"] = [{"name": "build", "conclusion": "FAILURE"}]
         self.tick()
         self.tick()
-        fixes = [r for r in self.claude.resumed if "упали проверки CI" in r["prompt"]]
+        fixes = [r for r in self.claude.resumed if "CI checks failed" in r["prompt"]]
         self.assertEqual(len(fixes), 1)
 
     def test_paused_review_returns_to_the_queue(self):
@@ -449,9 +449,9 @@ class Retry(ProjectCase):
         self.assertIn("retry", self.kinds(events))
         self.assertEqual(self.state("a"), "in_progress")
         prompt = self.claude.launched[-1]["prompt"]
-        self.assertIn("уже есть PR #5", prompt)
-        self.assertIn("Плана нет", prompt)
-        self.assertNotIn("План — в описании PR", prompt)
+        self.assertIn("already has PR #5", prompt)
+        self.assertIn("There is no plan", prompt)
+        self.assertNotIn("The plan is in the PR description", prompt)
 
     def test_retry_without_pr_starts_over(self):
         self.add("a")
@@ -1058,12 +1058,12 @@ class PlannerInstructions(ProjectCase):
         plan = aiflow.PLANNER_PLAN_MD.read_text(encoding="utf-8")
         talk = aiflow.PLANNER_TALK_MD.read_text(encoding="utf-8")
         self.assertNotIn("<!-- ai-plan v1 -->", core)
-        self.assertNotIn("aiflow discussion`, пользователь хочет", core)
+        self.assertNotIn("## Discussion mode", core)
         for needed in ("<!-- ai-plan v1 -->", "gh pr create --draft", "git switch --detach", "<!-- aiflow:planner -->"):
             self.assertIn(needed, plan)
         for needed in ("--status answered", "aiflow discussion", "aiflow enqueue"):
             self.assertIn(needed, talk)
-        for needed in ("self_execute", "--status delegate", "Оценка задачи"):
+        for needed in ("self_execute", "--status delegate", "Task assessment"):
             self.assertIn(needed, core)
         self.assertLess(len(core), 0.7 * (len(core) + len(plan) + len(talk)))
 
@@ -1127,16 +1127,16 @@ class SearchRule(ProjectCase):
         """В конце длинного сообщения правило не замечали: сессия начинала искать раньше."""
         for text in self.prompts():
             lines = text.split("\n")
-            at = next(i for i, ln in enumerate(lines) if "Файл задачи" in ln)
-            self.assertTrue(lines[at + 1].startswith("Как искать по коду"), lines[at + 1][:60])
-            self.assertLess(text.index("Как искать по коду"), text.index("aiflow report"))
+            at = next(i for i, ln in enumerate(lines) if "Task file" in ln)
+            self.assertTrue(lines[at + 1].startswith("How to search the code"), lines[at + 1][:60])
+            self.assertLess(text.index("How to search the code"), text.index("aiflow report"))
 
     def test_project_mode_says_nothing_about_search(self):
         """Иначе в сессии две инструкции о поиске — от aiflow и из CLAUDE.md проекта, и они спорят."""
         for text in self.prompts(explorer="project"):
             self.assertNotIn("aiflow:explorer", text)
             self.assertNotIn("LSP", text)
-            self.assertNotIn("Как искать по коду", text)
+            self.assertNotIn("How to search the code", text)
 
     def test_unknown_value_falls_back_to_the_plugin_agent(self):
         self.assertEqual(aiflow.explorer_mode({"explorer": "что-то"}), "aiflow")
@@ -1324,6 +1324,23 @@ class Misc(ProjectCase):
         self.report("a", "planner", "done", summary="сделано")
         self.assertIn("batch_done", self.kinds(self.tick()))
         self.assertNotIn("batch_done", self.kinds(self.tick()))
+
+    def test_session_of_a_task_done_without_pr_stays_to_be_read(self):
+        """Итог такой задачи (обзор, ответ) — в самой сессии: её нельзя удалять, пока пользователь читает."""
+        self.add("a")
+        self.tick()
+        sid = self.sid("a", "planner")
+        self.report("a", "planner", "done", summary="обзор готов")
+        self.tick()
+        self.tick()
+        self.assertEqual(self.state("a"), "done")
+        self.assertEqual(self.claude.removed, [])
+        row = aiflow.build_state(self.store)["tasks"][0]
+        self.assertEqual(row["answer"], "обзор готов")
+        self.patch("a", state_at=ago(25 * 60))
+        self.tick()
+        self.assertEqual(self.claude.removed, [sid])
+        self.assertTrue(self.task("a")["cleaned"])
 
 
 if __name__ == "__main__":

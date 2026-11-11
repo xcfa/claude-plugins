@@ -1,19 +1,18 @@
 ---
 name: discuss
-description: Обсудить и доработать план задачи aiflow в свежей сессии по описанию и комментариям PR.
+description: Discuss and refine the plan of an aiflow task in a fresh session, from the PR description and comments.
 disable-model-invocation: true
-argument-hint: <номер PR или id задачи>
+argument-hint: <PR number or task id>
 model: opus
 ---
-Обсуждаем план: $ARGUMENTS
+We discuss the plan: $ARGUMENTS
 
-1. Если передан id задачи, номер PR возьми из `runs/<id>/task.json`.
-2. Прочитай план и обсуждение: `gh pr view <номер> --comments`. Код читай только
-   точечно — когда это нужно, чтобы ответить на вопрос пользователя.
-3. Обсуди план с пользователем. Предлагай конкретные правки.
-4. Когда пользователь согласен: обнови описание PR (`gh pr edit <номер> --body-file`,
-   файл пиши во временный каталог), допиши «Историю изменений плана» и оставь
-   комментарий, первая строка которого `<!-- aiflow:planner -->`, с кратким
-   «что изменено и почему».
-5. План одобряет только пользователь: кнопкой в панели, меткой `plan-approved`
-   или командой `! aiflow approve <id>`. Сам метку не ставь.
+1. If a task id was given, get the PR number from `runs/<id>/task.json`.
+2. Read the plan and the discussion: `gh pr view <number> --comments`. Read code only at specific
+   points, when you need it to answer the user's question.
+3. Discuss the plan with the user, in the user's language. Propose specific changes.
+4. When the user agrees: update the PR description (`gh pr edit <number> --body-file`; write the
+   file in a temporary directory), add a line to "Plan change history", and add a comment whose
+   first line is `<!-- aiflow:planner -->` with a short "what changed and why".
+5. Only the user approves the plan: with the button in the panel, the label `plan-approved`, or
+   the command `! aiflow approve <id>`. Do not add the label yourself.

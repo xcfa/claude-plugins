@@ -1,86 +1,91 @@
-# Планировщик: сложная задача — план в draft PR
+# Planner: a complex task — the plan in a draft PR
 
-Этот файл планировщик читает, только когда решил, что задаче нужен план.
-Результат — draft PR с планом, по которому исполнитель сможет работать без
-дополнительных решений. Пиши план и все тексты в PR на языке задачи.
+The planner reads this file only when it decides that the task needs a plan.
+The result is a draft PR with a plan. The worker must be able to do the work from the plan with
+no more decisions. Keep the section headings in English, exactly as in the template.
+Write the content in the language of the task text.
 
-## Ветка, draft PR, отчёт
+## Branch, draft PR, report
 
-1. Создай ветку и draft PR. Сессия уже запущена в worktree задачи (`.claude/worktrees/<id>`):
-   работай в нём, в основную папку репозитория не переходи. Освободи ветку в конце:
+1. Create the branch and the draft PR. The session is already in the task worktree
+   (`.claude/worktrees/<id>`). Work only there. Do not go to the main repository folder.
+   Release the branch at the end:
    ```
    git fetch origin
-   git switch -c ai/<id> origin/<базовая ветка>
+   git switch -c ai/<id> origin/<base branch>
    git commit --allow-empty -m "plan: <id>"
    git push -u origin ai/<id>
-   gh pr create --draft --base <базовая ветка> --head ai/<id> --title "<кратко>" --body-file <файл>
+   gh pr create --draft --base <base branch> --head ai/<id> --title "<short title>" --body-file <file>
    git switch --detach
    ```
-   Файл с описанием пиши в `$CLAUDE_JOB_DIR/tmp/`. Последняя команда обязательна:
-   исполнитель будет работать с этой веткой в своём worktree.
-2. Отчитайся: `aiflow report <id> --role planner --status plan_ready --pr <номер> --complexity complex --summary "<одна строка>"`
-   и закончи ход. Если задачу невозможно спланировать (противоречие, нет доступа,
-   нужно решение человека), отчитайся `--status blocked` с причиной в summary.
+   Write the description file in `$CLAUDE_JOB_DIR/tmp/`. The last command is mandatory:
+   the worker uses this branch in its own worktree.
+2. Report, then end your turn:
+   `aiflow report <id> --role planner --status plan_ready --pr <number> --complexity complex --summary "<one line>"`
+   If you cannot plan the task (a contradiction, no access, a human decision is necessary),
+   report `--status blocked` and give the cause in the summary.
 
-## Шаблон описания PR
+## PR description template
 
 ```markdown
 <!-- ai-plan v1 -->
-## Цель и границы
-Что входит. Что точно не входит (non-goals).
+## Goal and scope
+What is included. What is not included (non-goals).
 
-## Критерии приёмки
-- [ ] проверяемые пункты, по которым ревьюер и CI решают «сделано»
+## Acceptance criteria
+- [ ] items that the reviewer and CI can check to decide "done"
 
-## Файлы
-| Файл | Изменение |
+## Files
+| File | Change |
 | --- | --- |
-| `path/to/file.ext` | что меняется |
+| `path/to/file.ext` | what changes |
 
-## Интерфейсы и данные
-Новые и изменённые сигнатуры, форматы, миграции.
+## Interfaces and data
+New and changed signatures, formats, migrations.
 
-## Граничные случаи
+## Edge cases
 
-## Тесты
-Какие добавить или изменить. Команды проверки (сборка, линтер, тесты).
+## Tests
+Which tests to add or change. The check commands (build, linter, tests).
 
 ## UI
-Только для задач с интерфейсом: ссылка на артборд в проекте Claude Design,
-одна строка «что реализуем», обязательные состояния (пустое, загрузка, ошибка).
+Only for tasks with an interface: the link to the artboard in the Claude Design project,
+one line "what we implement", the mandatory states (empty, loading, error).
 
-## Риски и пересечения
-Файлы, которые могут трогать другие задачи.
+## Risks and overlaps
+Files that other tasks can also change.
 
-## Порядок реализации
-Шаги в порядке выполнения внутри этого PR; после каждого шага сборка и тесты зелёные.
-Если задача явно слишком велика для одного PR (больше ~1500 строк диффа или несколько
-независимых частей), так и напиши здесь и предложи разбиение на отдельные задачи —
-решает пользователь. Сам задачу не дели и в очередь ничего не ставь.
+## Implementation order
+The steps in the order of work in this PR. After each step, the build and the tests are green.
+If the task is clearly too large for one PR (more than about 1500 diff lines, or two or more
+independent parts), say so here and propose a split into tasks. The user decides.
+Do not split the task yourself and do not put tasks into the queue.
 
-## Рассмотренные варианты
-Что отвергнуто и почему. Это память о причинах решений для исполнителя и ревьюера.
+## Options considered
+What was rejected and why. This is the record of the reasons for the worker and the reviewer.
 
-## История изменений плана
-- <дата>: исходная версия
+## Plan change history
+- <date>: initial version
 
-## Оценка реализации: simple | complex
+## Implementation estimate: simple | complex
 ```
 
-## UI-задачи
+## UI tasks
 
-Дизайн-система лежит в `design/` и `components/ui/`. Если в задаче есть готовый
-артборд Claude Design — сошлись на него. Если дизайна нет и доступны инструменты
-Claude Design (`/design` или MCP Claude Design) — сделай макет на дизайн-системе
-и сошлись на него в разделе «UI». Если инструментов нет — так и напиши в разделе
-«UI» и в summary отчёта: макет сделает человек.
+The design system is in `design/` and `components/ui/`.
+- If the task has an artboard in Claude Design, refer to it.
+- If there is no design and the Claude Design tools are available (`/design` or the Claude Design
+  MCP), make a mockup with the design system and refer to it in the section "UI".
+- If the tools are not available, say so in the section "UI" and in the report summary:
+  a human will make the mockup.
 
-## Доработка плана
+## Plan revision
 
-Когда тебя будят с комментариями: обнови описание PR (`gh pr edit <номер> --body-file`),
-допиши «Историю изменений плана», ответь в PR одним комментарием, первая строка
-которого `<!-- aiflow:planner -->`, и снова отчитайся `--status plan_ready`.
+When aiflow wakes you with comments:
+1. Update the PR description (`gh pr edit <number> --body-file`).
+2. Add a line to "Plan change history".
+3. Reply in the PR with one comment. Its first line is `<!-- aiflow:planner -->`.
+4. Report `--status plan_ready` again.
 
-Дополнение пользователя (`[aiflow] Пользователь дополнил задачу …`) может прийти и
-посреди работы — после вызова инструмента или перед концом хода. Учти его в плане
-так же, как комментарий к PR.
+A user amendment (`[aiflow] The user amended task …`) can come during your work: after a tool
+call or before the end of the turn. Include it in the plan in the same way as a PR comment.
