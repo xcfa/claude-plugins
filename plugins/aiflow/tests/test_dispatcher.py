@@ -1106,7 +1106,7 @@ class ServiceVersion(ProjectCase):
             self.assertFalse(svc.outdated(None))
 
 
-class SearchHint(ProjectCase):
+class SearchRule(ProjectCase):
     """Кто ищет по коду: подагент aiflow или сам проект — настройка explorer."""
 
     def prompts(self, **cfg) -> list[str]:
@@ -1118,28 +1118,38 @@ class SearchHint(ProjectCase):
                 aiflow.discuss_prompt(self.store, t, conf), aiflow.worker_prompt(self.store, with_pr, conf),
                 aiflow.direct_prompt(self.store, t, conf)]
 
-    def test_plugin_explorer_is_named_by_default(self):
+    def test_rule_names_the_plugin_explorer_and_lsp_by_default(self):
         for text in self.prompts():
             self.assertIn("aiflow:explorer", text)
             self.assertIn("LSP", text)
 
-    def test_project_explorer_means_no_hint_about_ours(self):
+    def test_rule_comes_right_after_the_task_file_line(self):
+        """В конце длинного сообщения правило не замечали: сессия начинала искать раньше."""
+        for text in self.prompts():
+            lines = text.split("\n")
+            at = next(i for i, ln in enumerate(lines) if "Файл задачи" in ln)
+            self.assertTrue(lines[at + 1].startswith("Как искать по коду"), lines[at + 1][:60])
+            self.assertLess(text.index("Как искать по коду"), text.index("aiflow report"))
+
+    def test_project_mode_says_nothing_about_search(self):
+        """Иначе в сессии две инструкции о поиске — от aiflow и из CLAUDE.md проекта, и они спорят."""
         for text in self.prompts(explorer="project"):
             self.assertNotIn("aiflow:explorer", text)
-            self.assertIn("LSP", text)  # это про самостоятельный поиск, он нужен в обоих режимах
+            self.assertNotIn("LSP", text)
+            self.assertNotIn("Как искать по коду", text)
 
     def test_unknown_value_falls_back_to_the_plugin_agent(self):
         self.assertEqual(aiflow.explorer_mode({"explorer": "что-то"}), "aiflow")
         self.assertEqual(aiflow.explorer_mode({"explorer": "PROJECT"}), "project")
         self.assertEqual(aiflow.explorer_mode({}), "aiflow")
 
-    def test_agent_files_no_longer_hardcode_the_explorer(self):
+    def test_agent_files_do_not_hardcode_the_explorer_and_no_search_hook_is_left(self):
         for rel in ("agents/planner.md", "agents/worker.md", "prompts/planner-talk.md"):
             self.assertNotIn("aiflow:explorer", (aiflow.PLUGIN_ROOT / rel).read_text(encoding="utf-8"), rel)
-        head = (aiflow.PLUGIN_ROOT / "agents" / "explorer.md").read_text(encoding="utf-8").split("---")[1]
-        self.assertIn("LSP", head)
+        hooks = json.loads((aiflow.PLUGIN_ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
+        self.assertNotIn("PreToolUse", hooks)
 
-    def test_launched_session_gets_the_hint(self):
+    def test_launched_session_gets_no_rule_in_project_mode(self):
         aiflow.write_json(self.root / "runs" / "config.json", {"explorer": "project"})
         self.add("a")
         self.tick()

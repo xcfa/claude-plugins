@@ -230,9 +230,6 @@ DEFAULT_CONFIG = {
     # Кто ищет по коду для планировщика и исполнителя: aiflow — подагент плагина aiflow:explorer;
     # project — как принято в самом проекте (его агенты из .claude/agents, CLAUDE.md): aiflow ничего не подсказывает
     "explorer": "aiflow",
-    # в сессии задачи первый текстовый поиск по коду (grep, git grep, rg) останавливается с напоминанием про LSP,
-    # если в проекте включён плагин языкового сервера; повтор команды проходит (хук scripts/search_hook.py)
-    "search_nudge": True,
     "reviewer_model": "",
     "review_identity": "self",  # self — ревью и мерж от вашего gh; bot — от бота с токеном REVIEW_BOT_TOKEN
     "max_rounds": 5,
@@ -1257,23 +1254,33 @@ def explorer_mode(cfg: dict) -> str:
     return v if v in EXPLORERS else "aiflow"
 
 
-def search_hint(cfg: dict) -> str:
-    """Как искать по коду — строки для первого сообщения сессии. Про подагента aiflow:explorer говорится,
-    только если проект не выбрал свой способ поиска (explorer: project): тогда сессию ведут агенты и
-    правила самого проекта. Про LSP — всегда: он нужен и когда сессия ищет сама, без подагента."""
-    lines = []
-    if explorer_mode(cfg) == "aiflow":
-        lines.append("Поиск по коду: конкретные вопросы отдавай сабагенту aiflow:explorer (несколько — параллельно), "
-                     "а сам читай только файлы, от которых зависит решение.")
-    lines.append("Если ищешь сам и в сессии есть инструмент LSP (он может быть отложенным — тогда загрузи его через "
-                 "ToolSearch): определение символа, все его использования, реализации интерфейса и цепочки вызовов "
-                 "бери у LSP, а не текстовым поиском. Нет LSP для этого языка — ищи как обычно.")
-    return "\n" + "\n".join(lines)
+def search_rule(cfg: dict) -> str:
+    """Правило поиска по коду для первого сообщения сессии. В режиме explorer: project — пусто: как искать,
+    целиком решают CLAUDE.md и агенты проекта, и вторая, конкурирующая инструкция от aiflow только мешает."""
+    if explorer_mode(cfg) == "project":
+        return ""
+    return ("Как искать по коду: вопросы «где это», «кто использует», «сколько таких» отдавай сабагенту "
+            "aiflow:explorer (несколько — параллельно) и сам читай только файлы, от которых зависит решение. "
+            "Если ищешь сам: символ — где определён, кто использует, реализует, вызывает — инструментом LSP, когда он "
+            "есть для языка (отложенный — загрузи через ToolSearch), а не текстовым поиском.")
+
+
+def with_search_rule(prompt: str, cfg: dict) -> str:
+    """Вставить правило поиска сразу после строки с файлом задачи: до описания путей и отчётов.
+    В конце длинного сообщения его не замечали — сессия начинала искать раньше, чем дочитывала."""
+    rule = search_rule(cfg)
+    if not rule:
+        return prompt
+    at = prompt.find("Файл задачи")
+    end = prompt.find("\n", at) if at != -1 else -1
+    if end == -1:
+        return rule + "\n" + prompt
+    return prompt[:end + 1] + rule + "\n" + prompt[end + 1:]
 
 
 def planner_prompt(store: Store, t: dict, cfg: dict) -> str:
     tid = t["id"]
-    return (
+    return with_search_rule((
         f"aiflow task {tid}: {t.get('title', '')}\n"
         f"Файл задачи: {store.task_path(tid)} — прочитай его целиком.\n"
         f"Базовая ветка: {cfg['base_branch']}. Ветка задачи: ai/{tid}.\n"
@@ -1290,8 +1297,7 @@ def planner_prompt(store: Store, t: dict, cfg: dict) -> str:
         "--status self_execute --summary \"<что делаю, одна строка>\" и продолжай: так очередь покажет, что идёт "
         "работа, а не планирование.\n"
         "Закончи ход после отчёта."
-        + search_hint(cfg)
-    )
+    ), cfg)
 
 
 def amend_list(items: list[dict]) -> str:
@@ -1382,7 +1388,7 @@ def worker_prompt(store: Store, t: dict, cfg: dict, retry: bool = False) -> str:
         f"aiflow report {t['id']} --role worker --status ready_for_review --pr {t['pr']} --summary \"<1–2 строки>\" "
         "и закончи ход. Ревью сам не запускай — тебя разбудят, когда подойдёт очередь."
     )
-    return base + search_hint(cfg)
+    return with_search_rule(base, cfg)
 
 
 def direct_prompt(store: Store, t: dict, cfg: dict) -> str:
@@ -1390,7 +1396,7 @@ def direct_prompt(store: Store, t: dict, cfg: dict) -> str:
     brief = (t.get("brief") or "").strip()
     head = (f"Планировщик уже изучил код и поручил задачу тебе. Его указания:\n\n{brief}\n\n"
             if brief else "")
-    return (
+    return with_search_rule((
         f"aiflow task {t['id']}: {t.get('title', '')}\n"
         f"Файл задачи: {store.task_path(t['id'])} — прочитай его целиком. Плана нет: "
         "выполни задачу сразу по разделу «Задача без плана» твоих инструкций.\n" + head +
@@ -1400,14 +1406,13 @@ def direct_prompt(store: Store, t: dict, cfg: dict) -> str:
         f"Если изменения в репозитории нужны: ветка, коммит, push, PR (gh pr create, не draft), затем "
         f"aiflow report {t['id']} --role worker --status ready_for_review --pr <номер> --summary \"<1–2 строки>\" "
         "и закончи ход. Ревью сам не запускай — тебя разбудят, когда подойдёт очередь."
-        + search_hint(cfg)
-    )
+    ), cfg)
 
 
 def discuss_prompt(store: Store, t: dict, cfg: dict) -> str:
     """Задача kind: discuss — обсуждение с пользователем в сессии, PR только по договорённости."""
     tid = t["id"]
-    return (
+    return with_search_rule((
         f"aiflow discussion {tid}: {t.get('title', '')}\n"
         f"Файл задачи: {store.task_path(tid)} — прочитай его целиком. Базовая ветка: {cfg['base_branch']}.\n"
         f"Режим обсуждения: прочитай правила разговора ({PLANNER_TALK_MD}); когда дойдёт до плана — правила плана "
@@ -1423,14 +1428,13 @@ def discuss_prompt(store: Store, t: dict, cfg: dict) -> str:
         "— делаем несколько независимых задач: поставь их одной командой aiflow enqueue (формат — как в "
         f"/aiflow:intake) и выполни aiflow report {tid} --role planner --status done --summary \"поставлены: <id>…\";\n"
         f"— решили ничего не делать: aiflow report {tid} --role planner --status done --summary \"<итог обсуждения>\"."
-        + search_hint(cfg)
-    )
+    ), cfg)
 
 
 def ask_prompt(store: Store, t: dict, cfg: dict) -> str:
     """Задача kind: ask — вопрос о коде. Ответ, а план — только если пользователь попросит изменение."""
     tid = t["id"]
-    return (
+    return with_search_rule((
         f"aiflow question {tid}: {t.get('title', '')}\n"
         f"Файл задачи: {store.task_path(tid)} — прочитай его целиком. Базовая ветка: {cfg['base_branch']}.\n"
         f"Это вопрос, а не задача: прочитай правила разговора ({PLANNER_TALK_MD}). Найди ответ в коде и документации "
@@ -1442,8 +1446,7 @@ def ask_prompt(store: Store, t: dict, cfg: dict) -> str:
         f"ветка ai/{tid}, draft PR) и выполни aiflow report {tid} --role planner --status plan_ready "
         "--pr <номер> --complexity simple|complex --summary \"<одна строка>\". Новый вопрос — снова ответ и "
         "--status answered."
-        + search_hint(cfg)
-    )
+    ), cfg)
 
 
 def review_prompt(t: dict, cfg: dict) -> str:
