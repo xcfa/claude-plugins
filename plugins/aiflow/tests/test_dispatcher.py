@@ -1106,6 +1106,46 @@ class ServiceVersion(ProjectCase):
             self.assertFalse(svc.outdated(None))
 
 
+class SearchHint(ProjectCase):
+    """Кто ищет по коду: подагент aiflow или сам проект — настройка explorer."""
+
+    def prompts(self, **cfg) -> list[str]:
+        aiflow.write_json(self.root / "runs" / "config.json", cfg)
+        conf = self.store.config()
+        t = self.add("a")
+        with_pr = {**t, "pr": 7}
+        return [aiflow.planner_prompt(self.store, t, conf), aiflow.ask_prompt(self.store, t, conf),
+                aiflow.discuss_prompt(self.store, t, conf), aiflow.worker_prompt(self.store, with_pr, conf),
+                aiflow.direct_prompt(self.store, t, conf)]
+
+    def test_plugin_explorer_is_named_by_default(self):
+        for text in self.prompts():
+            self.assertIn("aiflow:explorer", text)
+            self.assertIn("LSP", text)
+
+    def test_project_explorer_means_no_hint_about_ours(self):
+        for text in self.prompts(explorer="project"):
+            self.assertNotIn("aiflow:explorer", text)
+            self.assertIn("LSP", text)  # это про самостоятельный поиск, он нужен в обоих режимах
+
+    def test_unknown_value_falls_back_to_the_plugin_agent(self):
+        self.assertEqual(aiflow.explorer_mode({"explorer": "что-то"}), "aiflow")
+        self.assertEqual(aiflow.explorer_mode({"explorer": "PROJECT"}), "project")
+        self.assertEqual(aiflow.explorer_mode({}), "aiflow")
+
+    def test_agent_files_no_longer_hardcode_the_explorer(self):
+        for rel in ("agents/planner.md", "agents/worker.md", "prompts/planner-talk.md"):
+            self.assertNotIn("aiflow:explorer", (aiflow.PLUGIN_ROOT / rel).read_text(encoding="utf-8"), rel)
+        head = (aiflow.PLUGIN_ROOT / "agents" / "explorer.md").read_text(encoding="utf-8").split("---")[1]
+        self.assertIn("LSP", head)
+
+    def test_launched_session_gets_the_hint(self):
+        aiflow.write_json(self.root / "runs" / "config.json", {"explorer": "project"})
+        self.add("a")
+        self.tick()
+        self.assertNotIn("aiflow:explorer", self.claude.launched[-1]["prompt"])
+
+
 class Models(ProjectCase):
     def test_model_named_at_intake_is_used_for_the_planner(self):
         t = aiflow.normalize_task({"id": "a", "text": "t", "planner_model": "fable", "planner_effort": "high"})

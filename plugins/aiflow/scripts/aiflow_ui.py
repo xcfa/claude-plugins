@@ -321,6 +321,7 @@ def start_server(provider, port: int, wake: threading.Event, service: bool = Fal
                     m = models.setdefault(key, _Models(st.root))
                 items, error = m.get(q.get("refresh") == ["1"])
                 return self._json(200, {"reviewer_model": st.config().get("reviewer_model") or "",
+                                        "explorer": aiflow.explorer_mode(st.config()),
                                         "models": items, "models_error": error})
             self._send(404, b"not found", "text/plain")
 
@@ -401,6 +402,14 @@ def start_server(provider, port: int, wake: threading.Event, service: bool = Fal
                     value = body.get("value")
                     paths = value if isinstance(value, list) else re.split(r"[,\n]+", str(value or ""))
                     aiflow.allow_paths(store, tid, [p for p in paths if str(p).strip()])
+                elif action == "set_explorer":
+                    value = str(body.get("value") or "")
+                    if value not in aiflow.EXPLORERS:
+                        return self._json(400, {"error": "агент поиска: aiflow или project"})
+                    store.set_config("explorer", value)
+                    store.event("config", None, "поиск по коду: " + ("агент проекта" if value == "project"
+                                                                      else "aiflow:explorer") + " (из панели)")
+                    return self._json(200, {"ok": True, "explorer": value})
                 elif action == "set_reviewer_model":
                     value = body.get("value")
                     value = value.strip() if isinstance(value, str) else None

@@ -220,6 +220,16 @@ button:disabled:hover { border-color: var(--rule); }
     <div class="hint" id="rmhint">Формат <code>provider/model</code>. Применяется со следующего раунда ревью; пустое поле — модель по умолчанию opencode.</div>
     <div class="hint" id="rmstatus"></div>
   </form>
+  <div class="setting">
+    <label for="explorer">Поиск по коду в сессиях задач</label>
+    <div class="row">
+      <select id="explorer">
+        <option value="aiflow">Агент плагина — aiflow:explorer</option>
+        <option value="project">Как принято в проекте — его агенты и CLAUDE.md</option>
+      </select>
+    </div>
+    <div class="hint">Для выбранного выше проекта. «Как принято в проекте» — aiflow перестаёт подсказывать планировщику и исполнителю своего агента поиска, и они пользуются тем, что описано в самом проекте. Действует на сессии, запущенные после изменения.</div>
+  </div>
 </details>
 
 <footer class="foot">Пауза — у каждого проекта своя: работающие сессии доделают ход, новые не стартуют. Добавить проект — <code>aiflow up</code> в его каталоге; остановить службу и эту панель — <code>aiflow down</code>; фоновые сессии Claude при этом продолжат работать, остановить их — <code>Ctrl+X</code> в <code>claude agents</code>.</footer>
@@ -615,6 +625,7 @@ async function loadSettings(refresh) {
     if (!r.ok) throw new Error(d.error || r.statusText);
     const input = $("rmodel");
     if (settingsFor !== key || !refresh) input.value = d.reviewer_model;
+    $("explorer").value = d.explorer || "aiflow";
     input.dataset.saved = d.reviewer_model;
     $("rmodels").innerHTML = d.models.map(m => `<option value="${esc(m)}"></option>`).join("");
     settingsFor = key;
@@ -644,6 +655,17 @@ $("rmform").addEventListener("submit", async (e) => {
     setTimeout(load, 300);
   } catch (err) { toast("Не получилось: " + err.message); }
   finally { btn.disabled = false; }
+});
+
+$("explorer").addEventListener("change", async () => {
+  const sel = $("explorer"), key = $("rmproj").value;
+  try {
+    const r = await fetch("/api/action", { method: "POST", headers: { "Content-Type": "application/json", "X-Aiflow-Token": TOKEN }, body: JSON.stringify({ action: "set_explorer", project: key, value: sel.value }) });
+    if (r.status === 403) return staleToken();
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || r.statusText);
+    toast(d.explorer === "project" ? "Поиск по коду: как принято в проекте" : "Поиск по коду: aiflow:explorer");
+  } catch (err) { toast("Не получилось: " + err.message); loadSettings(false); }
 });
 
 // Перерисовка доски создаёт точки заново, и анимация начиналась бы с нуля каждые 5 с.
