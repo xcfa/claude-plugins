@@ -1,0 +1,26 @@
+#!/usr/bin/env sh
+# Хук aiflow перед Bash и Grep: напомнить про LSP при текстовом поиске по коду (scripts/search_hook.py).
+# Срабатывает на каждый вызов во всех сессиях, поэтому вне рабочих копий задач выходит сразу,
+# не запуская Python.
+INPUT=$(cat)
+case "$INPUT" in
+  *worktrees*) ;;
+  *) exit 0 ;;
+esac
+case "$INPUT" in
+  *grep*|*'"Grep"'*|*rg\ *|*findstr*) ;;
+  *) exit 0 ;;
+esac
+export PYTHONUTF8=1
+DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# Сессия Claude держит в PATH ту версию плагина, с которой стартовала: берём самую новую из установленных.
+SCRIPTS="$DIR/../scripts"
+NEWEST=$(ls -d "$DIR"/../../[0-9]*.[0-9]*.[0-9]*/scripts 2>/dev/null | sort -V | tail -n 1)
+[ -n "$NEWEST" ] && [ -f "$NEWEST/search_hook.py" ] && SCRIPTS="$NEWEST"
+for p in python3 python py; do
+  if command -v "$p" >/dev/null 2>&1 && "$p" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; then
+    printf '%s' "$INPUT" | "$p" "$SCRIPTS/search_hook.py"
+    exit $?
+  fi
+done
+exit 0

@@ -230,6 +230,9 @@ DEFAULT_CONFIG = {
     # Кто ищет по коду для планировщика и исполнителя: aiflow — подагент плагина aiflow:explorer;
     # project — как принято в самом проекте (его агенты из .claude/agents, CLAUDE.md): aiflow ничего не подсказывает
     "explorer": "aiflow",
+    # в сессии задачи первый текстовый поиск по коду (grep, git grep, rg) останавливается с напоминанием про LSP,
+    # если в проекте включён плагин языкового сервера; повтор команды проходит (хук scripts/search_hook.py)
+    "search_nudge": True,
     "reviewer_model": "",
     "review_identity": "self",  # self — ревью и мерж от вашего gh; bot — от бота с токеном REVIEW_BOT_TOKEN
     "max_rounds": 5,
