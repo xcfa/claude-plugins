@@ -1325,6 +1325,25 @@ class Misc(ProjectCase):
         self.assertIn("batch_done", self.kinds(self.tick()))
         self.assertNotIn("batch_done", self.kinds(self.tick()))
 
+    def test_sessions_of_a_merged_task_stay_too(self):
+        self.add("a", state="merged", pr=1, sessions={"planner": [{"id": "p-a"}], "worker": [{"id": "w-a"}]})
+        self.claude.sessions.update({"p-a": {"state": "done"}, "w-a": {"state": "done"}})
+        self.tick()
+        self.assertEqual(self.claude.removed, [])
+        self.assertFalse(self.task("a").get("cleaned"))
+        self.patch("a", state_at=ago(15 * 24 * 60))
+        self.tick()
+        self.assertEqual(sorted(self.claude.removed), ["p-a", "w-a"])
+
+    def test_keep_days_zero_never_removes_sessions(self):
+        cfg = self.store.config()
+        cfg["session_keep_days"] = 0
+        aiflow.write_json(self.store.runs / "config.json", cfg)
+        self.add("a", state="merged", pr=1, state_at=ago(400 * 24 * 60), sessions={"worker": [{"id": "w-a"}]})
+        self.claude.sessions["w-a"] = {"state": "done"}
+        self.tick()
+        self.assertEqual(self.claude.removed, [])
+
     def test_session_of_a_task_done_without_pr_stays_to_be_read(self):
         """Итог такой задачи (обзор, ответ) — в самой сессии: её нельзя удалять, пока пользователь читает."""
         self.add("a")
@@ -1337,7 +1356,7 @@ class Misc(ProjectCase):
         self.assertEqual(self.claude.removed, [])
         row = aiflow.build_state(self.store)["tasks"][0]
         self.assertEqual(row["answer"], "обзор готов")
-        self.patch("a", state_at=ago(25 * 60))
+        self.patch("a", state_at=ago(15 * 24 * 60))
         self.tick()
         self.assertEqual(self.claude.removed, [sid])
         self.assertTrue(self.task("a")["cleaned"])

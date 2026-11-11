@@ -224,7 +224,7 @@ DEFAULT_CONFIG = {
     "ask_model": "sonnet",  # вопрос о коде (задача kind: ask)
     "ask_effort": "medium",
     "answered_ttl_hours": 24,  # вопрос с ответом без продолжения закрывается сам
-    "done_keep_hours": 24,  # сессия задачи, законченной без PR, живёт ещё столько: её итог читают в ней самой
+    "session_keep_days": 14,  # сессии законченной задачи живут ещё столько дней: их читают и продолжают. 0 — не удалять
     "worker_model": "sonnet",
     "worker_effort": {"complex": "high", "simple": "medium", "trivial": "medium"},  # или одна строка на все задачи
     "worker_opus_effort": "medium",  # effort worker'а на Opus (worker_model: opus), без учёта сложности
@@ -1828,7 +1828,7 @@ class Dispatcher:
             return self.events
         tasks = self.store.tasks()
         by_id = self.by_id = {t["id"]: t for t in tasks}
-        self.gh.prefetch(t.get("pr") for t in tasks if not (t.get("state") in TERMINAL and t.get("cleaned")))
+        self.gh.prefetch(t.get("pr") for t in tasks if t.get("state") not in TERMINAL)
         self.process_commands(by_id)
         self.check_pause_timer()
         self.check_base()
@@ -2102,7 +2102,7 @@ class Dispatcher:
         ttl = float(self.cfg.get("answered_ttl_hours") or 24)
         if age_minutes(t.get("state_at")) > ttl * 60:
             self.set_state(t, "done", "вопрос закрыт: продолжения не было")
-            self.adv_merged(t)  # своё время на чтение ответа (answered_ttl_hours) уже прошло
+            self.adv_merged(t)
 
     def adv_planning(self, t: dict) -> None:
         rep = self.new_report(t, "planner")
@@ -2357,19 +2357,20 @@ class Dispatcher:
             t["amend_lost_told"] = True
             self.emit(t, "amend_lost", f"{t['id']}: смержено раньше, чем дошли дополнения "
                       f"{', '.join('№' + str(a['n']) for a in lost)} — поставьте их новой задачей")
-        if not t.get("cleaned"):
-            for lst in (t.get("sessions") or {}).values():
-                for e in lst:
-                    if e["id"] in self.sessions:
-                        self.claude.rm(e["id"])
+        if t.get("cleaned"):
+            return
+        # Сессии законченной задачи сразу не удаляем: в них ход работы и итог (у задачи без PR — только там),
+        # их читают и в них продолжают разговор. claude rm удаляет и рабочую копию, поэтому срок всё же есть.
+        days = float(self.cfg.get("session_keep_days") or 0)
+        mine = [e["id"] for lst in (t.get("sessions") or {}).values() for e in lst if e["id"] in self.sessions]
+        if not mine:
+            t["cleaned"] = True  # сессий уже нет (удалены вручную): следить больше не за чем
+        elif days > 0 and age_minutes(t.get("state_at")) > days * 24 * 60:
+            for sid in mine:
+                self.claude.rm(sid)
             t["cleaned"] = True
 
-    def adv_done(self, t: dict) -> None:
-        """Задача закончилась без PR (обзор, ответ, обсуждение, операционная): её итог — в самой сессии.
-        Сессию убираем не сразу, а через done_keep_hours: пользователь читает её и может продолжить разговор."""
-        if not t.get("pr") and age_minutes(t.get("state_at")) < float(self.cfg.get("done_keep_hours") or 0) * 60:
-            return
-        self.adv_merged(t)
+    adv_done = adv_merged  # задача без PR: итог в событии, в report.json и в её сессии
 
     def adv_cancelled(self, t: dict) -> None:
         self.release_lock(t)
