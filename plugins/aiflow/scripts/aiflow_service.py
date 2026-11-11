@@ -398,8 +398,7 @@ def relay_events(store: Store) -> int:
     except AiflowError as e:
         print(f"[aiflow] {e}", flush=True)
         return 1
-    quiet = aiflow.notify_level(store.config()) == "none"
-    if not quiet:
+    if aiflow.notify_status(store.config()):
         url = panel_url(data)
         note = f"; панель: {url}" if url else (f"; панель недоступна: {data['panel_error']}" if data.get("panel_error") else "")
         print(f"[aiflow] монитор запущен{note}", flush=True)
@@ -409,7 +408,7 @@ def relay_events(store: Store) -> int:
             return 0
         if not info():
             if stopped_by_user():
-                if aiflow.notify_level(store.config()) != "none":
+                if aiflow.notify_status(store.config()):
                     print("[aiflow] служба остановлена командой aiflow down; продолжить — aiflow up или /aiflow:resume",
                           flush=True)
                 return 0
@@ -418,7 +417,7 @@ def relay_events(store: Store) -> int:
                 try:
                     ensure()
                 except AiflowError as e:
-                    if aiflow.notify_level(store.config()) != "none":
+                    if aiflow.notify_status(store.config()):
                         print(f"[aiflow] монитор остановился: {e}", flush=True)
                     return 1
         if not events.is_file():
