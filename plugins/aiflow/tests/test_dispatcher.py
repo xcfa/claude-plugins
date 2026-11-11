@@ -1073,6 +1073,39 @@ class PlannerInstructions(ProjectCase):
             self.assertIn("EnterWorktree", head, name)
 
 
+class ServiceVersion(ProjectCase):
+    """Служба одна и самой новой версии, кто бы её ни поднимал."""
+
+    def install(self, *versions: str):
+        import aiflow_service as svc
+        cache = self.tmp / "cache" / "aiflow"
+        for v in versions:
+            (cache / v / "scripts").mkdir(parents=True)
+            (cache / v / "scripts" / "aiflow.py").write_text("", encoding="utf-8")
+        return svc, cache
+
+    def test_newest_installed_version_is_found_next_to_this_one(self):
+        svc, cache = self.install("0.2.9", "0.2.18", "0.2.46", "0.10.1", "not-a-version")
+        with mock.patch.object(aiflow, "VERSION", "0.2.18"):
+            version, script = svc.newest_install(cache / "0.2.18")
+        self.assertEqual(version, "0.10.1")  # по числам, а не по алфавиту
+        self.assertEqual(script, cache / "0.10.1" / "scripts" / "aiflow.py")
+
+    def test_own_version_wins_when_nothing_newer_is_installed(self):
+        svc, cache = self.install("0.2.18", "0.2.9")
+        with mock.patch.object(aiflow, "VERSION", "0.2.18"):
+            self.assertEqual(svc.newest_install(cache / "0.2.18")[0], "0.2.18")
+        with mock.patch.object(aiflow, "VERSION", "0.3.0"):  # запуск из репозитория: соседних версий нет
+            self.assertEqual(svc.newest_install(self.tmp / "repo" / "plugins" / "aiflow")[0], "0.3.0")
+
+    def test_running_service_older_than_the_newest_install_is_outdated(self):
+        svc, cache = self.install("0.2.18", "0.2.46")
+        with mock.patch.object(aiflow, "VERSION", "0.2.18"), mock.patch.object(aiflow, "PLUGIN_ROOT", cache / "0.2.18"):
+            self.assertTrue(svc.outdated({"version": "0.2.18"}))  # даже для монитора версии 0.2.18
+            self.assertFalse(svc.outdated({"version": "0.2.46"}))
+            self.assertFalse(svc.outdated(None))
+
+
 class Models(ProjectCase):
     def test_model_named_at_intake_is_used_for_the_planner(self):
         t = aiflow.normalize_task({"id": "a", "text": "t", "planner_model": "fable", "planner_effort": "high"})

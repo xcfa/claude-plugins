@@ -125,6 +125,22 @@ def _version_tuple(v) -> tuple:
         return (0,)
 
 
+def newest_install(plugin_root: Path | None = None) -> tuple[str, Path]:
+    """Самая новая установленная версия плагина и её aiflow.py. Версии лежат рядом:
+    …/aiflow/<версия>/scripts/aiflow.py. Служба должна быть одна и самой новой, кто бы её ни поднимал:
+    монитор старой сессии, оставшийся в памяти, иначе оживил бы службу своей давней версии."""
+    root = Path(plugin_root or aiflow.PLUGIN_ROOT)
+    own = (aiflow.VERSION, root / "scripts" / "aiflow.py")
+    best = own
+    for script in root.parent.glob("*/scripts/aiflow.py"):
+        name = script.parent.parent.name
+        if _version_tuple(name) == (0,) or not all(part.isdigit() for part in name.split(".")):
+            continue
+        if _version_tuple(name) > _version_tuple(best[0]):
+            best = (name, script)
+    return best
+
+
 def _lock() -> FileLock:
     return FileLock(home() / "service.lock", stale_minutes=0)
 
@@ -161,7 +177,8 @@ def spawn(via_helper: bool = True) -> None:
     выходит: у службы не остаётся живого родителя, и завершение дерева процессов того,
     кто её запустил (например, инструмента Monitor), её не заденет."""
     home().mkdir(parents=True, exist_ok=True)
-    cmd = [_python(), "-X", "utf8", str(Path(aiflow.__file__).resolve()), "service"]
+    script = newest_install()[1] if via_helper else Path(aiflow.__file__)
+    cmd = [_python(), "-X", "utf8", str(script.resolve()), "service"]
     if via_helper:
         cmd.append("--spawn")
     env = aiflow.claude_env()
@@ -206,12 +223,18 @@ def stop(mark_down: bool = True) -> bool:
     return ok
 
 
+def outdated(data: dict | None) -> bool:
+    """Работающая служба старше самой новой установленной версии плагина."""
+    return bool(data and data.get("version")
+                and _version_tuple(data["version"]) < _version_tuple(newest_install()[0]))
+
+
 def ensure(wait: float = 20) -> dict:
-    """Служба работает и не старше этой версии плагина: иначе (пере)запустить.
+    """Служба работает и не старше самой новой установленной версии плагина: иначе (пере)запустить.
     Явный запрос пользователя: снимает отметку «остановлена вручную»."""
     _down_marker().unlink(missing_ok=True)
     data = info()
-    if data and data.get("version") and _version_tuple(data["version"]) < _version_tuple(aiflow.VERSION):
+    if data and outdated(data):
         stop(mark_down=False)
         data = None
     if not data:
@@ -311,9 +334,17 @@ def serve() -> int:
     lock = _lock()
     if not lock.acquire(extra={"version": aiflow.VERSION}):
         other = lock.data() or {}
-        print(f"{iso()} служба aiflow уже работает (pid {other.get('pid', '?')}, версия {other.get('version', '?')})",
-              flush=True)
-        return 0
+        older = other.get("version") and _version_tuple(other["version"]) < _version_tuple(aiflow.VERSION)
+        if older:
+            # работает служба старой версии (её поднял монитор давней сессии): заменяем её собой
+            print(f"{iso()} служба aiflow {other.get('version')} (pid {other.get('pid', '?')}) старше {aiflow.VERSION}: "
+                  "останавливаю её и запускаюсь", flush=True)
+            stop(mark_down=False)
+        if not older or not lock.acquire(wait_seconds=10, extra={"version": aiflow.VERSION}):
+            other = lock.data() or other
+            print(f"{iso()} служба aiflow уже работает (pid {other.get('pid', '?')}, версия {other.get('version', '?')})",
+                  flush=True)
+            return 0
     import signal
 
     def _stop(*_):
@@ -402,10 +433,19 @@ def relay_events(store: Store) -> int:
         url = panel_url(data)
         note = f"; панель: {url}" if url else (f"; панель недоступна: {data['panel_error']}" if data.get("panel_error") else "")
         print(f"[aiflow] монитор запущен{note}", flush=True)
+    checked = time.time()
     while True:
         time.sleep(2)
         if owner and not pid_alive(owner):
             return 0
+        if time.time() - checked > 60:
+            # служба жива, но старше установленного плагина (обновили, пока эта сессия работала): заменить
+            checked = time.time()
+            if outdated(info()) and not stopped_by_user():
+                try:
+                    ensure()
+                except AiflowError:
+                    pass
         if not info():
             if stopped_by_user():
                 if aiflow.notify_status(store.config()):
