@@ -582,6 +582,24 @@ class NeedsHuman(ProjectCase):
         self.assertEqual(aiflow.short_reason(None), "")
 
 
+class Notify(unittest.TestCase):
+    def test_default_tells_the_orchestrator_only_answers(self):
+        cfg = aiflow.DEFAULT_CONFIG
+        self.assertTrue(aiflow.should_notify(cfg, "answered"))
+        for kind in ("plan_ready", "needs_human", "merged", "cancelled", "error"):
+            self.assertFalse(aiflow.should_notify(cfg, kind), kind)
+        self.assertFalse(aiflow.notify_status(cfg))
+
+    def test_levels(self):
+        self.assertTrue(aiflow.should_notify({"notify": "important"}, "needs_human"))
+        self.assertFalse(aiflow.should_notify({"notify": "important"}, "started"))
+        self.assertTrue(aiflow.notify_status({"notify": "important"}))
+        self.assertTrue(aiflow.should_notify({"notify": "all"}, "started"))
+        self.assertFalse(aiflow.should_notify({"notify": "none"}, "answered"))
+        self.assertFalse(aiflow.notify_status({"notify": "none"}))
+        self.assertEqual(aiflow.notify_level({"notify": "что-то"}), "answers")
+
+
 class SessionTab(unittest.TestCase):
     def test_title_is_the_task_name_and_safe_for_the_terminal(self):
         import aiflow_ui

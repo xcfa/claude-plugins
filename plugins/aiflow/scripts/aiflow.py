@@ -244,8 +244,10 @@ DEFAULT_CONFIG = {
     "ci_appear_minutes": 10,
     "direct_max_files": 6,  # предел изменения для задачи без плана; больше — решает человек
     "direct_max_lines": 300,
-    "notify": "important",
-    "desktop_notify": True,  # системные уведомления о том, что ждёт вас (те же события, что notify: important)  # что монитор пишет оркестратору: important — только то, что ждёт вас; all — всё; none — ничего
+    # что монитор пишет оркестратору (каждая строка будит модель): answers — только ответы на вопросы
+    # (kind: ask); important — всё, что ждёт вас; all — все события; none — ничего
+    "notify": "answers",
+    "desktop_notify": True,  # системные уведомления о том, что ждёт вас (события NOTIFY_KINDS), от notify не зависят
     "auto_resume": 1,  # сколько раз подряд монитор сам возобновляет остановленную/пропавшую сессию; 0 — никогда
     "max_diff_chars": 150000,
     "ci_timeout_minutes": 45,
@@ -263,20 +265,27 @@ DEFAULT_CONFIG = {
 }
 
 
-# события, о которых монитор сообщает оркестратору при notify: important
+# события, которые ждут пользователя: системные уведомления и строки монитора при notify: important
 NOTIFY_KINDS = {"answered", "plan_ready", "plan_updated", "needs_input", "needs_human", "merged", "done", "amend_lost", "paused", "unpaused", "error", "batch_done", "cancelled"}
 # Снятие задачи будит оркестратора (чтобы закрыть его вопрос по ней), но без системного уведомления.
 NO_TOAST_KINDS = {"cancelled"}
 
 
 def notify_level(cfg: dict) -> str:
-    v = str(cfg.get("notify") or "important").lower()
-    return v if v in ("important", "all", "none") else "important"
+    v = str(cfg.get("notify") or "answers").lower()
+    return v if v in ("answers", "important", "all", "none") else "answers"
 
 
 def should_notify(cfg: dict, kind: str) -> bool:
     level = notify_level(cfg)
+    if level == "answers":
+        return kind == "answered"
     return level == "all" or (level == "important" and kind in NOTIFY_KINDS)
+
+
+def notify_status(cfg: dict) -> bool:
+    """Писать ли в чат строки о самом мониторе и службе (запущен, остановлена, сбой)."""
+    return notify_level(cfg) in ("important", "all")
 
 
 # ---------------------------------------------------------------- utilities
