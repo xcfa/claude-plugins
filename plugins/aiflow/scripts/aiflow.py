@@ -267,7 +267,7 @@ DEFAULT_CONFIG = {
 
 # события, которые ждут пользователя: системные уведомления и строки монитора при notify: important
 NOTIFY_KINDS = {"answered", "plan_ready", "plan_updated", "needs_input", "needs_human", "merged", "done", "amend_lost", "paused", "unpaused", "error", "batch_done", "cancelled"}
-# Снятие задачи будит оркестратора (чтобы закрыть его вопрос по ней), но без системного уведомления.
+# Снятие задачи при notify: important будит оркестратора (чтобы закрыть его вопрос по ней), но без системного уведомления.
 NO_TOAST_KINDS = {"cancelled"}
 
 
