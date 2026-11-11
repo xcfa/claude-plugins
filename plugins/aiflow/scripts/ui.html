@@ -459,7 +459,9 @@ function renderBoard(p) {
   const k = esc(p.key);
   let html = `<div class="head left">Задача</div>` + STATIONS.map(n => `<div class="head">${n}</div>`).join("") + `<div class="head right">PR, раунды, токены</div>`;
   // завершённые задачи (смержено, выполнено, снято) — свёрнутым списком под активными
-  const isEnded = t => t.state === "merged" || t.state === "done" || t.state === "cancelled";
+  const isClosed = t => t.state === "merged" || t.state === "done" || t.state === "cancelled";
+  // вопрос с ответом ничего не ждёт: он сворачивается вместе с завершёнными, но его ещё можно дополнить
+  const isEnded = t => isClosed(t) || t.state === "answered";
   const active = p.tasks.filter(t => !isEnded(t)), ended = p.tasks.filter(isEnded);
   if (!p.tasks.length) {
     html += `<div class="empty" style="grid-column: 1 / -1">Задач нет. Напишите их в сессии оркестратора этого проекта: <code>/aiflow:intake …</code></div>`;
@@ -492,7 +494,7 @@ function renderBoard(p) {
     const pr = t.pr ? (t.pr_url ? `<a href="${esc(t.pr_url)}" target="_blank" rel="noopener">#${esc(t.pr)}</a>` : "#" + esc(t.pr)) : "—";
     const rounds = t.rounds ? `раунд ${esc(t.rounds)}/${esc(t.max_rounds)}` : (t.review_lock ? "на ревью" : "");
     const rev = t.reviewer_session ? `<button class="link" data-act="open_reviewer" data-project="${k}" data-id="${id}" title="Открыть сессию ревьюера opencode в терминале">Ревьюер</button> ` : "";
-    const cancel = isEnded(t) ? (rev ? `<div class="acts-row">${rev}</div>` : "")
+    const cancel = isClosed(t) ? (rev ? `<div class="acts-row">${rev}</div>` : "")
       : `<div class="acts-row">${rev}<button class="link" data-amend="${id}" data-project="${k}" title="Добавить правку к идущей задаче">Дополнить${t.amend_pending ? " (" + esc(t.amend_pending) + " ждёт)" : ""}</button> `
       + `<button class="link danger" data-cancel="${id}" data-project="${k}" title="Остановить сессии задачи и закрыть её PR"${dis(p.key, t.id)}>Снять</button></div>`;
     html += `<div class="meta"><div class="num">${pr}${rounds ? ", " + rounds : ""}</div><div class="line2 num">${t.tokens ? tokens(t.tokens) + " токенов" + (t.cost ? " · " + money(t.cost) : "") : "—"}</div>${cancel}</div>`;
@@ -503,7 +505,7 @@ function renderBoard(p) {
   if (ended.length) {
     const open = showEnded.has(p.key);
     const count = (state) => ended.filter(t => t.state === state).length;
-    const parts = [["merged", "смержено"], ["done", "выполнено"], ["cancelled", "снято"]]
+    const parts = [["merged", "смержено"], ["done", "выполнено"], ["answered", "ответ дан"], ["cancelled", "снято"]]
       .filter(([st]) => count(st)).map(([st, name]) => `${name} ${count(st)}`).join(", ");
     tail = `<button class="ended-toggle" data-toggle-ended="${k}" aria-expanded="${open}"><span class="chev">▸</span> Завершённые задачи: ${ended.length} (${parts})</button>`
       + (open ? `<div class="grid ended">${ended.map(row).join("")}</div>` : "");
