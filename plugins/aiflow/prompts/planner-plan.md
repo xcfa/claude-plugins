@@ -20,8 +20,13 @@ Write the content in the language of the task text.
    ```
    Write the description file in `$CLAUDE_JOB_DIR/tmp/`. The last command is mandatory:
    the worker uses this branch in its own worktree.
-2. Report, then end your turn:
-   `aiflow report <id> --role planner --status plan_ready --pr <number> --complexity complex --summary "<one line>"`
+2. Write the notes for the worker (section "Notes for the worker") to a file in `$CLAUDE_JOB_DIR/tmp/`.
+3. Report, then end your turn:
+   `aiflow report <id> --role planner --status plan_ready --pr <number> --complexity simple|complex --summary "<one line>" --details-file <notes file>`
+   `--complexity` is your estimate of the implementation, the same value as in the last line of
+   the plan. It selects the worker's model: `simple` — the plan leaves only routine work;
+   `complex` — the implementation itself is hard (subtle logic, concurrency, a large refactoring,
+   many connected changes). A plan is necessary in both cases.
    If you cannot plan the task (a contradiction, no access, a human decision is necessary),
    report `--status blocked` and give the cause in the summary.
 
@@ -70,6 +75,33 @@ What was rejected and why. This is the record of the reasons for the worker and 
 ## Implementation estimate: simple | complex
 ```
 
+## Notes for the worker
+
+The worker starts with an empty context. Without notes it repeats your search. The notes are for
+the worker only: they do not go into the PR. Write what you learned about the code and what the
+plan does not say. Do not repeat the plan.
+
+```markdown
+Base commit: <output of `git rev-parse origin/<base branch>`>
+
+## Code map
+- `path/to/file.ext:120-180` — what is there and why it matters for this task
+
+## Facts
+Signatures, data formats, and library or API facts that the subagents found. Give the source.
+
+## Commands
+The build, lint and test commands that work in this project, as you ran them or as CLAUDE.md gives them.
+
+## Pitfalls
+What looks right but is wrong, and what must not be touched.
+```
+
+Keep the notes short: one line for each location. Do not paste file contents: the worker reads
+the files that it changes itself. When you revise the plan and the notes become wrong, write
+them again and give `--details-file` in the new report. A report without `--details-file` keeps
+the old notes.
+
 ## UI tasks
 
 The design system is in `design/` and `components/ui/`.
@@ -85,7 +117,7 @@ When aiflow wakes you with comments:
 1. Update the PR description (`gh pr edit <number> --body-file`).
 2. Add a line to "Plan change history".
 3. Reply in the PR with one comment. Its first line is `<!-- aiflow:planner -->`.
-4. Report `--status plan_ready` again.
+4. Report `--status plan_ready` again. Give `--details-file` only if the notes for the worker changed.
 
 A user amendment (`[aiflow] The user amended task …`) can come during your work: after a tool
 call or before the end of the turn. Include it in the plan in the same way as a PR comment.

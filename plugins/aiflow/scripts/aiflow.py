@@ -217,7 +217,7 @@ DEFAULT_CONFIG = {
     # auto — безопасные действия одобряет классификатор Claude Code, без вопросов вам; deny из
     # .claude/settings.json действуют и в нём. acceptEdits — спрашивать о каждой команде вне allow.
     "permission_mode": "auto",
-    "planner_model": "opus",  # каждую задачу сначала получает он: план, поручение Sonnet или сам
+    "planner_model": "opus",  # каждую задачу сначала получает он: план, поручение исполнителю или сам
     "planner_effort": "medium",
     "discuss_model": "opus",  # сессия обсуждения идеи (задача kind: discuss)
     "discuss_effort": "high",
@@ -225,9 +225,11 @@ DEFAULT_CONFIG = {
     "ask_effort": "medium",
     "answered_ttl_hours": 24,  # вопрос с ответом без продолжения закрывается сам
     "session_keep_days": 14,  # сессии законченной задачи живут ещё столько дней: их читают и продолжают. 0 — не удалять
-    "worker_model": "sonnet",
-    "worker_effort": {"complex": "high", "simple": "medium", "trivial": "medium"},  # или одна строка на все задачи
-    "worker_opus_effort": "medium",  # effort worker'а на Opus (worker_model: opus), без учёта сложности
+    # Исполнитель по оценке планировщика: trivial — лёгкая задача без плана (механическая правка по точным
+    # указаниям), simple — обычная, complex — сложная реализация по плану. Или одна строка на все задачи.
+    "worker_model": {"trivial": "haiku", "simple": "sonnet", "complex": "opus"},
+    "worker_effort": {"trivial": "high", "simple": "medium", "complex": "high"},  # или одна строка на все задачи
+    "worker_opus_effort": "medium",  # effort worker'а на Opus, без учёта сложности (перекрывает worker_effort)
     # Кто ищет по коду для планировщика и исполнителя: aiflow — подагент плагина aiflow:explorer;
     # project — как принято в самом проекте (его агенты из .claude/agents, CLAUDE.md): aiflow ничего не подсказывает
     "explorer": "aiflow",
@@ -688,6 +690,10 @@ class Store:
 
     def task_path(self, tid: str) -> Path:
         return self.runs / tid / "task.json"
+
+    def notes_path(self, tid: str) -> Path:
+        """Заметки планировщика о коде для исполнителя (отчёт plan_ready с --details-file)."""
+        return self.runs / tid / "notes.md"
 
     def task(self, tid: str) -> dict | None:
         return read_json(self.task_path(tid))
@@ -1293,9 +1299,11 @@ def planner_prompt(store: Store, t: dict, cfg: dict) -> str:
         "First assess the task (section \"Task assessment\" of your instructions) and select one route:\n"
         f"- complex: read the plan rules ({PLANNER_PLAN_MD}) and make a draft PR with a plan. Then run "
         f"aiflow report {tid} --role planner --status plan_ready "
-        "--pr <number> --complexity complex --summary \"<one line>\";\n"
-        f"- simple, delegate to the worker (Sonnet): aiflow report {tid} --role planner --status delegate "
-        "--summary \"<one line>\" --details-file <instructions for the worker, in $CLAUDE_JOB_DIR/tmp/>;\n"
+        "--pr <number> --complexity simple|complex --summary \"<one line>\" "
+        "--details-file <notes for the worker, in $CLAUDE_JOB_DIR/tmp/>;\n"
+        f"- simple, delegate to the worker: aiflow report {tid} --role planner --status delegate "
+        "--complexity trivial|simple --summary \"<one line>\" "
+        "--details-file <instructions for the worker, in $CLAUDE_JOB_DIR/tmp/>;\n"
         "- simple, do it yourself: obey the section \"Do it yourself\" and report "
         f"aiflow report {tid} --role planner --status ready_for_review --pr <number> --summary \"<1-2 lines>\" "
         f"(or --status done if the repository did not have to change). Worker instructions: {WORKER_MD}. "
@@ -1387,6 +1395,13 @@ def worker_prompt(store: Store, t: dict, cfg: dict, retry: bool = False) -> str:
         f"PR #{t['pr']}, branch ai/{t['id']}, base branch {cfg['base_branch']}. "
         f"The plan is in the PR description (gh pr view {t['pr']}). Task file: {store.task_path(t['id'])}.\n"
     )
+    if store.notes_path(t["id"]).is_file():
+        base += (
+            f"The planner's notes about the code: {store.notes_path(t['id'])}. Read them before you search: they "
+            "contain what the planner already found (where things are, signatures, commands that work, pitfalls). "
+            "Search only for what the notes do not answer. The notes name the commit they were written at: files "
+            "that changed in the base branch after it can differ from the notes.\n"
+        )
     if retry:
         rep = store.report(t["id"]) or {}
         base += (
@@ -2056,6 +2071,7 @@ class Dispatcher:
                 t["pr"] = int(rep["pr"])
                 if rep.get("complexity") in ("simple", "complex"):
                     t["complexity"] = rep["complexity"]
+                self.save_notes(t, rep)
                 t["plan_seen_at"] = iso()
                 self.set_state(t, "plan_review", "обсуждение: договорились, план готов")
                 self.emit(t, "plan_ready", f"{t['id']}: обсуждение завершено, план готов — PR #{t['pr']}",
@@ -2104,6 +2120,15 @@ class Dispatcher:
             self.set_state(t, "done", "вопрос закрыт: продолжения не было")
             self.adv_merged(t)
 
+    def save_notes(self, t: dict, rep: dict) -> None:
+        """Заметки планировщика из отчёта plan_ready — в файл задачи: отчёт перезапишут следующие отчёты,
+        а исполнителю заметки нужны при запуске. Отчёт без заметок прежние не стирает."""
+        notes = (rep.get("details") or "").strip()
+        if notes:
+            path = self.store.notes_path(t["id"])
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(notes + "\n", encoding="utf-8")
+
     def adv_planning(self, t: dict) -> None:
         rep = self.new_report(t, "planner")
         if rep:
@@ -2117,10 +2142,13 @@ class Dispatcher:
                           + (f": {t['route_note']}" if t["route_note"] else ""), key=f"selfstart:{rep['rid']}")
                 return
             if st == "delegate":
-                t["complexity"], t["direct"] = "simple", True
+                # trivial — лёгкая задача: исполнитель на самой дешёвой модели (worker_model.trivial)
+                t["complexity"] = "trivial" if rep.get("complexity") == "trivial" else "simple"
+                t["direct"] = True
                 t["brief"] = rep.get("details") or rep.get("summary") or ""
                 note = rep.get("summary") or ""
-                self.emit(t, "delegated", f"{t['id']}: простая — планировщик поручил исполнителю"
+                self.emit(t, "delegated", f"{t['id']}: {'лёгкая' if t['complexity'] == 'trivial' else 'простая'}"
+                          " — планировщик поручил исполнителю"
                           + (f": {note}" if note else ""), key=f"delegated:{rep['rid']}")
                 if not self.start_direct(t):
                     self.set_state(t, "new", "поручено исполнителю, ждёт запуска")
@@ -2152,7 +2180,10 @@ class Dispatcher:
                 if not self.verify_pr(t, "planner", rep, plan=True):
                     return
                 t["pr"] = int(rep["pr"])
-                t["complexity"] = rep.get("complexity") or t.get("complexity") or "complex"
+                # trivial у задачи с планом не бывает: это признак задачи без плана (is_direct)
+                cx = rep.get("complexity") or t.get("complexity") or "complex"
+                t["complexity"] = cx if cx in ("simple", "complex") else "simple"
+                self.save_notes(t, rep)
                 t["plan_seen_at"] = iso()
                 self.set_state(t, "plan_review")
                 self.emit(t, "plan_ready", f"{t['id']}: план готов к обсуждению — PR #{t['pr']}",
@@ -2194,6 +2225,9 @@ class Dispatcher:
         rep = self.new_report(t, "planner")
         if rep and rep.get("status") == "plan_ready":
             t["revising"] = False
+            if rep.get("complexity") in ("simple", "complex"):
+                t["complexity"] = rep["complexity"]
+            self.save_notes(t, rep)
             self.emit(t, "plan_updated", f"{t['id']}: план обновлён — PR #{t['pr']}", key=f"plan:{rep['rid']}")
         seen = parse_iso(t.get("plan_seen_at")) or now()
         fresh = [c for c in pr.get("comments") or []
@@ -3692,7 +3726,8 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--status", required=True,
                    choices=["plan_ready", "delegate", "self_execute", "answered", "ready_for_review", "done", "approved", "limit_reached", "error", "blocked"])
     r.add_argument("--pr", type=int)
-    r.add_argument("--complexity", choices=["simple", "complex"], help="оценка реализации (планировщик)")
+    r.add_argument("--complexity", choices=["trivial", "simple", "complex"],
+                   help="оценка реализации (планировщик): trivial — только с delegate")
     r.add_argument("--summary")
     r.add_argument("--details-file")
     s = sub.add_parser("status", help="состояние очереди")

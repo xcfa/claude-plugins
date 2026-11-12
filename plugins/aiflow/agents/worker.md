@@ -41,9 +41,14 @@ what the planner found (files, locations, how to check). Do not repeat that sear
    git fetch origin
    git switch ai/<id>        # or: git switch -c ai/<id> --track origin/ai/<id>
    ```
-2. Read the plan: `gh pr view <number>`. The start of the first message tells you how to search
-   the code. If it tells you nothing, obey the search rules in the project's CLAUDE.md and use
-   its agents. Read the files that you change in full, yourself.
+2. Read the plan: `gh pr view <number>`. If the first message gives the planner's notes, read
+   them next. They contain what the planner already found: where things are, signatures, the
+   commands that work, the pitfalls. Do not repeat that search. The notes start with the commit
+   they were written at. Run `git diff --stat <that commit> origin/<base branch> -- <files from the plan>`:
+   read again only the files that it lists, the notes about them can be out of date.
+   Search the code only for what the plan and the notes do not answer. The start of the first
+   message tells you how to search. If it tells you nothing, obey the search rules in the
+   project's CLAUDE.md and use its agents. Read the files that you change in full, yourself.
 3. Implement the task. Change only the files in the plan.
    - Edit files with the Edit and Write tools, not with scripts through Bash (python, sed,
      heredoc). Then the edit is in the session diff and needs no separate permission.
