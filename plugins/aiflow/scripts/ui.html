@@ -100,8 +100,10 @@ button:disabled:hover { border-color: var(--rule); }
 }
 .task { padding: 9px 12px 9px 0; border-bottom: 1px solid var(--rule); min-height: 58px; display: flex; flex-direction: column; justify-content: center; }
 .task .id { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.task .title { color: var(--muted); font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.task .phase { color: var(--move); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.task .title { color: var(--muted); font-size: 13.5px; }
+.task .phase { color: var(--move); font-size: 13px; }
+/* описание, статус и итог задачи: до трёх строк, дальше обрезаются (полный текст — во всплывающей подсказке) */
+.task .title, .task .phase, .task .why { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; white-space: normal; overflow-wrap: anywhere; }
 .task .open { all: unset; display: block; min-width: 0; cursor: pointer; border-radius: 4px; }
 .task .open:hover .id { text-decoration: underline; text-underline-offset: 3px; }
 .task .open:focus-visible { outline: 2px solid var(--move); outline-offset: 2px; }
@@ -170,7 +172,6 @@ button:disabled:hover { border-color: var(--rule); }
   .head:not(.left):not(.right), .cell { display: none; }
   .state-label { display: block; font-size: 13.5px; background: none; }
   .task, .meta { height: auto; min-height: 58px; }
-  .task .title { white-space: normal; }
   .wait-item { grid-template-columns: 1fr; }
   .wait-item .acts { justify-content: flex-start; }
 }
