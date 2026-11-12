@@ -377,7 +377,7 @@ class InReview(ProjectCase):
         self.tick()
         self.phase("ci")
         self.assertEqual(self.activity("a"), "ждёт CI: прошло 1 из 2, упало 1")
-        self.assertEqual(self.activity("b"), "в очереди на ревью; CI: прошло 1 из 1")
+        self.assertEqual(self.activity("b"), "ждёт ревью a: общие файлы; CI: прошло 1 из 1")
         self.assertEqual(aiflow.ci_summary(None)["total"], 0)
 
     def test_missing_ci_gets_its_own_advice(self):
@@ -481,6 +481,7 @@ class NeedsHuman(ProjectCase):
         """Сессия отчиталась об ошибке, пока задача ждала человека: после «Повторить» это не новость."""
         self.to_ready("a", 1, files=["a.py"])
         self.tick()
+        self.patch("a", review_retried=True)
         self.report("a", "worker", "error", 1, summary="ревьюер не вернул валидный JSON")
         self.claude.finish_turn("w-a")
         self.tick()
@@ -492,6 +493,7 @@ class NeedsHuman(ProjectCase):
         self.assertEqual(self.state("a"), "in_review")
         self.tick()
         self.assertEqual(self.state("a"), "in_review")  # старый отчёт не вернул задачу к человеку
+        self.patch("a", review_retried=True)  # иначе новый сбой aiflow сначала повторит сам
         self.report("a", "worker", "error", 1, summary="новая ошибка")
         self.tick()
         self.assertEqual(self.state("a"), "needs_human")
@@ -501,6 +503,7 @@ class NeedsHuman(ProjectCase):
         """Задача на ревью ушла к человеку, а её сессия продолжает работать."""
         self.to_ready("a", 1, files=["a.py"])
         self.tick()
+        self.patch("a", review_retried=True)
         self.report("a", "worker", "error", 1, summary="сбой ревьюера")
         self.tick()
         self.assertEqual(self.state("a"), "needs_human")
@@ -529,9 +532,36 @@ class NeedsHuman(ProjectCase):
         self.assertEqual(self.state("a"), "ready")  # те же файлы на ревью — в очередь
         self.assertEqual(self.store.queue()["review_locks"], ["b"])
 
+    def test_panel_says_which_review_a_pr_with_shared_files_waits_for(self):
+        self.to_ready("a", 1, files=["a.py", "x.py"])
+        self.tick()
+        self.to_ready("b", 2, files=["a.py"])
+        self.tick()
+        self.assertEqual(self.state("b"), "ready")
+        row = next(r for r in aiflow.build_state(self.store)["tasks"] if r["id"] == "b")
+        self.assertEqual(row["activity"], "ждёт ревью a: общие файлы")
+
+    def test_review_tool_failure_is_retried_once_before_a_human(self):
+        self.to_ready("a", 1, files=["a.py"])
+        self.tick()
+        self.report("a", "worker", "error", 1, summary="ревьюер не вернул валидный JSON")
+        events = self.tick()
+        self.assertEqual(self.state("a"), "ready")
+        self.assertIn("retry", self.kinds(events))
+        self.claude.finish_turn("w-a")
+        self.tick()
+        self.assertEqual(self.state("a"), "in_review")
+        self.report("a", "worker", "error", 1, summary="ревьюер не вернул валидный JSON")
+        self.tick()
+        self.assertEqual(self.state("a"), "needs_human")
+
+    def test_stale_shell_directory_is_not_passed_to_child_programs(self):
+        self.assertNotIn("PWD", aiflow.os.environ)
+
     def test_reason_is_one_line_and_says_what_to_do(self):
         self.to_ready("a", 1, files=["a.py"])
         self.tick()
+        self.patch("a", review_retried=True)
         self.report("a", "worker", "error", 1, summary="ревьюер не вернул валидный JSON. Конец вывода:\n(пусто)\n"
                                                        "stderr opencode: ! permission requested " + "x" * 400)
         events = self.tick()
@@ -986,6 +1016,7 @@ class AutoReview(ProjectCase):
         self.gh.behind_by = 0
         self.tick()
         self.finish_review("error")
+        self.patch("a", review_retried=True)  # первый сбой aiflow уже повторил сам
         self.report("a", "worker", "error", 1, summary="ревьюер не вернул валидный JSON")
         self.tick()
         self.assertEqual(self.state("a"), "needs_human")

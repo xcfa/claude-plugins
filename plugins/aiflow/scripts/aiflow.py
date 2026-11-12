@@ -23,6 +23,12 @@ import time
 import uuid
 from pathlib import Path
 
+# Оболочка, из которой запустили aiflow (Git Bash), оставляет в окружении PWD своего каталога. Дочерние
+# программы (opencode) верят PWD больше, чем настоящему рабочему каталогу: ревьюер, запущенный службой в
+# копии задачи, открывал репозиторий, из которого когда-то подняли службу, и не находил там PR.
+for _stale in ("PWD", "OLDPWD"):
+    os.environ.pop(_stale, None)
+
 HERE = Path(__file__).resolve().parent
 PLUGIN_ROOT = HERE.parent
 TEMPLATES = PLUGIN_ROOT / "templates"
@@ -121,7 +127,9 @@ def review_activity(store: "Store", t: dict, session_state: str | None, max_roun
     st = t.get("state")
     ci = ci_text(t.get("ci"))
     if st == "ready":
-        return "в очереди на ревью" + (f"; CI: {ci}" if ci else "")
+        wait = t.get("review_wait")
+        return ((f"ждёт ревью {wait}: общие файлы" if wait else "в очереди на ревью")
+                + (f"; CI: {ci}" if ci else ""))
     if st != "in_review":
         return None
     ph = read_json(store.runs / t["id"] / "phase.json", {}) or {}
@@ -2276,6 +2284,8 @@ class Dispatcher:
         rep = self.new_report(t, "worker")
         if rep:
             st = rep.get("status")
+            if st != "error":
+                t.pop("review_retried", None)  # раунд прошёл: следующий сбой снова повторяется сам
             if st == "approved":
                 t["approved_sha"] = pr.get("headRefOid")
                 t["approved_at"] = iso()
@@ -2290,6 +2300,16 @@ class Dispatcher:
             elif st == "too_large":
                 t["size_hold"] = True  # «Повторить» от человека снимет предел для этой задачи
                 return self.to_human(t, rep.get("summary") or "изменение больше предела для задачи без плана", "size")
+            elif st == "error" and not t.get("review_retried"):
+                # сбой инструмента (ревьюер не ответил, его прервали выключением), а не кода: один раз
+                # повторяем сами, и только второй сбой подряд идёт к человеку
+                t["review_retried"] = True
+                t.pop("auto_review", None)
+                self.release_lock(t)
+                self.set_state(t, "ready", "сбой ревью: повтор")
+                self.emit(t, "retry", f"{t['id']}: сбой ревью ({short_reason(rep.get('summary') or 'ошибка', 80)}) — "
+                          "повторяю сам", key=f"autoretry:{rep.get('rid')}")
+                return
             elif st in ("limit_reached", "error", "no_ci", "already_closed", "blocked"):
                 action = "ci" if st == "limit_reached" and "CI" in (rep.get("summary") or "") else REVIEW_ACTIONS[st]
                 return self.to_human(t, rep.get("summary") or f"ревью: {st}", action)
@@ -2434,6 +2454,7 @@ class Dispatcher:
         t.pop("approved_sha", None)
         t.pop("approved_at", None)
         t.pop("auto_review", None)
+        t.pop("review_retried", None)
         if t.pop("size_hold", None):
             t["size_ok"] = True  # человек видел размер изменения и велел продолжать
         # Сначала — та же сессия с её контекстом и рабочим каталогом, в той же стадии.
@@ -2589,6 +2610,17 @@ class Dispatcher:
                 return False
         return True
 
+    def review_blocker(self, t: dict, locks: list[str], waiting: tuple = ()) -> str | None:
+        """Задача, из-за общих файлов с которой PR ждёт ревью, хотя место есть. Места нет — None."""
+        if len(locks) >= max(1, int(self.cfg.get("review_concurrency") or 1)):
+            return None
+        mine = self.changed_files(t)
+        for o in [self.by_id[i] for i in locks if i in self.by_id and i != t["id"]] + list(waiting):
+            theirs = self.changed_files(o) if o.get("pr") else None
+            if mine is None or theirs is None or mine & theirs:
+                return o["id"]
+        return None
+
     def schedule_reviews(self, tasks: list[dict], by_id: dict[str, dict]) -> None:
         """Очередь ревью: по порядку готовности; сразу несколько — только PR без общих файлов."""
         locks = self.q["review_locks"] = [i for i in self.q.get("review_locks") or []
@@ -2600,10 +2632,16 @@ class Dispatcher:
             if len(locks) >= limit:
                 break
             if self.sstate(self.cur(t, "worker")) == "working" or not self.review_free(t, locks, tuple(skipped)):
-                skipped.append(t)  # сессия ещё не закончила ход либо PR пересекается с идущим ревью
+                # сессия ещё не закончила ход либо PR пересекается с идущим ревью: панель скажет, кого он ждёт
+                wait = self.review_blocker(t, locks, tuple(skipped))
+                if t.get("review_wait") != wait:
+                    t["review_wait"] = wait
+                    self.store.save_task(t)
+                skipped.append(t)
                 continue
             woke = self.start_auto_review(t) or self.wake_for_review(t, review_prompt(t, self.cfg))
             if woke:
+                t.pop("review_wait", None)
                 locks.append(t["id"])
                 if not t.get("auto_review"):
                     self.touch(t, "worker")
