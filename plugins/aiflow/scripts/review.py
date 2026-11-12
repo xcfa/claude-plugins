@@ -37,7 +37,7 @@ PARSE_ATTEMPTS = 3
 OPENCODE_TIMEOUT = 15 * 60
 TERMINAL = {"approved", "limit_reached", "already_closed", "error"}
 # статусы, о которых узнаёт очередь (runs/<task>/report.json): итоговые и те, где решает не worker
-REPORTED = TERMINAL | {"paused", "too_large", "no_ci"}
+REPORTED = TERMINAL | {"paused", "no_ci"}
 HUMAN_INPUT_REPEATS = 3  # столько раз подряд возвращаем один и тот же комментарий человека
 
 CTX: dict = {"root": None, "task": None, "pr": None, "round": None}
@@ -779,30 +779,6 @@ def task_contract(task: dict | None) -> str:
     return out
 
 
-def diff_size(diff: str) -> int:
-    """Число изменённых строк диффа (добавленные и удалённые)."""
-    return sum(1 for ln in diff.splitlines()
-               if (ln.startswith("+") and not ln.startswith("+++ ")) or (ln.startswith("-") and not ln.startswith("--- ")))
-
-
-MAX_SIZE_ITEMS = 5
-
-
-def too_large(task: dict | None, cfg: dict, files: list[str], diff: str) -> str:
-    """Задача без плана обходится без одобрения человека, поэтому её размер ограничивает код, а не
-    оценка модели. Возвращает причину или пустую строку. size_ok ставит человек («Повторить»)."""
-    if not no_plan(task) or task.get("size_ok"):
-        return ""
-    # задача из нескольких мелких пунктов: предел — на пункт, но не больше пяти пределов на PR
-    k = min(MAX_SIZE_ITEMS, max(1, int(task.get("items") or 1)))
-    max_files, max_lines = int(cfg.get("direct_max_files") or 0) * k, int(cfg.get("direct_max_lines") or 0) * k
-    lines = diff_size(diff)
-    if (max_files and len(files) > max_files) or (max_lines and lines > max_lines):
-        return (f"задача шла без плана, а изменение — {len(files)} файлов и {lines} строк (предел: {max_files} файлов, "
-                f"{max_lines} строк). Посмотрите PR сами: «Повторить» разрешит ревью и мерж этого изменения")
-    return ""
-
-
 def final_verdict(verdict: str, comments: list[dict], still_open: list[dict], rnd: int, max_rounds: int,
                   nit_rounds: int) -> str:
     """Итог раунда. Открытые треды блокируют всегда. Одни nit блокируют только первые nit_rounds раундов
@@ -950,12 +926,6 @@ def main(argv: list[str] | None = None) -> int:
             posted = publish(r, args.pr, head, "changes", rnd, max_rounds, "Нарушены защищённые пути.", cs, {}, tmp,
                              identity)
             finish("changes_requested", round=rnd, max_rounds=max_rounds, summary="защищённые пути", comments=posted)
-
-        # задача без плана: размер изменения ограничен кодом
-        big = too_large(task, cfg, files, diff)
-        if big:
-            CTX["round"] = done
-            finish("too_large", files=len(files), lines=diff_size(diff), message=big)
 
         if reuse:
             result = {"round": done, "max_rounds": max_rounds, "comments": [], "open_threads": [], "reused_approval": True,

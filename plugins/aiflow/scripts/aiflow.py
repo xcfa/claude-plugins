@@ -77,7 +77,6 @@ WHAT_TO_DO = {
               "уйдёт исполнителю, затем «Повторить»; либо смержите PR или снимите задачу сами.",
     "ci": "CI не удаётся починить. Посмотрите упавшие проверки в PR; подскажите комментарием, что делать, и "
           "нажмите «Повторить».",
-    "size": "Посмотрите изменение в PR. Устраивает — «Повторить» (разрешит ревью и мерж), нет — «Снять».",
     "session": "Сессия остановилась и сама не продолжила. «Повторить» возобновит её с того же места; «Открыть "
                "сессию» покажет, на чём она встала.",
     "silent": "Сессия закончила ход и не сообщила результат. «Открыть сессию» — прочитайте её последний ответ и "
@@ -96,7 +95,7 @@ WHAT_TO_DO = {
             "репозитория не нужен — require_ci: false в runs/config.json.",
     "paths": "Задаче нужен защищённый путь: «Разрешить пути…», либо попросите убрать эту правку комментарием в PR.",
 }
-REVIEW_ACTIONS = {"error": "tool", "no_ci": "noci", "limit_reached": "rounds", "too_large": "size", "already_closed": "closed",
+REVIEW_ACTIONS = {"error": "tool", "no_ci": "noci", "limit_reached": "rounds", "already_closed": "closed",
                   "blocked": "asks"}
 
 
@@ -254,8 +253,6 @@ DEFAULT_CONFIG = {
     # сколько ждать появления проверок на свежем коммите: GitHub создаёт запуск не сразу, под нагрузкой —
     # через несколько минут после push
     "ci_appear_minutes": 10,
-    "direct_max_files": 6,  # предел изменения для задачи без плана; больше — решает человек
-    "direct_max_lines": 300,
     # что монитор пишет оркестратору (каждая строка будит модель): answers — только ответы на вопросы
     # (kind: ask); important — всё, что ждёт вас; all — все события; none — ничего
     "notify": "answers",
@@ -2297,9 +2294,6 @@ class Dispatcher:
                 t.pop("approved_at", None)
                 self.set_state(t, "ready", "ревью отложено: очередь на паузе")
                 return
-            elif st == "too_large":
-                t["size_hold"] = True  # «Повторить» от человека снимет предел для этой задачи
-                return self.to_human(t, rep.get("summary") or "изменение больше предела для задачи без плана", "size")
             elif st == "error" and not t.get("review_retried"):
                 # сбой инструмента (ревьюер не ответил, его прервали выключением), а не кода: один раз
                 # повторяем сами, и только второй сбой подряд идёт к человеку
@@ -2455,8 +2449,6 @@ class Dispatcher:
         t.pop("approved_at", None)
         t.pop("auto_review", None)
         t.pop("review_retried", None)
-        if t.pop("size_hold", None):
-            t["size_ok"] = True  # человек видел размер изменения и велел продолжать
         # Сначала — та же сессия с её контекстом и рабочим каталогом, в той же стадии.
         prev = next((h.get("from") for h in reversed(t.get("history") or []) if h.get("to") == "needs_human"), None)
         locks = self.q.setdefault("review_locks", [])

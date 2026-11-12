@@ -270,17 +270,6 @@ class ReviewMain(ProjectCase):
         self.run_review()
         self.assertNotIn("Task without a plan", self.reviewer_calls[0])
 
-    def test_big_change_without_plan_goes_to_a_human(self):
-        self.patch("a", direct=True)
-        self.r.files = [f"src/f{i}.py" for i in range(7)]
-        res = self.run_review()
-        self.assertEqual(res["status"], "too_large")
-        self.assertEqual(self.reviewer_calls, [])
-        self.assertEqual(self.r.merges, [])
-        self.assertEqual(self.last_report()["status"], "too_large")
-        self.patch("a", size_ok=True)  # человек нажал «Повторить»
-        self.assertEqual(self.run_review()["status"], "approved")
-
     def test_nits_block_only_the_first_round(self):
         self.answer = {"summary": "мелочи", "comments": [{"severity": "nit", "file": "src/a.py", "line": 2, "text": "имя"}]}
         self.assertEqual(self.run_review()["status"], "changes_requested")
@@ -352,21 +341,6 @@ class Pieces(unittest.TestCase):
         self.assertEqual(verdict, "changes")  # большой дифф без подтверждения, что дочитан
         self.assertEqual(review.normalize({"comments": [], "diff_fully_read": True}, True)[0], "approve")
 
-    def test_diff_size_and_limits(self):
-        self.assertEqual(review.diff_size(DIFF), 3)
-        cfg = {"direct_max_files": 2, "direct_max_lines": 10}
-        direct = {"direct": True}
-        self.assertEqual(review.too_large(direct, cfg, ["a"], DIFF), "")
-        self.assertIn("3 файлов", review.too_large(direct, cfg, ["a", "b", "c"], DIFF))
-        self.assertTrue(review.too_large(direct, {"direct_max_files": 9, "direct_max_lines": 2}, ["a"], DIFF))
-        self.assertEqual(review.too_large({**direct, "size_ok": True}, cfg, ["a", "b", "c"], DIFF), "")
-        self.assertEqual(review.too_large({"plan_approved": True}, cfg, ["a", "b", "c"], DIFF), "")  # с планом предела нет
-        self.assertTrue(review.too_large({"self_executed": True}, cfg, ["a", "b", "c"], DIFF))
-        self.assertTrue(review.too_large({"complexity": "trivial"}, cfg, ["a", "b", "c"], DIFF))
-        self.assertEqual(review.too_large(None, cfg, ["a", "b", "c"], DIFF), "")
-        self.assertEqual(review.too_large({**direct, "items": 2}, cfg, ["a", "b", "c"], DIFF), "")  # предел — на пункт
-        many = [str(i) for i in range(int(cfg["direct_max_files"]) * review.MAX_SIZE_ITEMS + 1)]
-        self.assertTrue(review.too_large({**direct, "items": 50}, cfg, many, DIFF))  # но не безгранично
 
     def test_wait_checks_outcomes(self):
         def runner(answers):

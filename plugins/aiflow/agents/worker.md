@@ -81,7 +81,7 @@ and go directly to the table.
 | `paused` | The queue is paused. The review and the merge wait. End your turn with one line and change nothing. aiflow wakes you |
 | `human_input` | Do what the human comments ask. Reply with a comment whose first line is `<!-- ai-review-reply -->`. Run `aiflow review` again |
 | `approved` | Done. End your turn with one line |
-| `limit_reached`, `already_closed`, `too_large`, `no_ci`, `error` | Stop and end your turn. Give the open blocking findings and your opinion of the cause (the code, the plan, or a disagreement with the reviewer) |
+| `limit_reached`, `already_closed`, `no_ci`, `error` | Stop and end your turn. Give the open blocking findings and your opinion of the cause (the code, the plan, or a disagreement with the reviewer) |
 
 `aiflow review` writes the final statuses into the report itself. A `nit` blocks approval only in
 the first round. After that the PR is approved with open nits, but fix those that you can.

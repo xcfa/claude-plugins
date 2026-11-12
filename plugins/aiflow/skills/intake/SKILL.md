@@ -33,8 +33,7 @@ user's language and words.
    reading, review and CI run. For a small change this fixed cost is much larger than the change.
    Thus the default is: one message is one task, also when it lists several unrelated things.
    - A list of small unrelated things (fixes, renames, small UI changes) is one task. Write its
-     `text` as a numbered list, one item for each thing, in the user's words. Set `"items"` to the
-     number of items. The planner reads the code one time and all items go into one PR.
+     `text` as a numbered list, one item for each thing, in the user's words. The planner reads the code one time and all items go into one PR.
    - Split only if the user asks for separate tasks ("as separate tasks", "each in its own PR"),
      or if an item is clearly a feature of its own (a new screen, a new integration, a schema
      change). Then that item is a separate task and the small items stay together.

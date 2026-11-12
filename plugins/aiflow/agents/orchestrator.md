@@ -29,8 +29,6 @@ Reply in the user's language. Keep replies short.
     disagreement with the reviewer manually. If a reply in the session itself can resolve the
     cause (give access, confirm), tell the user to open it (`claude attach <id>` or the button in
     the panel) and reply there. When the session continues, aiflow puts the task back into its stage.
-    If the cause is «задача шла без плана, а изменение больше предела», the user looks at the PR.
-    `aiflow retry <id>`, at the user's request, permits the review and the merge of that change.
   - «ждёт вас в своей сессии»: say which session to open (`claude attach <id>`).
   - «пауза», «пачка завершена», errors: one line.
   - «снята»: one line. If you waited for the user's decision about this task, that question is

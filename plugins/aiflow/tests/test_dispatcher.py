@@ -319,18 +319,6 @@ class InReview(ProjectCase):
         self.tick()
         self.assertEqual(self.state("a"), "in_review")
 
-    def test_too_large_needs_a_human_and_retry_lifts_the_limit(self):
-        self.start()
-        self.report("a", "worker", "too_large", 1, summary="9 файлов")
-        self.claude.finish_turn("w-a")
-        self.tick()
-        self.assertEqual(self.state("a"), "needs_human")
-        self.assertIn("needs-human", self.gh.labels(1))
-        self.store.command({"cmd": "retry", "id": "a"})
-        self.tick()
-        self.assertTrue(self.task("a")["size_ok"])
-        self.assertEqual(self.state("a"), "in_review")
-
     def activity(self, tid: str = "a") -> str | None:
         sessions = self.claude.agents()
         # фаза в тестах «записана» раньше, чем стартовал сам тест: не считаем её из-за этого чужой
@@ -577,14 +565,14 @@ class NeedsHuman(ProjectCase):
     def test_each_cause_has_its_own_advice(self):
         advice = {}
         for status, summary in (("limit_reached", "лимит раундов исчерпан"), ("limit_reached", "CI красный 5 раз подряд"),
-                                ("too_large", "9 файлов"), ("blocked", "нужен доступ к базе")):
+                                ("blocked", "нужен доступ к базе")):
             tid = f"t{len(advice)}"
             self.to_ready(tid, 10 + len(advice), files=[f"{tid}.py"])
             self.tick()
             self.report(tid, "worker", status, 10 + len(advice), summary=summary)
             self.tick()
             advice[summary] = self.task(tid)["human_action"]
-        self.assertEqual(len(set(advice.values())), 4)
+        self.assertEqual(len(set(advice.values())), 3)
         self.assertIn("не договорились", advice["лимит раундов исчерпан"])
         self.assertIn("CI", advice["CI красный 5 раз подряд"])
         self.assertIn("ответьте ей", advice["нужен доступ к базе"])
