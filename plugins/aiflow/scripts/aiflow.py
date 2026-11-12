@@ -3442,9 +3442,10 @@ def cmd_tick(args, root: Path) -> int:
     return 0
 
 
-def _toast(title: str, text: str) -> None:
-    """Системное уведомление; молча ничего не делает, если показать нечем."""
-    env = dict(os.environ, AIFLOW_TOAST_TITLE=title, AIFLOW_TOAST_TEXT=text)
+def _toast(title: str, text: str, link: str | None = None) -> None:
+    """Системное уведомление; молча ничего не делает, если показать нечем.
+    link — адрес, который открывает клик по уведомлению (Windows): панель, а она — сессию задачи."""
+    env = dict(os.environ, AIFLOW_TOAST_TITLE=title, AIFLOW_TOAST_TEXT=text, AIFLOW_TOAST_LINK=link or "")
     flags = 0
     if os.name == "nt":
         exe = shutil.which("powershell.exe") or shutil.which("powershell")  # WinRT есть только в Windows PowerShell 5.1
@@ -3458,6 +3459,9 @@ def _toast(title: str, text: str) -> None:
             "$t=$x.GetElementsByTagName('text');"
             "[void]$t.Item(0).AppendChild($x.CreateTextNode($env:AIFLOW_TOAST_TITLE));"
             "[void]$t.Item(1).AppendChild($x.CreateTextNode($env:AIFLOW_TOAST_TEXT));"
+            # клик: Windows сама открывает адрес (activationType=protocol), процесс уведомления ждать не должен
+            "if($env:AIFLOW_TOAST_LINK){$x.DocumentElement.SetAttribute('activationType','protocol');"
+            "$x.DocumentElement.SetAttribute('launch',$env:AIFLOW_TOAST_LINK)};"
             "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("
             "'{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe')"
             ".Show([Windows.UI.Notifications.ToastNotification]::new($x))"
@@ -3479,17 +3483,30 @@ def _toast(title: str, text: str) -> None:
         pass
 
 
-def desktop_notify(cfg: dict, events: list[dict], project: str | None = None) -> None:
+def toast_link(panel: dict | None, ev: dict | None) -> str | None:
+    """Адрес для клика по уведомлению. panel = {url, project}: адрес панели и ключ проекта.
+    Событие задачи ведёт в панель с просьбой открыть сессию задачи (план — чат с планировщиком),
+    остальные — просто в панель."""
+    if not panel or not panel.get("url"):
+        return None
+    base = str(panel["url"]).rstrip("/") + "/"
+    if not ev or not ev.get("task"):
+        return base
+    from urllib.parse import quote
+    return f"{base}#open={quote(str(ev['task']), safe='')}&project={quote(str(panel.get('project') or ''), safe='')}"
+
+
+def desktop_notify(cfg: dict, events: list[dict], project: str | None = None, panel: dict | None = None) -> None:
     """Системные уведомления о событиях, которые ждут пользователя (desktop_notify в конфиге)."""
     if not cfg.get("desktop_notify", True):
         return
     title = f"aiflow · {project}" if project else "aiflow"
     important = [ev for ev in events if ev.get("kind") in NOTIFY_KINDS - NO_TOAST_KINDS]
     if len(important) > 3:
-        _toast(title, f"{len(important)} событий, подробности в панели")
+        _toast(title, f"{len(important)} событий, подробности в панели", toast_link(panel, None))
         return
     for ev in important:
-        _toast(title, ev.get("text", ""))
+        _toast(title, ev.get("text", ""), toast_link(panel, ev))
 
 
 def cmd_run(args, root: Path) -> int:

@@ -696,7 +696,16 @@ async function load() {
     $("sub").innerHTML = `<span class="offline">Панель не отвечает: служба остановлена (aiflow up) или порт занят.</span>`;
   }
 }
-load();
+// Клик по системному уведомлению ведёт сюда с #open=<задача>&project=<проект>: сразу открыть сессию задачи.
+function openFromLink() {
+  const h = new URLSearchParams(location.hash.slice(1));
+  const id = h.get("open");
+  if (!id) return;
+  history.replaceState(null, "", location.pathname);
+  act("open_session", h.get("project") || "", id);
+}
+load().then(openFromLink, openFromLink);
+window.addEventListener("hashchange", openFromLink);
 setInterval(() => { if (!document.hidden) load(); }, 5000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
 </script>

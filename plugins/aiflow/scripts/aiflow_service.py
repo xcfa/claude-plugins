@@ -165,6 +165,12 @@ def panel_url(data: dict | None = None) -> str:
     return f"http://127.0.0.1:{port}/"
 
 
+def _toast_panel(store) -> dict | None:
+    """Куда ведёт клик по системному уведомлению: панель службы и проект события."""
+    url = panel_url()
+    return {"url": url, "project": project_key(store.root)} if url else None
+
+
 def _python(windowless: bool = False) -> str:
     py = Path(sys.executable)
     if windowless and os.name == "nt" and (py.parent / "pythonw.exe").is_file():
@@ -309,7 +315,7 @@ def _tick_project(root: str, held: dict, next_at: dict, errors: dict, warned: se
         cfg = store.config()
         events = aiflow.run_tick_now(store, wait=0)
         errors.pop(k, None)
-        aiflow.desktop_notify(cfg, events, project=store.root.name if many else None)
+        aiflow.desktop_notify(cfg, events, project=store.root.name if many else None, panel=_toast_panel(store))
     except aiflow.TickBusy:
         pass  # проход уже идёт (aiflow tick вручную) — в следующий раз
     except Exception as e:  # ошибка проекта не должна останавливать службу и другие проекты
@@ -318,7 +324,8 @@ def _tick_project(root: str, held: dict, next_at: dict, errors: dict, warned: se
             errors[k] = text
             try:
                 store.event("error", None, text)
-                aiflow.desktop_notify(cfg, [{"kind": "error", "text": text}], project=store.root.name)
+                aiflow.desktop_notify(cfg, [{"kind": "error", "text": text}], project=store.root.name,
+                                      panel=_toast_panel(store))
             except Exception:
                 pass
     try:

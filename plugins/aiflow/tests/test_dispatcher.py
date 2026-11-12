@@ -1387,5 +1387,29 @@ class Misc(ProjectCase):
         self.assertTrue(self.task("a")["cleaned"])
 
 
+class ToastLink(unittest.TestCase):
+    PANEL = {"url": "http://127.0.0.1:8765/", "project": "C:/p 1"}
+
+    def test_task_event_opens_the_task_session(self):
+        link = aiflow.toast_link(self.PANEL, {"kind": "plan_ready", "task": "a", "text": "a: план готов"})
+        self.assertEqual(link, "http://127.0.0.1:8765/#open=a&project=C%3A%2Fp%201")
+
+    def test_event_without_task_opens_the_panel(self):
+        self.assertEqual(aiflow.toast_link(self.PANEL, {"kind": "paused", "text": "пауза"}), "http://127.0.0.1:8765/")
+        self.assertIsNone(aiflow.toast_link(None, {"task": "a"}))
+
+    def test_notify_passes_the_link(self):
+        seen = []
+        orig = aiflow._toast
+        aiflow._toast = lambda title, text, link=None: seen.append(link)
+        try:
+            aiflow.desktop_notify({}, [{"kind": "plan_ready", "task": "a", "text": "x"}], panel=self.PANEL)
+            aiflow.desktop_notify({}, [{"kind": "plan_ready", "task": "a", "text": "x"}])
+        finally:
+            aiflow._toast = orig
+        self.assertIn("#open=a", seen[0])
+        self.assertIsNone(seen[1])
+
+
 if __name__ == "__main__":
     unittest.main()
