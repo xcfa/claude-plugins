@@ -713,6 +713,15 @@ class RateLimit(ProjectCase):
         events = self.tick()
         self.assertIn("needs_input", self.kinds(events))
 
+    def test_blocked_session_of_a_finished_task_does_not_wait_for_the_user(self):
+        sid = self.start()
+        live = {sid: {"state": "blocked", "waitingFor": "ответ"}}
+        self.assertIn("ждёт ответа", aiflow.build_state(self.store, live)["tasks"][0]["needs"])
+        t = self.task("a")
+        t["state"] = "merged"
+        self.store.save_task(t)
+        self.assertIsNone(aiflow.build_state(self.store, live)["tasks"][0]["needs"])
+
     def test_words_far_above_the_end_of_the_log_are_ignored(self):
         sid = self.start()
         self.claude.log_text = "реализуем rate limit для API\n" + "x" * 5000

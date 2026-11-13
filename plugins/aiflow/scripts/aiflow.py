@@ -2810,7 +2810,8 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
         elif st == "discussing" and cur.get("state") != "working":
             needs = ("вопрос ждёт вас — откройте сессию" if t.get("kind") == "ask"
                      else "обсуждение ждёт вас — откройте сессию")
-        elif cur.get("state") == "blocked":
+        elif cur.get("state") == "blocked" and st not in TERMINAL:
+            # у завершённой задачи сессия хранится, но её вопрос уже никого не ждёт
             needs = f"сессия ждёт ответа ({cur.get('waiting') or 'вопрос'})"
         last_stage = None
         if st not in STAGES:
