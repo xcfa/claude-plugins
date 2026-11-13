@@ -3565,10 +3565,22 @@ def cmd_tick(args, root: Path) -> int:
     return 0
 
 
-def _toast(title: str, text: str, link: str | None = None) -> None:
+def toast_xml(title: str, text: str, link: str | None, actions: list[tuple[str, str]] | None) -> str:
+    """Уведомление Windows: клик по нему и каждая кнопка открывают свой адрес (activationType=protocol),
+    поэтому процесс, показавший уведомление, ждать клика не должен."""
+    from xml.sax.saxutils import escape, quoteattr
+    head = f'<toast activationType="protocol" launch={quoteattr(link)}>' if link else "<toast>"
+    buttons = "".join(f'<action content={quoteattr(label)} activationType="protocol" arguments={quoteattr(url)}/>'
+                      for label, url in (actions or [])[:5])  # Windows показывает не больше пяти кнопок
+    return (f'{head}<visual><binding template="ToastGeneric"><text>{escape(title)}</text><text>{escape(text)}</text>'
+            f'</binding></visual>{"<actions>" + buttons + "</actions>" if buttons else ""}</toast>')
+
+
+def _toast(title: str, text: str, link: str | None = None, actions: list[tuple[str, str]] | None = None) -> None:
     """Системное уведомление; молча ничего не делает, если показать нечем.
-    link — адрес, который открывает клик по уведомлению (Windows): панель, а она — сессию задачи."""
-    env = dict(os.environ, AIFLOW_TOAST_TITLE=title, AIFLOW_TOAST_TEXT=text, AIFLOW_TOAST_LINK=link or "")
+    link — адрес по клику на уведомление, actions — кнопки (подпись, адрес); и то и другое только в Windows."""
+    env = dict(os.environ, AIFLOW_TOAST_TITLE=title, AIFLOW_TOAST_TEXT=text,
+               AIFLOW_TOAST_XML=toast_xml(title, text, link, actions))
     flags = 0
     if os.name == "nt":
         exe = shutil.which("powershell.exe") or shutil.which("powershell")  # WinRT есть только в Windows PowerShell 5.1
@@ -3577,14 +3589,9 @@ def _toast(title: str, text: str, link: str | None = None) -> None:
         script = (
             "$ErrorActionPreference='Stop';"
             "[void][Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime];"
-            "$x=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent("
-            "[Windows.UI.Notifications.ToastTemplateType]::ToastText02);"
-            "$t=$x.GetElementsByTagName('text');"
-            "[void]$t.Item(0).AppendChild($x.CreateTextNode($env:AIFLOW_TOAST_TITLE));"
-            "[void]$t.Item(1).AppendChild($x.CreateTextNode($env:AIFLOW_TOAST_TEXT));"
-            # клик: Windows сама открывает адрес (activationType=protocol), процесс уведомления ждать не должен
-            "if($env:AIFLOW_TOAST_LINK){$x.DocumentElement.SetAttribute('activationType','protocol');"
-            "$x.DocumentElement.SetAttribute('launch',$env:AIFLOW_TOAST_LINK)};"
+            "[void][Windows.Data.Xml.Dom.XmlDocument,Windows.Data.Xml.Dom.XmlDocument,ContentType=WindowsRuntime];"
+            "$x=New-Object Windows.Data.Xml.Dom.XmlDocument;"
+            "$x.LoadXml($env:AIFLOW_TOAST_XML);"
             "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("
             "'{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe')"
             ".Show([Windows.UI.Notifications.ToastNotification]::new($x))"
@@ -3606,17 +3613,34 @@ def _toast(title: str, text: str, link: str | None = None) -> None:
         pass
 
 
-def toast_link(panel: dict | None, ev: dict | None) -> str | None:
-    """Адрес для клика по уведомлению. panel = {url, project}: адрес панели и ключ проекта.
-    Событие задачи ведёт в панель с просьбой открыть сессию задачи (план — чат с планировщиком),
-    остальные — просто в панель."""
+def toast_link(panel: dict | None, ev: dict | None = None) -> str | None:
+    """Адрес по клику на само уведомление: панель. panel = {url, project, token, repo_url, prs}."""
     if not panel or not panel.get("url"):
         return None
-    base = str(panel["url"]).rstrip("/") + "/"
-    if not ev or not ev.get("task"):
-        return base
+    return str(panel["url"]).rstrip("/") + "/"
+
+
+def toast_actions(panel: dict | None, ev: dict | None) -> list[tuple[str, str]]:
+    """Кнопки уведомления о задаче — те же, что у неё в панели: одобрить план или повторить, открыть сессию,
+    открыть PR. Действие выполняет страница панели по адресу с #…; одобрение и повтор несут токен панели:
+    без него посторонняя страница могла бы одобрить план, просто открыв такой адрес."""
+    base = toast_link(panel)
+    if not base or not ev or not ev.get("task"):
+        return []
     from urllib.parse import quote
-    return f"{base}#open={quote(str(ev['task']), safe='')}&project={quote(str(panel.get('project') or ''), safe='')}"
+    tid, kind = str(ev["task"]), ev.get("kind")
+    tail = f"={quote(tid, safe='')}&project={quote(str(panel.get('project') or ''), safe='')}"
+    key = f"&k={quote(str(panel.get('token') or ''), safe='')}"
+    out = []
+    if kind in ("plan_ready", "plan_updated") and panel.get("token"):
+        out.append(("Одобрить план", f"{base}#approve{tail}{key}"))
+    if kind == "needs_human" and panel.get("token"):
+        out.append(("Повторить", f"{base}#retry{tail}{key}"))
+    out.append(("Открыть чат", f"{base}#open{tail}"))
+    pr = (panel.get("prs") or {}).get(tid)
+    if pr and panel.get("repo_url"):
+        out.append(("Открыть PR", f"{str(panel['repo_url']).rstrip('/')}/pull/{int(pr)}"))
+    return out
 
 
 def desktop_notify(cfg: dict, events: list[dict], project: str | None = None, panel: dict | None = None) -> None:
@@ -3626,10 +3650,10 @@ def desktop_notify(cfg: dict, events: list[dict], project: str | None = None, pa
     title = f"aiflow · {project}" if project else "aiflow"
     important = [ev for ev in events if ev.get("kind") in NOTIFY_KINDS - NO_TOAST_KINDS]
     if len(important) > 3:
-        _toast(title, f"{len(important)} событий, подробности в панели", toast_link(panel, None))
+        _toast(title, f"{len(important)} событий, подробности в панели", toast_link(panel))
         return
     for ev in important:
-        _toast(title, ev.get("text", ""), toast_link(panel, ev))
+        _toast(title, ev.get("text", ""), toast_link(panel), toast_actions(panel, ev))
 
 
 def cmd_run(args, root: Path) -> int:

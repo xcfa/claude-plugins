@@ -166,9 +166,16 @@ def panel_url(data: dict | None = None) -> str:
 
 
 def _toast_panel(store) -> dict | None:
-    """Куда ведёт клик по системному уведомлению: панель службы и проект события."""
+    """Для системного уведомления: панель службы, проект события и то, что нужно его кнопкам."""
     url = panel_url()
-    return {"url": url, "project": project_key(store.root)} if url else None
+    if not url:
+        return None
+    try:
+        prs = {t["id"]: t["pr"] for t in store.tasks() if t.get("pr")}
+    except Exception:
+        prs = {}
+    repo = (read_json(home() / "repo_urls.json", {}) or {}).get(str(store.root)) or ""
+    return {"url": url, "project": project_key(store.root), "token": panel_token(), "repo_url": repo, "prs": prs}
 
 
 def _python(windowless: bool = False) -> str:

@@ -1494,27 +1494,50 @@ class Misc(ProjectCase):
 
 
 class ToastLink(unittest.TestCase):
-    PANEL = {"url": "http://127.0.0.1:8765/", "project": "C:/p 1"}
+    PANEL = {"url": "http://127.0.0.1:8765/", "project": "C:/p 1", "token": "tok",
+             "repo_url": "https://github.com/o/r", "prs": {"a": 12}}
 
-    def test_task_event_opens_the_task_session(self):
-        link = aiflow.toast_link(self.PANEL, {"kind": "plan_ready", "task": "a", "text": "a: план готов"})
-        self.assertEqual(link, "http://127.0.0.1:8765/#open=a&project=C%3A%2Fp%201")
+    def test_click_on_the_toast_opens_the_panel(self):
+        self.assertEqual(aiflow.toast_link(self.PANEL), "http://127.0.0.1:8765/")
+        self.assertIsNone(aiflow.toast_link(None))
 
-    def test_event_without_task_opens_the_panel(self):
-        self.assertEqual(aiflow.toast_link(self.PANEL, {"kind": "paused", "text": "пауза"}), "http://127.0.0.1:8765/")
-        self.assertIsNone(aiflow.toast_link(None, {"task": "a"}))
+    def test_plan_event_has_approve_chat_and_pr_buttons(self):
+        acts = aiflow.toast_actions(self.PANEL, {"kind": "plan_ready", "task": "a", "text": "a: план готов"})
+        self.assertEqual([label for label, _ in acts], ["Одобрить план", "Открыть чат", "Открыть PR"])
+        self.assertEqual(acts[0][1], "http://127.0.0.1:8765/#approve=a&project=C%3A%2Fp%201&k=tok")
+        self.assertEqual(acts[1][1], "http://127.0.0.1:8765/#open=a&project=C%3A%2Fp%201")
+        self.assertEqual(acts[2][1], "https://github.com/o/r/pull/12")
 
-    def test_notify_passes_the_link(self):
+    def test_other_events_get_only_what_fits(self):
+        human = aiflow.toast_actions(self.PANEL, {"kind": "needs_human", "task": "a"})
+        self.assertEqual([label for label, _ in human], ["Повторить", "Открыть чат", "Открыть PR"])
+        no_pr = aiflow.toast_actions(self.PANEL, {"kind": "needs_input", "task": "b"})
+        self.assertEqual([label for label, _ in no_pr], ["Открыть чат"])
+        self.assertEqual(aiflow.toast_actions(self.PANEL, {"kind": "paused", "text": "пауза"}), [])
+        no_token = aiflow.toast_actions(dict(self.PANEL, token=""), {"kind": "plan_ready", "task": "a"})
+        self.assertNotIn("Одобрить план", [label for label, _ in no_token])
+
+    def test_toast_xml_is_valid_and_escapes_text(self):
+        import xml.dom.minidom
+        acts = aiflow.toast_actions(self.PANEL, {"kind": "plan_ready", "task": "a"})
+        doc = xml.dom.minidom.parseString(aiflow.toast_xml("aiflow · p", 'a: <план> & "PR"', "http://x/", acts))
+        self.assertEqual(doc.documentElement.getAttribute("launch"), "http://x/")
+        got = [(n.getAttribute("content"), n.getAttribute("arguments")) for n in doc.getElementsByTagName("action")]
+        self.assertEqual(got, acts)
+        self.assertEqual(doc.getElementsByTagName("text")[1].firstChild.data, 'a: <план> & "PR"')
+
+    def test_notify_passes_the_link_and_the_buttons(self):
         seen = []
         orig = aiflow._toast
-        aiflow._toast = lambda title, text, link=None: seen.append(link)
+        aiflow._toast = lambda title, text, link=None, actions=None: seen.append((link, actions))
         try:
             aiflow.desktop_notify({}, [{"kind": "plan_ready", "task": "a", "text": "x"}], panel=self.PANEL)
             aiflow.desktop_notify({}, [{"kind": "plan_ready", "task": "a", "text": "x"}])
         finally:
             aiflow._toast = orig
-        self.assertIn("#open=a", seen[0])
-        self.assertIsNone(seen[1])
+        self.assertEqual(seen[0][0], "http://127.0.0.1:8765/")
+        self.assertEqual(len(seen[0][1]), 3)
+        self.assertEqual(seen[1], (None, []))
 
 
 class ContextWindow(ProjectCase):

@@ -717,13 +717,18 @@ async function load() {
     $("sub").innerHTML = `<span class="offline">Панель не отвечает: служба остановлена (aiflow up) или порт занят.</span>`;
   }
 }
-// Клик по системному уведомлению ведёт сюда с #open=<задача>&project=<проект>: сразу открыть сессию задачи.
+// Кнопки системного уведомления ведут сюда: #open=<задача> открывает её сессию, #approve и #retry одобряют
+// план и повторяют задачу. Одобрение и повтор — только с токеном панели в адресе (k): иначе любая страница
+// могла бы выполнить их, открыв такой адрес.
 function openFromLink() {
   const h = new URLSearchParams(location.hash.slice(1));
-  const id = h.get("open");
-  if (!id) return;
+  const proj = h.get("project") || "";
+  const open = h.get("open"), approve = h.get("approve"), retry = h.get("retry");
+  if (!open && !approve && !retry) return;
   history.replaceState(null, "", location.pathname);
-  act("open_session", h.get("project") || "", id);
+  if (open) return act("open_session", proj, open);
+  if (h.get("k") !== TOKEN) return toast("Кнопка уведомления устарела — действие не выполнено, сделайте его здесь");
+  act(approve ? "approve" : "retry", proj, approve || retry);
 }
 load().then(openFromLink, openFromLink);
 window.addEventListener("hashchange", openFromLink);
