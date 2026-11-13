@@ -101,6 +101,7 @@ button:disabled:hover { border-color: var(--rule); }
 .task { padding: 9px 12px 9px 0; border-bottom: 1px solid var(--rule); min-height: 58px; display: flex; flex-direction: column; justify-content: center; }
 .task .id { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .task .title { color: var(--muted); font-size: 13.5px; }
+.task .dates { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .task .phase { color: var(--move); font-size: 13px; }
 /* описание, статус и итог задачи: до трёх строк, дальше обрезаются (полный текст — во всплывающей подсказке) */
 .task .title, .task .phase, .task .why { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; white-space: normal; overflow-wrap: anywhere; }
@@ -359,6 +360,11 @@ async function act(action, key, id, value) {
   }
 }
 
+function fullTime(iso) {
+  const d = new Date(iso);
+  return isNaN(d) ? "" : d.toLocaleString("ru-RU", { day: "numeric", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
 function time(iso) {
   const d = new Date(iso);
   if (isNaN(d)) return "";
@@ -390,6 +396,16 @@ function usageSum(models) {
 }
 function byOutput(models) { return Object.entries(models || {}).sort((a, b) => b[1].output - a[1].output); }
 // строки по моделям: первая несёт подпись, цена каждой модели своя
+// более новые задачи — сверху: по последнему обновлению (даты в ISO, UTC — сравниваются как строки)
+function newestFirst(a, b) {
+  return String(b.updated_at || b.created_at || "").localeCompare(String(a.updated_at || a.created_at || ""));
+}
+
+// активные задачи — по дате создания: по обновлению строки прыгали бы при каждой смене стадии
+function newestCreatedFirst(a, b) {
+  return String(b.created_at || b.updated_at || "").localeCompare(String(a.created_at || a.updated_at || ""));
+}
+
 function modelRows(first, models, cls, attrs = "") {
   return byOutput(models).map(([m, u], i) =>
     `<tr class="${cls}"${attrs}><td>${i === 0 ? first : ""}</td><td>${esc(shortModel(m))}</td>${usageCells(u)}<td class="cost">${money(u.cost)}</td></tr>`).join("");
@@ -399,7 +415,7 @@ function renderUsage() {
   const rows = [], total = {}, unpriced = new Set();
   let grand = 0, shown = 0;
   for (const p of last.projects) {
-    const tasks = (p.tasks || []).filter(t => Object.keys(t.usage || {}).length);
+    const tasks = (p.tasks || []).filter(t => Object.keys(t.usage || {}).length).sort(newestFirst);
     if (!tasks.length) continue;
     shown++;
     grand += p.cost || 0;
@@ -463,7 +479,7 @@ function renderBoard(p) {
   const isClosed = t => t.state === "merged" || t.state === "done" || t.state === "cancelled";
   // вопрос с ответом ничего не ждёт: он сворачивается вместе с завершёнными, но его ещё можно дополнить
   const isEnded = t => isClosed(t) || t.state === "answered";
-  const active = p.tasks.filter(t => !isEnded(t)), ended = p.tasks.filter(isEnded);
+  const active = p.tasks.filter(t => !isEnded(t)).sort(newestCreatedFirst), ended = p.tasks.filter(isEnded).sort(newestFirst);
   if (!p.tasks.length) {
     html += `<div class="empty" style="grid-column: 1 / -1">Задач нет. Напишите их в сессии оркестратора этого проекта: <code>/aiflow:intake …</code></div>`;
   } else if (!active.length) {
@@ -474,7 +490,12 @@ function renderBoard(p) {
     const tn = tone(t), id = esc(t.id);
     const stage = t.stage ?? 0;
     const phase = t.activity ? `<div class="phase" title="${esc(t.activity)}">${esc(t.activity)}</div>` : "";
-    const name = `<div class="id">${id}</div><div class="title" title="${esc(t.title)}">${esc(t.title)}</div>${phase}`;
+    // у задачи из очень старой версии даты создания может не быть: тогда только обновление
+    const upd = t.updated_at || t.created_at;
+    const dates = !upd ? ""
+      : t.created_at ? `<div class="dates" title="Создана ${esc(fullTime(t.created_at))}; обновлена ${esc(fullTime(upd))}">создана ${esc(time(t.created_at))} · обновлена ${esc(time(upd))}</div>`
+      : `<div class="dates" title="Обновлена ${esc(fullTime(upd))}">обновлена ${esc(time(upd))}</div>`;
+    const name = `<div class="id">${id}</div><div class="title" title="${esc(t.title)}">${esc(t.title)}</div>${dates}${phase}`;
     const head = t.session && t.session.id
       ? `<button class="open" data-act="open_session" data-project="${k}" data-id="${id}" title="Открыть сессию ${esc(t.session.role || "")} в терминале">${name}</button>`
       : name;

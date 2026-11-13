@@ -48,7 +48,7 @@ user's language and words.
    merged result of the other.
 4. Do not assess complexity and do not set the field `complexity`. The planner (Opus) gets every
    task first. It studies the code and decides: a plan for discussion, a delegation to the worker
-   (Sonnet), or its own work. Also put "start the container" in as an ordinary task.
+   (the model depends on its assessment), or its own work. Also put "start the container" in as an ordinary task.
 5. For tasks with an interface, fill in `ui`: the link to the Claude Design artboard if the user
    gave one; if not, `"нет макета"`.
 6. Models and effort come from the project settings. If the user directly named a model for a

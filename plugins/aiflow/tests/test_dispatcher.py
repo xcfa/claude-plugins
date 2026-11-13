@@ -49,6 +49,65 @@ class Planning(ProjectCase):
         self.assertEqual(self.state("a"), "in_progress")
         self.assertIn("поправь README.md:3", self.claude.launched[-1]["prompt"])
 
+    def test_delegated_trivial_task_goes_to_the_cheapest_worker(self):
+        self.add("a")
+        self.tick()
+        self.report("a", "planner", "delegate", summary="опечатка", details="README.md:3", complexity="trivial")
+        self.tick()
+        self.assertEqual(self.task("a")["complexity"], "trivial")
+        last = self.claude.launched[-1]
+        self.assertEqual((last["agent"], last["model"], last["effort"]), ("aiflow:worker", "haiku", "high"))
+
+    def test_delegated_task_without_a_level_goes_to_sonnet(self):
+        self.add("a")
+        self.tick()
+        self.report("a", "planner", "delegate", summary="мелочь", details="указания")
+        self.tick()
+        last = self.claude.launched[-1]
+        self.assertEqual((last["model"], last["effort"]), ("sonnet", "medium"))
+
+    def test_complex_plan_goes_to_opus_and_simple_plan_to_sonnet(self):
+        for tid, pr, cx, want in (("a", 7, "complex", ("opus", "medium")), ("b", 8, "simple", ("sonnet", "medium"))):
+            self.add(tid)
+            self.tick()
+            self.gh.add_pr(pr, tid, body=PLAN)
+            self.report(tid, "planner", "plan_ready", pr=pr, complexity=cx)
+            self.tick()
+            self.gh.add_label(pr, "plan-approved")
+            self.tick()
+            last = self.claude.launched[-1]
+            self.assertEqual((last["agent"], last["model"], last["effort"]), ("aiflow:worker", *want), tid)
+
+    def test_trivial_is_not_a_level_for_a_task_with_a_plan(self):
+        self.add("a")
+        self.tick()
+        self.gh.add_pr(7, "a", body=PLAN)
+        self.report("a", "planner", "plan_ready", pr=7, complexity="trivial")
+        self.tick()
+        self.assertEqual(self.task("a")["complexity"], "simple")
+        self.assertFalse(aiflow.is_direct(self.task("a")))
+
+    def test_planner_notes_reach_the_worker_and_survive_a_report_without_notes(self):
+        self.add("a")
+        self.tick()
+        self.gh.add_pr(7, "a", body=PLAN)
+        self.report("a", "planner", "plan_ready", pr=7, complexity="simple", details="Base commit: abc\n## Code map")
+        self.tick()
+        notes = self.store.notes_path("a")
+        self.assertIn("## Code map", notes.read_text(encoding="utf-8"))
+        self.report("a", "planner", "plan_ready", pr=7)  # доработка плана без новых заметок
+        self.tick()
+        self.assertIn("## Code map", notes.read_text(encoding="utf-8"))
+        self.gh.add_label(7, "plan-approved")
+        self.tick()
+        self.assertIn(str(notes), self.claude.launched[-1]["prompt"])
+
+    def test_worker_prompt_has_no_notes_line_without_notes(self):
+        self.to_plan_review("a", 7)
+        self.gh.add_label(7, "plan-approved")
+        self.tick()
+        self.assertNotIn("notes", self.claude.launched[-1]["prompt"])
+
     def test_planner_doing_the_task_itself_is_shown_as_work_not_planning(self):
         self.add("a")
         self.tick()
@@ -598,6 +657,32 @@ class NeedsHuman(ProjectCase):
         self.assertEqual(aiflow.short_reason("\n\n  первая строка \nвторая"), "первая строка")
         self.assertEqual(len(aiflow.short_reason("я" * 500)), 220)
         self.assertEqual(aiflow.short_reason(None), "")
+
+
+class TaskDates(ProjectCase):
+    def test_state_gives_the_creation_time_and_the_last_change(self):
+        self.add("a")
+        self.patch("a", created_at=ago(120), state_at=ago(120), history=[{"at": ago(120), "event": "created"}])
+        row = aiflow.build_state(self.store)["tasks"][0]
+        self.assertEqual(row["created_at"], row["updated_at"])
+        self.tick()  # задача ушла в планирование: обновление — сейчас, создание — прежнее
+        row = aiflow.build_state(self.store)["tasks"][0]
+        self.assertEqual(row["created_at"], self.task("a")["created_at"])
+        self.assertGreater(aiflow.parse_iso(row["updated_at"]), aiflow.parse_iso(row["created_at"]))
+
+    def test_an_amendment_counts_as_an_update(self):
+        t = {"created_at": ago(60), "state_at": ago(50), "amendments": [{"at": ago(5)}]}
+        self.assertEqual(aiflow.task_updated_at(t), t["amendments"][0]["at"])
+
+    def test_status_table_shows_both_dates(self):
+        self.add("a")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            aiflow.print_status(aiflow.build_state(self.store))
+        head = out.getvalue().splitlines()[1]
+        self.assertIn("создана", head)
+        self.assertIn("обновлена", head)
+        self.assertEqual(aiflow.fmt_when(None), "—")
 
 
 class Notify(unittest.TestCase):

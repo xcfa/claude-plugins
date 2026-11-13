@@ -53,8 +53,13 @@ what the planner found (files, locations, how to check). Do not repeat that sear
    git fetch origin
    git switch ai/<id>        # or: git switch -c ai/<id> --track origin/ai/<id>
    ```
-2. Read the plan: `gh pr view <number>`. Then obey the search rule at the start of the first
-   message. It has two cases:
+2. Read the plan: `gh pr view <number>`. If the first message gives the planner's notes, read
+   them next. They contain what the planner already found: where things are, signatures, the
+   commands that work, the pitfalls. Do not repeat that search. The notes start with the commit
+   they were written at. Run `git diff --stat <that commit> origin/<base branch> -- <files from the plan>`:
+   read again only the files that it lists, the notes about them can be out of date.
+   Search the code only for what the plan and the notes do not answer. Then obey the search
+   rule at the start of the first message. It has two cases:
    - a file that you change: read it yourself, one time, in full, with Read;
    - a question about the code base (who calls or creates X, every usage, how many places):
      send it to the subagent or the tool that the rule names. Do not run `grep`, `git grep`,
