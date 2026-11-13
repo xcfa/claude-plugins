@@ -61,7 +61,7 @@ class Planning(ProjectCase):
         row = aiflow.build_state(self.store)["tasks"][0]
         self.assertEqual(row["label"], "планировщик делает сам")
         self.assertEqual(row["stage"], aiflow.STAGES.index("in_progress"))
-        self.assertEqual(row["activity"], "планировщик делает сам: переношу кнопку влево")
+        self.assertEqual(row["activity"], "планировщик делает сам, PR появится по готовности. Что делает: переношу кнопку влево")
         self.gh.add_pr(7, "a", body="Что сделано")
         self.report("a", "planner", "ready_for_review", 7)
         self.claude.finish_turn(self.sid("a", "planner"))

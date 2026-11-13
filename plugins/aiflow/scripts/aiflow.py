@@ -2870,7 +2870,8 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
             "allowed_paths": t.get("allowed_protected_paths") or [],
             "tokens": task_tokens(t), "usage": usage, "cost": round(cost, 4), "session": cur, "needs": needs,
             "action": t.get("human_action") if st == "needs_human" else None,
-            "activity": ("планировщик делает сам" + (f": {t['route_note']}" if t.get("route_note") else "")) if doing_self
+            "activity": ("планировщик делает сам, PR появится по готовности"
+                         + (f". Что делает: {t['route_note']}" if t.get("route_note") else "")) if doing_self
                         else review_activity(store, t, cur.get("state"), int(cfg["max_rounds"])),
             "ci": t.get("ci") if st in ("ready", "in_review") else None,
             "models": {f: t[f] for f in MODEL_FIELDS if t.get(f)},
