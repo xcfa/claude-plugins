@@ -400,6 +400,11 @@ function newestFirst(a, b) {
   return String(b.updated_at || b.created_at || "").localeCompare(String(a.updated_at || a.created_at || ""));
 }
 
+// активные задачи — по дате создания: по обновлению строки прыгали бы при каждой смене стадии
+function newestCreatedFirst(a, b) {
+  return String(b.created_at || b.updated_at || "").localeCompare(String(a.created_at || a.updated_at || ""));
+}
+
 function modelRows(first, models, cls, attrs = "") {
   return byOutput(models).map(([m, u], i) =>
     `<tr class="${cls}"${attrs}><td>${i === 0 ? first : ""}</td><td>${esc(shortModel(m))}</td>${usageCells(u)}<td class="cost">${money(u.cost)}</td></tr>`).join("");
@@ -473,7 +478,7 @@ function renderBoard(p) {
   const isClosed = t => t.state === "merged" || t.state === "done" || t.state === "cancelled";
   // вопрос с ответом ничего не ждёт: он сворачивается вместе с завершёнными, но его ещё можно дополнить
   const isEnded = t => isClosed(t) || t.state === "answered";
-  const active = p.tasks.filter(t => !isEnded(t)), ended = p.tasks.filter(isEnded).sort(newestFirst);
+  const active = p.tasks.filter(t => !isEnded(t)).sort(newestCreatedFirst), ended = p.tasks.filter(isEnded).sort(newestFirst);
   if (!p.tasks.length) {
     html += `<div class="empty" style="grid-column: 1 / -1">Задач нет. Напишите их в сессии оркестратора этого проекта: <code>/aiflow:intake …</code></div>`;
   } else if (!active.length) {
@@ -484,9 +489,11 @@ function renderBoard(p) {
     const tn = tone(t), id = esc(t.id);
     const stage = t.stage ?? 0;
     const phase = t.activity ? `<div class="phase" title="${esc(t.activity)}">${esc(t.activity)}</div>` : "";
-    const dates = t.created_at
-      ? `<div class="dates" title="Создана ${esc(fullTime(t.created_at))}; обновлена ${esc(fullTime(t.updated_at || t.created_at))}">создана ${esc(time(t.created_at))} · обновлена ${esc(time(t.updated_at || t.created_at))}</div>`
-      : "";
+    // у задачи из очень старой версии даты создания может не быть: тогда только обновление
+    const upd = t.updated_at || t.created_at;
+    const dates = !upd ? ""
+      : t.created_at ? `<div class="dates" title="Создана ${esc(fullTime(t.created_at))}; обновлена ${esc(fullTime(upd))}">создана ${esc(time(t.created_at))} · обновлена ${esc(time(upd))}</div>`
+      : `<div class="dates" title="Обновлена ${esc(fullTime(upd))}">обновлена ${esc(time(upd))}</div>`;
     const name = `<div class="id">${id}</div><div class="title" title="${esc(t.title)}">${esc(t.title)}</div>${dates}${phase}`;
     const head = t.session && t.session.id
       ? `<button class="open" data-act="open_session" data-project="${k}" data-id="${id}" title="Открыть сессию ${esc(t.session.role || "")} в терминале">${name}</button>`
