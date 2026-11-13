@@ -42,18 +42,21 @@ what the planner found (files, locations, how to check). Do not repeat that sear
    git fetch origin
    git switch ai/<id>        # or: git switch -c ai/<id> --track origin/ai/<id>
    ```
-2. Read the plan: `gh pr view <number>`. The start of the first message tells you how to search
-   the code. If it tells you nothing, obey the search rules in the project's CLAUDE.md and use
-   its agents. Read the files that you change in full, yourself.
+2. Read the plan: `gh pr view <number>`. Then obey the search rule at the start of the first
+   message. It has two cases:
+   - a file that you change: read it yourself, one time, in full, with Read;
+   - a question about the code base (who calls or creates X, every usage, how many places):
+     send it to the subagent or the tool that the rule names. Do not run `grep`, `git grep`,
+     `sed` or `cat` through Bash for it. This applies during the whole work, also when a
+     build error shows that more places need a change.
 3. Implement the task. Change only the files in the plan.
    - Edit files with the Edit and Write tools, not with scripts through Bash (python, sed,
      heredoc). Then the edit is in the session diff and needs no separate permission.
    - UI: obey the artboard in the plan section "UI" (read only that artboard, through the Claude
      Design tools) and the design system in `design/` and `components/ui/`. Do not guess the
      style from adjacent pages. If the artboard is not available, stop and report `--status blocked`.
-   - Save tokens: each message pays for the full context again. Read a file one time, in full
-     (Read), not in pieces with `sed -n` and `grep`. Send independent commands and reads in one
-     message. Send all edits of one file, and edits of related files, in one message: not one
+   - Save tokens: each message pays for the full context again. Send independent commands and
+     reads in one message. Send all edits of one file, and edits of related files, in one message: not one
      Edit for each message.
    - The session compacts its context when it becomes large. After a compaction, read the
      plan again (`gh pr view <number>`) and `git status`, then continue.

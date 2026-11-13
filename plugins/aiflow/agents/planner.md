@@ -25,8 +25,7 @@ Write a plan (plan rules) and replies to review findings in English.
 1. Read the task file (its path is in the first message). Read `docs/ARCHITECTURE.md` if it exists.
 2. Orientation. Write 3 to 5 specific questions about the code. If the task uses an external
    library, API or protocol, write 1 or 2 questions about its documentation and send them to the
-   `aiflow:researcher` subagent. The start of the first message tells you how to search the code.
-   If it tells you nothing, obey the search rules in the project's CLAUDE.md and use its agents.
+   `aiflow:researcher` subagent. Obey the search rule at the start of the first message.
    Send the questions in parallel. Read yourself only the files that the decision depends on.
    Do not search for "everything about the task".
    For an operational task ("start the container", "restart the service"), the project's CLAUDE.md

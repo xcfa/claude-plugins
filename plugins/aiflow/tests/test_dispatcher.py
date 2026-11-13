@@ -1166,6 +1166,7 @@ class SearchRule(ProjectCase):
             self.assertNotIn("aiflow:explorer", text)
             self.assertNotIn("LSP", text)
             self.assertIn("the project CLAUDE.md", text)
+            self.assertIn("do not answer it with grep", text)
 
     def test_unknown_value_falls_back_to_the_plugin_agent(self):
         self.assertEqual(aiflow.explorer_mode({"explorer": "что-то"}), "aiflow")

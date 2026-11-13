@@ -1287,17 +1287,24 @@ def explorer_mode(cfg: dict) -> str:
     return v if v in EXPLORERS else "aiflow"
 
 
+SEARCH_HEAD = (
+    "How to search the code. There are two cases. "
+    "1) A file that you change, or that your decision depends on: read it yourself, one time, in full, with Read. "
+    "2) A question about the code base (where is X declared, who calls or creates X, every usage of a symbol, "
+    "how many places; for example \"every place that creates TaxonRefDto\"): do not answer it with grep, git grep, "
+    "sed or cat through Bash. Their full output stays in your context and you pay for it in each later request. ")
+
+
 def search_rule(cfg: dict) -> str:
-    """Правило поиска по коду для первого сообщения сессии. В режиме explorer: project — только ссылка
-    на правила проекта: как искать, целиком решают его CLAUDE.md и агенты, а без напоминания сессия ищет
-    своим grep и sed, и весь вывод оседает в её контексте."""
+    """Правило поиска по коду для первого сообщения сессии: одной строкой, с примером вопроса.
+    Без него сессия ищет своим grep и sed, и весь вывод оседает в её контексте. В режиме explorer: project
+    средства aiflow не названы: чем искать, решают CLAUDE.md и агенты проекта, и две инструкции спорили бы."""
     if explorer_mode(cfg) == "project":
-        return ("How to search the code: obey the search rules in the project CLAUDE.md and use the subagents and "
-                "tools that it names. Do not replace them with your own grep and sed through Bash.")
-    return ("How to search the code: send questions such as \"where is this\", \"who uses this\", \"how many\" to the "
-            "aiflow:explorer subagent (several in parallel). Read yourself only the files that the decision depends on. "
-            "If you search yourself, for a symbol (where it is defined, who uses, implements or calls it) use the LSP "
-            "tool when it is available for the language (if it is deferred, load it through ToolSearch), not a text search.")
+        return SEARCH_HEAD + ("Send such a question the way the project CLAUDE.md says: to the subagent or the tool "
+                              "that it names (several questions in parallel).")
+    return SEARCH_HEAD + ("Send such a question to the aiflow:explorer subagent (several in parallel). For one symbol "
+                          "you can use the LSP tool when it is available for the language (if it is deferred, load "
+                          "it through ToolSearch).")
 
 
 def with_search_rule(prompt: str, cfg: dict) -> str:
