@@ -395,6 +395,11 @@ function usageSum(models) {
 }
 function byOutput(models) { return Object.entries(models || {}).sort((a, b) => b[1].output - a[1].output); }
 // строки по моделям: первая несёт подпись, цена каждой модели своя
+// более новые задачи — сверху: по последнему обновлению (даты в ISO, UTC — сравниваются как строки)
+function newestFirst(a, b) {
+  return String(b.updated_at || b.created_at || "").localeCompare(String(a.updated_at || a.created_at || ""));
+}
+
 function modelRows(first, models, cls, attrs = "") {
   return byOutput(models).map(([m, u], i) =>
     `<tr class="${cls}"${attrs}><td>${i === 0 ? first : ""}</td><td>${esc(shortModel(m))}</td>${usageCells(u)}<td class="cost">${money(u.cost)}</td></tr>`).join("");
@@ -404,7 +409,7 @@ function renderUsage() {
   const rows = [], total = {}, unpriced = new Set();
   let grand = 0, shown = 0;
   for (const p of last.projects) {
-    const tasks = (p.tasks || []).filter(t => Object.keys(t.usage || {}).length);
+    const tasks = (p.tasks || []).filter(t => Object.keys(t.usage || {}).length).sort(newestFirst);
     if (!tasks.length) continue;
     shown++;
     grand += p.cost || 0;
@@ -468,7 +473,7 @@ function renderBoard(p) {
   const isClosed = t => t.state === "merged" || t.state === "done" || t.state === "cancelled";
   // вопрос с ответом ничего не ждёт: он сворачивается вместе с завершёнными, но его ещё можно дополнить
   const isEnded = t => isClosed(t) || t.state === "answered";
-  const active = p.tasks.filter(t => !isEnded(t)), ended = p.tasks.filter(isEnded);
+  const active = p.tasks.filter(t => !isEnded(t)), ended = p.tasks.filter(isEnded).sort(newestFirst);
   if (!p.tasks.length) {
     html += `<div class="empty" style="grid-column: 1 / -1">Задач нет. Напишите их в сессии оркестратора этого проекта: <code>/aiflow:intake …</code></div>`;
   } else if (!active.length) {
