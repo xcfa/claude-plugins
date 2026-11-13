@@ -641,6 +641,32 @@ class NeedsHuman(ProjectCase):
         self.assertEqual(aiflow.short_reason(None), "")
 
 
+class TaskDates(ProjectCase):
+    def test_state_gives_the_creation_time_and_the_last_change(self):
+        self.add("a")
+        self.patch("a", created_at=ago(120), state_at=ago(120), history=[{"at": ago(120), "event": "created"}])
+        row = aiflow.build_state(self.store)["tasks"][0]
+        self.assertEqual(row["created_at"], row["updated_at"])
+        self.tick()  # задача ушла в планирование: обновление — сейчас, создание — прежнее
+        row = aiflow.build_state(self.store)["tasks"][0]
+        self.assertEqual(row["created_at"], self.task("a")["created_at"])
+        self.assertGreater(aiflow.parse_iso(row["updated_at"]), aiflow.parse_iso(row["created_at"]))
+
+    def test_an_amendment_counts_as_an_update(self):
+        t = {"created_at": ago(60), "state_at": ago(50), "amendments": [{"at": ago(5)}]}
+        self.assertEqual(aiflow.task_updated_at(t), t["amendments"][0]["at"])
+
+    def test_status_table_shows_both_dates(self):
+        self.add("a")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            aiflow.print_status(aiflow.build_state(self.store))
+        head = out.getvalue().splitlines()[1]
+        self.assertIn("создана", head)
+        self.assertIn("обновлена", head)
+        self.assertEqual(aiflow.fmt_when(None), "—")
+
+
 class Notify(unittest.TestCase):
     def test_default_tells_the_orchestrator_only_answers(self):
         cfg = aiflow.DEFAULT_CONFIG

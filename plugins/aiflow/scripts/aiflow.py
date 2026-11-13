@@ -2846,6 +2846,7 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
             "models": {f: t[f] for f in MODEL_FIELDS if t.get(f)},
             "reviewer_session": next((r.get("session") for r in reversed(reviewer_runs(store, t["id"])) if r.get("session")), None),
             "depends_on": t.get("depends_on") or [], "state_at": t.get("state_at"),
+            "created_at": t.get("created_at"), "updated_at": task_updated_at(t),
             "launching": bool(t.get("launching")), "review_lock": t["id"] in (q.get("review_locks") or []),
             "amendments": len(t.get("amendments") or []),
             "amend_pending": sum(1 for a in t.get("amendments") or [] if not a.get("delivered_at")),
@@ -2858,6 +2859,26 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
         "usage": total_usage, "cost": round(total_cost, 4), "unpriced": unpriced,
         "tasks": out, "events": list(reversed(store.events(40))), "now": iso(),
     }
+
+
+def task_updated_at(t: dict) -> str | None:
+    """Когда с задачей последний раз что-то произошло: смена стадии, пробуждение сессии, дополнение."""
+    marks = [t.get("created_at"), t.get("state_at")]
+    marks += [h.get("at") for h in t.get("history") or []]
+    marks += [a.get("at") for a in t.get("amendments") or []]
+    times = [(d, m) for d, m in ((parse_iso(m), m) for m in marks) if d]
+    return max(times)[1] if times else None
+
+
+def fmt_when(s: str | None) -> str:
+    """Дата для таблицы статуса, в местном времени: сегодня — время, иначе день и месяц (и год, если не этот)."""
+    d = parse_iso(s)
+    if not d:
+        return "—"
+    d, today = d.astimezone(), dt.datetime.now().astimezone()
+    if d.date() == today.date():
+        return d.strftime("%H:%M")
+    return d.strftime("%d.%m" if d.year == today.year else "%d.%m.%Y")
 
 
 def fmt_tokens(n: int) -> str:
@@ -2873,7 +2894,7 @@ def print_status(state: dict) -> None:
     if not state["tasks"]:
         print("Задач нет. Добавьте их через /aiflow:intake.")
         return
-    rows = [("задача", "состояние", "PR", "раунды", "токены", "цена", "сессия")]
+    rows = [("задача", "состояние", "PR", "раунды", "токены", "цена", "создана", "обновлена", "сессия")]
     for t in state["tasks"]:
         s = t["session"]
         rows.append((t["id"], t["label"] + (" 🔒" if t["review_lock"] else "")
@@ -2881,6 +2902,7 @@ def print_status(state: dict) -> None:
                      f"#{t['pr']}" if t["pr"] else "—",
                      f"{t['rounds']}/{t['max_rounds']}" if t["rounds"] else "—",
                      fmt_tokens(t["tokens"]), f"${t['cost']:.2f}" if t.get("cost") else "—",
+                     fmt_when(t.get("created_at")), fmt_when(t.get("updated_at")),
                      f"{s.get('role')} {s.get('id')} {s.get('state') or ''}".strip() if s else "—"))
     widths = [max(len(str(r[i])) for r in rows) for i in range(len(rows[0]))]
     for r in rows:
