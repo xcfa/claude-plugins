@@ -25,9 +25,19 @@ what the planner found (files, locations, how to check). Do not repeat that sear
    Do not touch state that is not yours: other containers, volumes, branches.
 3. If the repository does not have to change, finish with:
    `aiflow report <id> --role worker --status done --summary "<what was done and how it was checked>"`
-4. If the repository must change: `git switch -c ai/<id> origin/<base branch>`, edit, checks,
-   commit, `git push -u origin ai/<id>`, `gh pr create` (not a draft) with the sections
-   "What was done" and "Checks". Then:
+4. If the repository must change, open a draft PR before the first edit, so that the user sees
+   the PR at once:
+   ```
+   git fetch origin
+   git switch -c ai/<id> origin/<base branch>
+   git commit --allow-empty -m "start: <id>"
+   git push -u origin ai/<id>
+   gh pr create --draft --base <base branch> --head ai/<id> --title "<short title>" --body "<what you will do, one or two lines>"
+   ```
+   `aiflow report <id> --role worker --status started --pr <number>`
+   Do not end the turn after this report. Then edit, run the checks, commit and `git push`.
+   Replace the PR description (`gh pr edit <number> --body-file <file>`) with the sections
+   "What was done" and "Checks". Then `gh pr ready <number>` and:
    `aiflow report <id> --role worker --status ready_for_review --pr <number> --summary "<1-2 lines>"`
    Then obey "Turn 2: review". The section "Forbidden" applies here too.
 5. If the task is not simple (it needs architecture decisions, or many more files than the

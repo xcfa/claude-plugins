@@ -87,18 +87,26 @@ Then end your turn.
 The instructions contain what you already found, so that the worker does not repeat the search:
 what to do, which files and locations to change (paths and lines), how to check the result,
 the pitfalls. Keep them short. Do not use the plan template. Do not create a branch or a PR:
-the worker opens a PR if the repository must change.
+the worker opens a draft PR when it starts, if the repository must change.
 
 ## Do it yourself
 
 You become the worker for this task. In the worker instructions, read the sections
 "Task without a plan", "Turn 2: review" and "Forbidden". Obey them. In short:
 
-0. Immediately, before the first edit, tell the queue about your decision. Then continue. Do not end the turn:
-   `aiflow report <id> --role planner --status self_execute --summary "<what you do, one line>"`
-   Without this report, the user sees the task in "planning" while you do the work.
-1. `git fetch origin`, then `git switch -c ai/<id> origin/<base branch>`.
-2. Edit files with the Edit and Write tools. Run the necessary checks. Save tokens: each tool call
+0. Immediately, before the first edit, open a draft PR and tell the queue about your decision.
+   Then continue. Do not end the turn:
+   ```
+   git fetch origin
+   git switch -c ai/<id> origin/<base branch>
+   git commit --allow-empty -m "start: <id>"
+   git push -u origin ai/<id>
+   gh pr create --draft --base <base branch> --head ai/<id> --title "<short title>" --body "<what you will do, one or two lines>"
+   ```
+   `aiflow report <id> --role planner --status self_execute --pr <number> --summary "<what you do, one line>"`
+   Without this report, the user sees the task in "planning" and sees no PR while you do the work.
+   Skip the branch and the PR only for an operational task that does not change the repository.
+1. Edit files with the Edit and Write tools. Run the necessary checks. Save tokens: each tool call
    pays for the full context again, and output tokens cost the most.
    - Read a file that you will change one time, in full, with the Read tool. Do not read it in
      pieces with `sed -n`, `head` or `grep`, one call at a time.
@@ -107,17 +115,20 @@ You become the worker for this task. In the worker instructions, read the sectio
    - Do not edit files with scripts (python, sed, heredoc). A script is long output and the edit
      is not in the session diff.
    - Do not start subagents or Monitor to wait. The result of a subagent comes automatically.
-3. Commit. `git push -u origin ai/<id>`. `gh pr create` (not a draft) with the sections
-   "What was done", "Decisions" and "Checks".
-4. `aiflow report <id> --role planner --status ready_for_review --pr <number> --summary "<1-2 lines>"`
+2. Commit and `git push`. Replace the PR description (`gh pr edit <number> --body-file <file>`)
+   with the sections "What was done", "Decisions" and "Checks". Then `gh pr ready <number>`.
+3. `aiflow report <id> --role planner --status ready_for_review --pr <number> --summary "<1-2 lines>"`
    Then end your turn. Do not start the review yourself. The PR goes into the review queue.
    aiflow wakes you if your work is necessary. Then obey "Turn 2: review".
 
-If the repository does not have to change (an operational task), do the work and check the result. Then report:
+If the repository does not have to change (an operational task), do the work and check the result.
+If you already opened a draft PR, close it (`gh pr close <number>`). Then report:
 `aiflow report <id> --role planner --status done --summary "<what was done and how it was checked>"`
 
 If the task becomes complex during the work: stop, put the working tree back to its initial state,
 and write a plan.
+Use the draft PR that you already opened: put the plan into its description
+(`gh pr edit <number> --body-file <file>`). Do not create a second branch or PR.
 
 ## User amendments
 

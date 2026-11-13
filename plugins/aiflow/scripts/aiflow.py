@@ -1335,9 +1335,9 @@ def planner_prompt(store: Store, t: dict, cfg: dict) -> str:
         "- simple, do it yourself: obey the section \"Do it yourself\" and report "
         f"aiflow report {tid} --role planner --status ready_for_review --pr <number> --summary \"<1-2 lines>\" "
         f"(or --status done if the repository did not have to change). Worker instructions: {WORKER_MD}. "
-        f"When you decide to do it yourself, before the first edit run aiflow report {tid} --role planner "
-        "--status self_execute --summary \"<what you do, one line>\" and continue: then the queue shows work, "
-        "not planning.\n"
+        f"When you decide to do it yourself, before the first edit open a draft PR and run aiflow report {tid} "
+        "--role planner --status self_execute --pr <number> --summary \"<what you do, one line>\" and continue: "
+        "then the queue shows work and the PR, not planning.\n"
         "End your turn after the report."
     ), cfg)
 
@@ -1450,7 +1450,9 @@ def direct_prompt(store: Store, t: dict, cfg: dict) -> str:
         f"Base branch: {cfg['base_branch']}. Task branch, if the repository must change: ai/{t['id']}.\n"
         f"If the repository does not have to change, when the work is done run: aiflow report {t['id']} --role worker "
         "--status done --summary \"<what was done and how it was checked>\" and end your turn.\n"
-        "If the repository must change: branch, commit, push, PR (gh pr create, not a draft), then "
+        "If the repository must change: open a draft PR before the first edit and run "
+        f"aiflow report {t['id']} --role worker --status started --pr <number>. Then do the work, commit, push, "
+        "gh pr ready, and run "
         f"aiflow report {t['id']} --role worker --status ready_for_review --pr <number> --summary \"<1-2 lines>\" "
         "and end your turn. Do not start the review yourself: aiflow wakes you when it is your turn."
     ), cfg)
@@ -1610,6 +1612,19 @@ class Dispatcher:
         (t.get("nudged") or {}).pop(role, None)
         t.pop("limit_hits", None)
         return rep
+
+    def early_pr(self, t: dict, rep: dict) -> None:
+        """Задача без плана открывает черновой PR в начале работы: запомнить его, чтобы он был виден
+        в панели сразу. Чужой или закрытый номер не берём — итоговый отчёт всё равно проверит verify_pr."""
+        n = rep.get("pr")
+        if not n or t.get("pr"):
+            return
+        try:
+            pr = self.gh.pr(int(n), "state,headRefName")
+        except AiflowError:
+            return
+        if pr.get("state") == "OPEN" and pr.get("headRefName") == f"ai/{t['id']}":
+            t["pr"] = int(n)
 
     def verify_pr(self, t: dict, role: str, rep: dict, *, plan: bool) -> bool:
         """Отчёт называет PR — проверить, что это PR этой задачи, а не опечатка или чужой номер.
@@ -2151,6 +2166,7 @@ class Dispatcher:
                 # Стадия та же (итог придёт отчётом ready_for_review или done), но панель показывает её как реализацию.
                 t["route"], t["complexity"] = "self", "simple"
                 t["route_note"] = short_reason(rep.get("summary") or "", 160)
+                self.early_pr(t, rep)
                 self.emit(t, "self_start", f"{t['id']}: простая — планировщик делает сам"
                           + (f": {t['route_note']}" if t["route_note"] else ""), key=f"selfstart:{rep['rid']}")
                 return
@@ -2180,7 +2196,9 @@ class Dispatcher:
                 self.emit(t, "self_done", f"{t['id']}: простая — планировщик сделал сам, PR #{t['pr']} в очереди "
                           "на ревью", key=f"self:{rep['rid']}")
                 return
-            if st == "done" and not t.get("pr"):
+            if st == "done" and (not t.get("pr") or t.get("route") == "self"):
+                # менять репозиторий не пришлось: ранний черновой PR планировщик закрыл сам
+                t.pop("pr", None)
                 t["complexity"] = t.get("complexity") or "simple"
                 self.set_state(t, "done", rep.get("summary") or "выполнено")
                 self.emit(t, "done", f"{t['id']}: выполнено — {rep.get('summary') or 'без изменений в репозитории'}",
@@ -2257,6 +2275,9 @@ class Dispatcher:
     def adv_in_progress(self, t: dict) -> None:
         rep = self.new_report(t, "worker")
         if rep:
+            if rep.get("status") == "started":
+                self.early_pr(t, rep)  # исполнитель задачи без плана открыл черновой PR и работает дальше
+                return
             if rep.get("status") == "done" and not t.get("pr"):
                 self.set_state(t, "done", rep.get("summary") or "выполнено")
                 self.emit(t, "done", f"{t['id']}: выполнено — {rep.get('summary') or 'без изменений в репозитории'}",
@@ -2510,7 +2531,9 @@ class Dispatcher:
         t["retry_pending"] = True
         if not t.get("pr"):
             self.set_state(t, "new", "повтор")
-        elif t.get("plan_approved") or is_direct(t):
+        elif t.get("plan_approved") or is_direct(t) or t.get("route") == "self":
+            if t.get("route") == "self":
+                t["direct"] = True  # планировщик делал сам и уже открыл PR: новый исполнитель продолжит в нём
             self.set_state(t, "approved", "повтор: новый исполнитель")
         else:
             self.set_state(t, "plan_review", "повтор")
@@ -3772,7 +3795,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("id")
     r.add_argument("--role", required=True, choices=["planner", "worker"])
     r.add_argument("--status", required=True,
-                   choices=["plan_ready", "delegate", "self_execute", "answered", "ready_for_review", "done", "approved", "limit_reached", "error", "blocked"])
+                   choices=["plan_ready", "delegate", "self_execute", "started", "answered", "ready_for_review", "done", "approved", "limit_reached", "error", "blocked"])
     r.add_argument("--pr", type=int)
     r.add_argument("--complexity", choices=["simple", "complex"], help="оценка реализации (планировщик)")
     r.add_argument("--summary")

@@ -1440,5 +1440,35 @@ class ContextWindow(ProjectCase):
         self.assertEqual(self.claude.launched[0]["window"], 180000)
 
 
+class EarlyPr(ProjectCase):
+    def test_planner_that_does_the_task_itself_shows_its_draft_pr_at_once(self):
+        self.add("a")
+        self.tick()
+        self.gh.prs[7] = {"state": "OPEN", "headRefName": "ai/a", "isDraft": True, "body": "", "labels": []}
+        self.report("a", "planner", "self_execute", 7, summary="делаю")
+        self.tick()
+        self.assertEqual((self.state("a"), self.task("a")["pr"]), ("planning", 7))
+        self.assertEqual(aiflow.build_state(self.store)["tasks"][0]["pr"], 7)
+
+    def test_pr_of_another_branch_is_not_taken(self):
+        self.add("a")
+        self.tick()
+        self.gh.prs[7] = {"state": "OPEN", "headRefName": "ai/other", "isDraft": True, "body": "", "labels": []}
+        self.report("a", "planner", "self_execute", 7, summary="делаю")
+        self.tick()
+        self.assertIsNone(self.task("a").get("pr"))
+
+    def test_worker_without_a_plan_reports_its_draft_pr(self):
+        self.add("a")
+        self.tick()
+        self.report("a", "planner", "delegate", summary="поручаю")
+        self.tick()
+        self.assertEqual(self.state("a"), "in_progress")
+        self.gh.prs[8] = {"state": "OPEN", "headRefName": "ai/a", "isDraft": True, "body": "", "labels": []}
+        self.report("a", "worker", "started", 8)
+        self.tick()
+        self.assertEqual((self.state("a"), self.task("a")["pr"]), ("in_progress", 8))
+
+
 if __name__ == "__main__":
     unittest.main()
