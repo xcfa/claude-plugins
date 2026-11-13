@@ -3226,6 +3226,15 @@ def cmd_enqueue(args, root: Path) -> int:
     ids = [t["id"] for t in tasks]
     if len(ids) != len(set(ids)):
         raise AiflowError("в пачке повторяются id задач")
+    if len(tasks) > 1 and not getattr(args, "separate", False):
+        # Сессия координатора живёт днями и ставит задачи по памяти о старых правилах: правило «одно
+        # сообщение — одна задача» держит сама команда, а не только текст инструкции.
+        raise AiflowError(
+            f"{len(tasks)} tasks in one call, nothing is queued. One user message is one task: put small unrelated "
+            "things into ONE task and write its text as a numbered list (one PR, one planner session). "
+            f"The current rules: {PLUGIN_ROOT / 'skills' / 'intake' / 'SKILL.md'} (step 3) - read them again, "
+            "they change with plugin updates. Repeat with --separate only if the user asked for separate tasks, "
+            "or each task is a feature of its own, or the tasks depend on each other (depends_on).")
     # Тот же lock, что у прохода монитора: проверка и запись идут одним куском,
     # параллельный enqueue или tick ждут, пока мы закончим.
     lock = FileLock(store.runs / "tick.lock", stale_minutes=15)
@@ -3847,6 +3856,8 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--hook", action="store_true", help=argparse.SUPPRESS)
     e = sub.add_parser("enqueue", help="поставить задачи в очередь (JSON со stdin)")
     e.add_argument("file", nargs="?")
+    e.add_argument("--separate", action="store_true",
+                   help="несколько задач за один вызов: пользователь просил раздельно или это отдельные фичи")
     r = sub.add_parser("report", help="отчёт сессии")
     r.add_argument("id")
     r.add_argument("--role", required=True, choices=["planner", "worker"])

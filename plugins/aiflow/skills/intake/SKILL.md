@@ -59,7 +59,8 @@ user's language and words.
    `high`, `xhigh` or `max`. Without such a request, do not set these fields and do not select a model.
    Example: `{"id": "search", "text": "…", "planner_model": "fable"}`.
    For a task that is already in the queue, use `aiflow model <id> --planner fable`.
-7. Put the tasks into the queue with one command:
+7. Put the task into the queue with one command. For two or more tasks in one call, add
+   `--separate`: without it the command refuses, because one message is one task (step 3).
    ```
    aiflow enqueue <<'JSON'
    [

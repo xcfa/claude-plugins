@@ -862,11 +862,21 @@ class Dependencies(ProjectCase):
         self.assertEqual(cycle[0], cycle[-1])
         self.assertEqual(set(cycle), {"a", "b", "c"})
 
-    def enqueue(self, items) -> None:
+    def enqueue(self, items, separate=True) -> None:
         path = self.tmp / "tasks.json"
         path.write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
         with contextlib.redirect_stdout(io.StringIO()):
-            aiflow.cmd_enqueue(argparse.Namespace(file=str(path)), self.root)
+            aiflow.cmd_enqueue(argparse.Namespace(file=str(path), separate=separate), self.root)
+
+    def test_several_tasks_in_one_call_need_the_separate_flag(self):
+        two = [{"id": "x1", "text": "one"}, {"id": "x2", "text": "two"}]
+        with self.assertRaisesRegex(aiflow.AiflowError, "numbered list"):
+            self.enqueue(two, separate=False)
+        self.assertIsNone(self.store.task("x1"))
+        self.enqueue(two)
+        self.assertIsNotNone(self.store.task("x2"))
+        self.enqueue([{"id": "x3", "text": "alone"}], separate=False)
+        self.assertIsNotNone(self.store.task("x3"))
 
     def test_enqueue_rejects_a_cycle_and_a_cancelled_dependency(self):
         with self.assertRaisesRegex(aiflow.AiflowError, "цикл"):

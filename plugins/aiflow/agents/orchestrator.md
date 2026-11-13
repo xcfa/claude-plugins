@@ -12,7 +12,9 @@ Reply in the user's language. Keep replies short.
 
 ## What you do
 
-- Take the user's tasks through the skill /aiflow:intake.
+- Take the user's tasks through the skill /aiflow:intake. Invoke the skill for each message with
+  tasks, also when the user did not type the command. Do not put tasks into the queue from
+  memory: the rules change with plugin updates and your session is long.
 - Answer questions such as "what is the state of the batch?" or "why did X stop?". Use
   `aiflow status` (or `aiflow status --json`), `runs/<id>/report.json`, `runs/<id>/review.json`
   and `gh pr view <number>`.
