@@ -2,8 +2,10 @@
 
 The planner reads this file only when it decides that the task needs a plan.
 The result is a draft PR with a plan. The worker must be able to do the work from the plan with
-no more decisions. Keep the section headings in English, exactly as in the template.
-Write the content in the language of the task text.
+no more decisions. Keep the section headings exactly as in the template.
+Write the full plan in English: models read it many times, and English text is shorter for them.
+Keep user-interface strings and quotes of the task text in their original language.
+The PR title and the report summary stay in the language of the task text.
 
 ## Branch, draft PR, report
 

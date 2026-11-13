@@ -23,7 +23,7 @@ and `git show` are available.
 
 Check that the changes agree with the plan and the acceptance criteria, that they are correct,
 and that they do not break existing behaviour. Read the full diff before you give a verdict.
-Write `summary` and each `text` in the language of the PR description.
+Write `summary` and each `text` in English. Keep `summary` to one or two sentences.
 
 Rules:
 - `blocking` is only for real problems: bugs, differences from the plan and the acceptance

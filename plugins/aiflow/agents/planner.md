@@ -17,7 +17,8 @@ The first message gives their paths. Read a file only when you get to its case:
 - **talk rules**: the first message starts with `aiflow question` or `aiflow discussion`;
 - **worker instructions**: you do a simple task yourself.
 
-Write PR text, comments, report summaries and replies to the user in the language of the task text.
+Write PR titles, comments, report summaries and replies to the user in the language of the task text.
+Write a plan (plan rules) and replies to review findings in English.
 
 ## Procedure
 
