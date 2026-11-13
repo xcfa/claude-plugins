@@ -202,6 +202,17 @@ def planner_choice(cfg: dict, t: dict, kind_default: tuple | None = None) -> tup
     return t.get("planner_model") or model, t.get("planner_effort") or effort
 
 
+def context_choice(cfg: dict, t: dict, role: str) -> int:
+    """Окно контекста сессии роли в токенах (planner_context, worker_context); 0 — не задавать."""
+    value = cfg.get("planner_context") if role == "planner" else by_complexity(
+        cfg.get("worker_context"), t.get("complexity") or "simple")
+    try:
+        n = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(100000, min(n, 1000000)) if n > 0 else 0  # пределы флага --autocompact
+
+
 def is_direct(t: dict) -> bool:
     """Задача без плана: исполнитель делает её сразу (поручил планировщик или trivial вручную)."""
     return bool(t.get("direct")) or t.get("complexity") == "trivial"
@@ -226,6 +237,9 @@ DEFAULT_CONFIG = {
     "permission_mode": "auto",
     "planner_model": "opus",  # каждую задачу сначала получает он: план, поручение Sonnet или сам
     "planner_effort": "medium",
+    # Окно контекста сессии в токенах (claude --autocompact): дойдя до него, сессия сжимает контекст.
+    # 0 — как решит Claude Code: у Sonnet и Opus это ~1 млн, и каждый запрос перечитывает весь контекст.
+    "planner_context": 180000,
     "discuss_model": "opus",  # сессия обсуждения идеи (задача kind: discuss)
     "discuss_effort": "high",
     "ask_model": "sonnet",  # вопрос о коде (задача kind: ask)
@@ -234,6 +248,7 @@ DEFAULT_CONFIG = {
     "session_keep_days": 14,  # сессии законченной задачи живут ещё столько дней: их читают и продолжают. 0 — не удалять
     "worker_model": "sonnet",
     "worker_effort": {"complex": "high", "simple": "medium", "trivial": "medium"},  # или одна строка на все задачи
+    "worker_context": 180000,  # окно контекста исполнителя; число или словарь по сложности, как worker_effort
     "worker_opus_effort": "medium",  # effort worker'а на Opus (worker_model: opus), без учёта сложности
     # Кто ищет по коду для планировщика и исполнителя: aiflow — подагент плагина aiflow:explorer;
     # project — как принято в самом проекте (его агенты из .claude/agents, CLAUDE.md): aiflow ничего не подсказывает
@@ -891,8 +906,12 @@ class Claude:
         return m.group(1) if m else None
 
     def launch(self, agent: str, name: str, prompt: str, *, model=None, effort=None, mode=None,
-               worktree: str | None = None) -> tuple[str | None, str]:
+               worktree: str | None = None, window: int = 0) -> tuple[str | None, str]:
+        """window — окно контекста в токенах. Через окружение его не передать: фоновые сессии
+        окружение запускающего процесса не наследуют."""
         cmd = [self.bin, "--bg", "--agent", agent, "--name", name]
+        if window:
+            cmd += ["--autocompact", str(window)]
         if worktree:
             # своя рабочая копия на задачу (.claude/worktrees/<id>): сессии не трогают основную папку и
             # друг друга; повторный запуск с тем же именем подхватывает существующий worktree
@@ -909,11 +928,13 @@ class Claude:
         return (self._short_id(out) if p.returncode == 0 else None), out.strip()
 
     def resume(self, session_id: str, prompt: str, mode=None, cwd: str | None = None, model=None,
-               effort=None) -> tuple[str | None, str]:
+               effort=None, window: int = 0) -> tuple[str | None, str]:
         """cwd — папка сессии: --resume работает там, откуда вызван, а не там, где сессия жила.
         model и effort — те же, с которыми сессия работала: без них продолженная сессия берёт модель по
         умолчанию. Это и не та модель, и полная перезапись кэша диалога — кэш у каждой модели свой."""
         cmd = [self.bin, "--resume", session_id, "--bg"]
+        if window:
+            cmd += ["--autocompact", str(window)]
         if mode:
             cmd += ["--permission-mode", mode]
         if model:
@@ -1267,10 +1288,12 @@ def explorer_mode(cfg: dict) -> str:
 
 
 def search_rule(cfg: dict) -> str:
-    """Правило поиска по коду для первого сообщения сессии. В режиме explorer: project — пусто: как искать,
-    целиком решают CLAUDE.md и агенты проекта, и вторая, конкурирующая инструкция от aiflow только мешает."""
+    """Правило поиска по коду для первого сообщения сессии. В режиме explorer: project — только ссылка
+    на правила проекта: как искать, целиком решают его CLAUDE.md и агенты, а без напоминания сессия ищет
+    своим grep и sed, и весь вывод оседает в её контексте."""
     if explorer_mode(cfg) == "project":
-        return ""
+        return ("How to search the code: obey the search rules in the project CLAUDE.md and use the subagents and "
+                "tools that it names. Do not replace them with your own grep and sed through Bash.")
     return ("How to search the code: send questions such as \"where is this\", \"who uses this\", \"how many\" to the "
             "aiflow:explorer subagent (several in parallel). Read yourself only the files that the decision depends on. "
             "If you search yourself, for a symbol (where it is defined, who uses, implements or calls it) use the LSP "
@@ -1752,7 +1775,8 @@ class Dispatcher:
         t["launching"] = {"role": role, "name": name, "at": iso()}
         self.store.save_task(t)
         sid, out = self.claude.launch(f"aiflow:{role}", name, prompt, model=model, effort=effort, worktree=t["id"],
-                                      mode=self.cfg.get("permission_mode"))
+                                      mode=self.cfg.get("permission_mode"),
+                                      window=context_choice(self.cfg, t, role))
         if not sid:
             low = out.lower()
             if "not trusted" in low:
@@ -1785,7 +1809,8 @@ class Dispatcher:
         cwd = entry.get("cwd") or (self.sess(entry) or {}).get("cwd") if entry else None
         model, effort = self.session_model(t, role, entry)
         new_id, out = self.claude.resume(sid_full, prompt, mode=self.cfg.get("permission_mode"), cwd=cwd,
-                                         model=model, effort=effort)
+                                         model=model, effort=effort,
+                                         window=context_choice(self.cfg, t, role))
         if new_id and new_id != entry["id"]:
             self.adopt(t, role, new_id, entry.get("name", f"{role}: {t['id']}"), model, effort)
             if cwd:

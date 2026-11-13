@@ -1,8 +1,7 @@
 # Planner: a complex task — the plan in a draft PR
 
 The planner reads this file only when it decides that the task needs a plan.
-The result is a draft PR with a plan. The worker must be able to do the work from the plan with
-no more decisions. Keep the section headings exactly as in the template.
+The result is a draft PR with a plan. Keep the section headings exactly as in the template.
 Write the full plan in English: models read it many times, and English text is shorter for them.
 Keep user-interface strings and quotes of the task text in their original language.
 The PR title and the report summary stay in the language of the task text.
@@ -27,6 +26,17 @@ The PR title and the report summary stay in the language of the task text.
    If you cannot plan the task (a contradiction, no access, a human decision is necessary),
    report `--status blocked` and give the cause in the summary.
 
+## Size and level of the plan
+
+The plan records decisions. It is not the implementation written in prose.
+- The user reads the plan before approval. The worker reads the code itself and writes the code.
+- Write what must be true after the work and each decision that the worker must not make
+  differently: contracts, data rules, behaviour, names that other code or the user sees.
+- Do not write what the worker finds when it opens the file: code, SQL, the list of call sites,
+  line-by-line edits, line numbers.
+- Keep the plan below about 8000 characters. A larger plan usually means implementation detail
+  or a task that needs a split.
+
 ## PR description template
 
 ```markdown
@@ -40,15 +50,19 @@ What is included. What is not included (non-goals).
 ## Files
 | File | Change |
 | --- | --- |
-| `path/to/file.ext` | what changes |
+| `path/to/file.ext` | what changes, in one phrase |
+
+Group files that change in the same way into one row (a folder or a glob).
 
 ## Interfaces and data
-New and changed signatures, formats, migrations.
+Only new and changed contracts: API, database schema, formats, public signatures.
+Name the fields and the rules. Do not write the code.
 
 ## Edge cases
+Only the cases where the correct behaviour is a decision. One line for each.
 
 ## Tests
-Which tests to add or change. The check commands (build, linter, tests).
+Which behaviours get a test, one line for each. The check commands (build, linter, tests).
 
 ## UI
 Only for tasks with an interface: the link to the artboard in the Claude Design project,
@@ -58,13 +72,15 @@ one line "what we implement", the mandatory states (empty, loading, error).
 Files that other tasks can also change.
 
 ## Implementation order
-The steps in the order of work in this PR. After each step, the build and the tests are green.
+Three to six steps in the order of work in this PR, one line for each. After each step, the
+build and the tests are green.
 If the task is clearly too large for one PR (more than about 1500 diff lines, or two or more
 independent parts), say so here and propose a split into tasks. The user decides.
 Do not split the task yourself and do not put tasks into the queue.
 
 ## Options considered
-What was rejected and why. This is the record of the reasons for the worker and the reviewer.
+What was rejected and why: one line for each option. Leave the section out if there was no
+real alternative.
 
 ## Plan change history
 - <date>: initial version

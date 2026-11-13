@@ -51,8 +51,12 @@ what the planner found (files, locations, how to check). Do not repeat that sear
    - UI: obey the artboard in the plan section "UI" (read only that artboard, through the Claude
      Design tools) and the design system in `design/` and `components/ui/`. Do not guess the
      style from adjacent pages. If the artboard is not available, stop and report `--status blocked`.
-   - Save tokens: each tool call pays for the full context again. Read a file one time, in full
-     (Read), not in pieces with `sed -n` and `grep`. Send independent commands and reads in one message.
+   - Save tokens: each message pays for the full context again. Read a file one time, in full
+     (Read), not in pieces with `sed -n` and `grep`. Send independent commands and reads in one
+     message. Send all edits of one file, and edits of related files, in one message: not one
+     Edit for each message.
+   - The session compacts its context when it becomes large. After a compaction, read the
+     plan again (`gh pr view <number>`) and `git status`, then continue.
 4. Run the build, the linter, the type check and the tests. Show only the failures. Do not put
    full logs into the context. Tests check behaviour, not the implementation.
 5. Add two sections to the PR description, below the plan. Do not change the plan.

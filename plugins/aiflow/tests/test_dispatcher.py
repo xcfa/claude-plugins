@@ -1160,12 +1160,12 @@ class SearchRule(ProjectCase):
             self.assertTrue(lines[at + 1].startswith("How to search the code"), lines[at + 1][:60])
             self.assertLess(text.index("How to search the code"), text.index("aiflow report"))
 
-    def test_project_mode_says_nothing_about_search(self):
-        """Иначе в сессии две инструкции о поиске — от aiflow и из CLAUDE.md проекта, и они спорят."""
+    def test_project_mode_points_to_the_project_rules(self):
+        """Своих средств aiflow не называет: иначе в сессии две инструкции о поиске, и они спорят."""
         for text in self.prompts(explorer="project"):
             self.assertNotIn("aiflow:explorer", text)
             self.assertNotIn("LSP", text)
-            self.assertNotIn("How to search the code", text)
+            self.assertIn("the project CLAUDE.md", text)
 
     def test_unknown_value_falls_back_to_the_plugin_agent(self):
         self.assertEqual(aiflow.explorer_mode({"explorer": "что-то"}), "aiflow")
@@ -1419,6 +1419,24 @@ class ToastLink(unittest.TestCase):
             aiflow._toast = orig
         self.assertIn("#open=a", seen[0])
         self.assertIsNone(seen[1])
+
+
+class ContextWindow(ProjectCase):
+    def test_window_is_set_for_each_role(self):
+        cfg = dict(aiflow.DEFAULT_CONFIG, planner_context=200000, worker_context={"complex": 300000, "simple": 150000})
+        self.assertEqual(aiflow.context_choice(cfg, {}, "planner"), 200000)
+        self.assertEqual(aiflow.context_choice(cfg, {"complexity": "complex"}, "worker"), 300000)
+        self.assertEqual(aiflow.context_choice(cfg, {}, "worker"), 150000)
+
+    def test_zero_leaves_the_default_window_and_limits_apply(self):
+        self.assertEqual(aiflow.context_choice({"planner_context": 0}, {}, "planner"), 0)
+        self.assertEqual(aiflow.context_choice({}, {}, "worker"), 0)
+        self.assertEqual(aiflow.context_choice({"worker_context": 5000}, {}, "worker"), 100000)
+
+    def test_launch_passes_the_window(self):
+        self.add("a")
+        self.tick()
+        self.assertEqual(self.claude.launched[0]["window"], 180000)
 
 
 if __name__ == "__main__":
