@@ -66,18 +66,19 @@ what the planner found (files, locations, how to check). Do not repeat that sear
 
 If the PR branch is not behind the base branch, aiflow starts the first review itself. It wakes
 you only when your work is necessary. The message then gives the status and the path to
-`review.json` with the details. In that case, skip step 1 (rebase) unless the status needs it,
+`review.json` with the details. In that case, skip step 1 (merge of the base branch) unless the status needs it,
 and go directly to the table.
 
-1. `git fetch origin`, `git rebase origin/<base branch>`, resolve the conflicts, run the tests,
-   `git push --force-with-lease`.
+1. `git fetch origin`, `git merge origin/<base branch>`, resolve the conflicts, run the tests,
+   `git push`. Do not rebase: a rebase needs a force push, and the session is not permitted
+   to force-push. The PR is squash-merged, thus merge commits in the branch are not a problem.
 2. Run `aiflow review --pr <number>`. Act on the field `status`:
 
 | status | what to do |
 | --- | --- |
 | `ci_failed` | Read `failed` and `logs`. Fix, run the tests, push, run `aiflow review` again. This does not use a review round |
 | `changes_requested` | Fix all findings, `blocking` and `nit`, and the threads in `open_threads` (the reviewer did not accept your last reply: see `reason`). If you disagree, do not fix; explain why. Run the tests, commit, push. Reply to each finding. A finding with a `comment_id`: `aiflow reply --pr <number> --comment-id <id> --body-file <file>`. The other findings: one comment, `gh pr comment <number> --body-file <file>`, first line `<!-- ai-review-reply -->`. Reply format: "fixed: how" or "disagree: why". Run `aiflow review` again. The reviewer answers each thread with "Accepted" (and closes it) or "Not accepted" |
-| `merge_conflict` | A conflict, or the base branch moved ahead. `git fetch origin`, `git rebase origin/<base branch>`, resolve, run the tests, `git push --force-with-lease`, run `aiflow review` again. If the changes stay the same, there is no second review: only CI and the merge |
+| `merge_conflict` | A conflict, or the base branch moved ahead. `git fetch origin`, `git merge origin/<base branch>`, resolve, run the tests, `git push`, run `aiflow review` again. If the changes stay the same, there is no second review: only CI and the merge |
 | `paused` | The queue is paused. The review and the merge wait. End your turn with one line and change nothing. aiflow wakes you |
 | `human_input` | Do what the human comments ask. Reply with a comment whose first line is `<!-- ai-review-reply -->`. Run `aiflow review` again |
 | `approved` | Done. End your turn with one line |
@@ -107,3 +108,5 @@ prompt that wakes you. It is a part of the task, equal to the plan.
   test and linter configs, lock files or migrations, unless they are in the plan and in the task's
   `allowed_protected_paths`. Only a human permits them (`aiflow allow-path`).
 - Do not bypass the review round limit.
+- Do not rewrite pushed history: no `git rebase`, no `git commit --amend` and no force push on
+  the PR branch. Add new commits.

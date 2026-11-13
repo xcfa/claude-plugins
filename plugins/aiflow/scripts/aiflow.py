@@ -155,7 +155,7 @@ def review_activity(store: "Store", t: dict, session_state: str | None, max_roun
     if t.get("auto_review"):
         return "aiflow запускает ревью"
     if session_state == "working":
-        return "исполнитель: rebase, тесты или правки"
+        return "исполнитель: слияние с базой, тесты или правки"
     return None
 
 
@@ -243,6 +243,7 @@ DEFAULT_CONFIG = {
     "max_rounds": 5,
     "nit_rounds": 1,  # в скольких первых раундах nit блокирует одобрение; дальше одобряется, если blocking нет
     "reviewer_idle_minutes": 5,  # ревьюер opencode не присылает событий дольше этого — завис: остановить
+    "reviewer_timeout_minutes": 45,  # общий предел одного прогона ревьюера; большой PR читается долго
     # ветка PR не отстаёт от базовой — aiflow запускает ревью сам, не будя сессию исполнителя: ход «rebase,
     # тесты, aiflow review» без rebase механический, а пробуждение модели стоит загрузки всего её контекста
     "auto_review": True,
@@ -1470,8 +1471,8 @@ def review_prompt(t: dict, cfg: dict) -> str:
              if t.get("self_executed") else "as your instructions tell you")
     return (
         f"It is your turn for the review of PR #{t['pr']} (task {t['id']}). "
-        f"git fetch origin; git rebase origin/{cfg['base_branch']}; resolve the conflicts; run the tests; "
-        "git push --force-with-lease. Then run aiflow review --pr "
+        f"git fetch origin; git merge origin/{cfg['base_branch']} (do not rebase and do not force-push); "
+        "resolve the conflicts; run the tests; git push. Then run aiflow review --pr "
         f"{t['pr']} and act on the status {where}, until a final status."
     )
 

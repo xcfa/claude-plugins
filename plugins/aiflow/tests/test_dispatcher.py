@@ -341,7 +341,7 @@ class InReview(ProjectCase):
         self.tick()
         self.assertEqual(self.state("a"), "in_review")
         self.assertEqual(self.task("a")["ci"]["passed"], 2)
-        self.assertEqual(self.activity(), "исполнитель: rebase, тесты или правки")  # aiflow review ещё не запущен
+        self.assertEqual(self.activity(), "исполнитель: слияние с базой, тесты или правки")  # aiflow review ещё не запущен
         self.phase("ci_appear")
         self.assertEqual(self.activity(), "ждёт, пока GitHub запустит CI")
         self.phase("ci", minutes_ago=4)
@@ -354,7 +354,7 @@ class InReview(ProjectCase):
     def test_phase_of_a_dead_review_process_is_ignored(self):
         self.start()
         aiflow.write_json(self.root / "runs" / "a" / "phase.json", {"pid": 0, "at": ago(1), "phase": "reviewer", "round": 1})
-        self.assertEqual(self.activity(), "исполнитель: rebase, тесты или правки")
+        self.assertEqual(self.activity(), "исполнитель: слияние с базой, тесты или правки")
 
     def test_activity_for_failed_ci_and_for_the_queue(self):
         self.to_ready("a", 1, files=["a.py"])
@@ -1010,12 +1010,13 @@ class AutoReview(ProjectCase):
         self.assertEqual(self.state("a"), "needs_human")
         self.assertEqual(self.claude.resumed, [])
 
-    def test_branch_behind_base_wakes_the_worker_for_a_rebase(self):
+    def test_branch_behind_base_wakes_the_worker_for_a_merge(self):
         self.ready()
         self.gh.behind_by = 2
         self.tick()
         self.assertEqual(self.spawned, [])
-        self.assertIn("git rebase", self.claude.resumed[0]["prompt"])
+        self.assertIn("git merge origin/", self.claude.resumed[0]["prompt"])
+        self.assertNotIn("force-with-lease", self.claude.resumed[0]["prompt"])
         self.assertEqual(self.state("a"), "in_review")
 
     def test_unknown_or_disabled_falls_back_to_the_worker(self):

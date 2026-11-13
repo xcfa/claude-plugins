@@ -34,7 +34,6 @@ REPLY_MARKER = "<!-- ai-review-reply -->"
 HUMAN_MARKER = "<!-- human -->"
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 PARSE_ATTEMPTS = 3
-OPENCODE_TIMEOUT = 15 * 60
 TERMINAL = {"approved", "limit_reached", "already_closed", "error"}
 # статусы, о которых узнаёт очередь (runs/<task>/report.json): итоговые и те, где решает не worker
 REPORTED = TERMINAL | {"paused", "no_ci"}
@@ -526,7 +525,7 @@ def record_reviewer(root: Path | None, task: dict | None, entry: dict) -> None:
 
 
 def call_reviewer(r: Runner, pr: int, rnd: int, max_rounds: int, model: str, brief: str, tmp: Path,
-                  idle_minutes: float = 5) -> dict:
+                  idle_minutes: float = 5, timeout_minutes: float = 45) -> dict:
     # Задание — через stdin: история ревью бывает длиннее лимита командной строки Windows (~32k),
     # а файл во временной папке лежит вне проекта, и opencode отклоняет его чтение (external_directory).
     message = (f"Review pull request #{pr}, round {rnd} of {max_rounds}. The brief follows this message: read the "
@@ -553,7 +552,7 @@ def call_reviewer(r: Runner, pr: int, rnd: int, max_rounds: int, model: str, bri
                           doing=doing or (CTX.get("phase") or (None, {}))[1].get("doing"))
 
         try:
-            code, events, other, err = stream_events(cmd, env=env, cwd=r.cwd, input=materials, timeout=OPENCODE_TIMEOUT,
+            code, events, other, err = stream_events(cmd, env=env, cwd=r.cwd, input=materials, timeout=timeout_minutes * 60,
                                                     idle=idle_minutes * 60, on_event=progress)
         finally:
             # расход записывается и за неудавшийся прогон: токены на него потрачены
@@ -943,7 +942,8 @@ def main(argv: list[str] | None = None) -> int:
 
             set_phase("reviewer", round=rnd)
             data = call_reviewer(r, args.pr, rnd, max_rounds, cfg.get("reviewer_model") or "", brief, tmp,
-                                 float(cfg.get("reviewer_idle_minutes", 5) or 0))
+                                 float(cfg.get("reviewer_idle_minutes", 5) or 0),
+                                 float(cfg.get("reviewer_timeout_minutes") or 45))
             verdict, cs, summary = normalize(data, truncated)
             still_open = answer_threads(r, args.pr, pending, thread_verdicts(data), tmp) if pending else []
             verdict = final_verdict(verdict, cs, still_open, rnd, max_rounds, int(cfg.get("nit_rounds", 1) or 0))
@@ -977,13 +977,15 @@ def main(argv: list[str] | None = None) -> int:
                 finish("paused", **result, reasons=reasons, message="approved, but " + pause_message(reasons))
             if behind_base(r, cfg["base_branch"], head) > 0:
                 finish("merge_conflict", **result,
-                       message="approved, but the base branch moved ahead: git fetch, rebase, tests, push and "
-                               "aiflow review again. The same changes get no second review")
+                       message="approved, but the base branch moved ahead: git fetch, git merge of the base "
+                               "branch (no rebase, no force push), tests, push and aiflow review again. "
+                               "The same changes get no second review")
             merge = try_merge(r, args.pr, head)
         finally:
             gate.release()
         if merge == "conflict":
-            finish("merge_conflict", **result, message="approved, but there is a conflict with the base branch: rebase")
+            finish("merge_conflict", **result, message="approved, but there is a conflict with the base branch: merge the base branch "
+                                                      "into the PR branch and resolve it (no rebase, no force push)")
         finish("approved", merge=merge, **result)
 
     except subprocess.TimeoutExpired as e:
