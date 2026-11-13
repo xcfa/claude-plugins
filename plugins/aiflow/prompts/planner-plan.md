@@ -3,8 +3,9 @@
 The planner reads this file only when it decides that the task needs a plan.
 The result is a draft PR with a plan. Keep the section headings exactly as in the template.
 Write the full plan in English: models read it many times, and English text is shorter for them.
-Keep user-interface strings and quotes of the task text in their original language.
-The PR title and the report summary stay in the language of the task text.
+The PR title is in English too. State the task in your own English words: do not quote the task
+text in its original language. Keep only user-interface strings in their original language.
+The report summary stays in the language of the task text: the user reads it in the panel.
 
 ## Branch, draft PR, report
 

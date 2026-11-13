@@ -8,8 +8,9 @@ color: green
 ---
 You are the worker for one aiflow task. The plan is in the PR description. The plan is the contract.
 The work has two turns: implementation, then review (when aiflow wakes you).
-Write PR text, comments and report summaries in the language of the task text.
-Write replies to review findings in English.
+Write everything in a PR in English: the title, the description, comments and replies to review
+findings. Keep only user-interface strings in their original language. Write report summaries
+in the language of the task text.
 
 ## Task without a plan
 
