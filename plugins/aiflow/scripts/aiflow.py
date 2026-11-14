@@ -2377,6 +2377,7 @@ class Dispatcher:
                         return
                 t.pop("approve_hold", None)
                 t["plan_approved"] = True
+                self.settle(t, ("planner",))  # планировщик закончил ход вопросом «одобрите план» — он решён
             self.set_state(t, "approved", "план одобрен")
             return
         rep = self.new_report(t, "planner")
@@ -2553,6 +2554,16 @@ class Dispatcher:
         if u:
             t.setdefault("usage", {})["reviewer"] = u
 
+    def settle(self, t: dict, roles: tuple = ("planner", "worker")) -> None:
+        """Закрыть ожидание сессий, чей вопрос уже никого не ждёт: план одобрен, задача закончена.
+        Иначе они остаются в списке «Needs input» у claude agents, пока их хранят. claude stop разговор
+        не удаляет: сессию по-прежнему можно открыть и продолжить."""
+        for role in roles:
+            for e in (t.get("sessions") or {}).get(role) or []:
+                if self.sstate(e) == "blocked" and self.claude.stop(e["id"]):
+                    self.sessions.get(e["id"], {})["state"] = "stopped"
+                    self.store.log(t["id"], {"settled": e["id"]})
+
     def adv_merged(self, t: dict) -> None:
         self.add_reviewer_usage(t)  # последний раунд ревью заканчивается мержем: забрать его расход до уборки
         lost = [a for a in t.get("amendments") or [] if not a.get("delivered_at")]
@@ -2562,6 +2573,7 @@ class Dispatcher:
                       f"{', '.join('№' + str(a['n']) for a in lost)} — поставьте их новой задачей")
         if t.get("cleaned"):
             return
+        self.settle(t)
         # Сессии законченной задачи сразу не удаляем: в них ход работы и итог (у задачи без PR — только там),
         # их читают и в них продолжают разговор. claude rm удаляет и рабочую копию, поэтому срок всё же есть.
         days = float(self.cfg.get("session_keep_days") or 0)

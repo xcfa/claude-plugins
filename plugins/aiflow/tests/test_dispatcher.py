@@ -1753,5 +1753,26 @@ class BlockedSessionSaysWhy(ProjectCase):
         self.assertIn("allowed these protected paths", self.claude.resumed[-1]["prompt"])
 
 
+class SettleWaitingSessions(ProjectCase):
+    def test_planner_question_is_closed_when_the_plan_is_approved(self):
+        self.to_plan_review("a", 1)
+        sid = self.sid("a", "planner")
+        self.claude.sessions[sid]["state"] = "blocked"  # закончил ход словами «одобрите план»
+        self.gh.add_label(1, "plan-approved")
+        self.tick()
+        self.assertEqual(self.claude.sessions[sid]["state"], "stopped")
+        self.assertEqual(self.claude.removed, [])  # разговор остаётся
+
+    def test_waiting_sessions_of_a_finished_task_are_closed(self):
+        self.to_plan_review("a", 1)
+        sid = self.sid("a", "planner")
+        self.claude.sessions[sid]["state"] = "blocked"
+        t = self.task("a")
+        t["state"] = "merged"
+        self.store.save_task(t)
+        self.tick()
+        self.assertEqual(self.claude.sessions[sid]["state"], "stopped")
+
+
 if __name__ == "__main__":
     unittest.main()

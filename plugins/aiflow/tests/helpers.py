@@ -63,6 +63,8 @@ class FakeClaude:
         return self.log_text
 
     def stop(self, sid):
+        if sid in self.sessions:
+            self.sessions[sid]["state"] = "stopped"
         return True
 
     def rm(self, sid):
