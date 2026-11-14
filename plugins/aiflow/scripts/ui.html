@@ -752,7 +752,10 @@ function setBadge(n) {
 }
 
 // Установка: браузер сам сообщает, что страницу можно поставить приложением, — тогда показываем кнопку.
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("/sw.js").then(() => { document.documentElement.dataset.sw = "ok"; },
+    (e) => { document.documentElement.dataset.sw = "error: " + e.message; });
+}
 let installPrompt = null;
 window.addEventListener("beforeinstallprompt", (e) => {
   e.preventDefault();
