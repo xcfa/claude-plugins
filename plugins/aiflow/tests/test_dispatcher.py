@@ -1956,3 +1956,14 @@ class TrayAndApp(ProjectCase):
         self.assertEqual([w["id"] for w in data["waiting"]], ["a"])
         self.assertEqual(data["active"], 1)
         self.assertEqual(data["projects"][0]["name"], "repo")
+
+    def test_app_command_is_parsed(self):
+        import aiflow_service as svc
+        calls = []
+        for name in ("autostart", "app_shortcut"):
+            real = getattr(svc, name)
+            self.addCleanup(setattr, svc, name, real)
+            setattr(svc, name, lambda enable, n=name: calls.append((n, enable)) or "x")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(aiflow.main(["app", "--remove"]), 0)
+        self.assertIn(("autostart", False), calls)
