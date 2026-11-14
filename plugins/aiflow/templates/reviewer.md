@@ -39,7 +39,7 @@ Rules:
 - Tests must check behaviour, not the implementation. Tests that only repeat the code (mocks for
   everything, checks of internal calls) are a `nit` with an explanation. Missing behaviour tests
   for new logic are `blocking`.
-- Changes in .github/, .claude/, .opencode/, runs/, design/, components/ui/, build, test and
+- Changes in .github/, .claude/, .opencode/, .aiflow/, design/, components/ui/, build, test and
   linter configs, lock files and migrations that the plan does not include are always `blocking`.
 - UI: do NOT check agreement with the mockup. Check only what the diff shows: components from
   components/ui/ are used and not home-made ones; there are no hard-coded colours and no inline

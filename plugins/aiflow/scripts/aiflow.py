@@ -2,7 +2,7 @@
 """
 aiflow — очередь задач для фоновых сессий Claude Code.
 
-Состояние живёт в <repo>/runs/, сессии хостит supervisor Claude Code,
+Состояние живёт в <repo>/.aiflow/, сессии хостит supervisor Claude Code,
 aiflow только решает, когда и кого запустить, и записывает результат.
 Только стандартная библиотека Python 3.9+.
 """
@@ -85,14 +85,15 @@ WHAT_TO_DO = {
             "«Повторить» не нужен.",
     "merge": "Смержите PR сами либо проверьте автомерж и требования защиты ветки. После мержа задача закроется сама.",
     "report": "Сессия называет не тот PR. «Открыть сессию» и поправьте её; либо «Повторить».",
-    "deps": "«Снять» эту задачу либо поставьте зависимость заново через /aiflow:intake и нажмите «Повторить».",
+    "deps": "Почините то, от чего задача зависит, и нажмите «Повторить». Либо уберите зависимость: "
+            "aiflow after <задача> <зависимость> --remove. Либо «Снять» эту задачу.",
     "label": "На PR стоит метка needs-human. Разберитесь в PR и нажмите «Повторить» — метка снимется.",
     "closed": "PR уже закрыт. Если задача не нужна — «Снять»; если нужна — откройте PR заново и «Повторить».",
     "stall": "Сессия числится занятой, но ревью давно не двигается: скорее всего, зависла её команда. «Открыть "
              "сессию», остановите команду (Esc) и напишите «продолжай»; либо «Повторить».",
     "noci": "Проверки CI на PR так и не появились. Посмотрите вкладку Actions: работает ли раннер и запускается ли "
             "workflow на pull_request для этих файлов. Когда проверки появятся — «Повторить». Если CI для этого "
-            "репозитория не нужен — require_ci: false в runs/config.json.",
+            "репозитория не нужен — require_ci: false в .aiflow/config.json.",
     "paths": "Задаче нужен защищённый путь: «Разрешить пути…», либо попросите убрать эту правку комментарием в PR.",
 }
 REVIEW_ACTIONS = {"error": "tool", "no_ci": "noci", "limit_reached": "rounds", "already_closed": "closed",
@@ -122,7 +123,7 @@ def ci_text(ci: dict | None) -> str:
 
 def review_activity(store: "Store", t: dict, session_state: str | None, max_rounds: int) -> str | None:
     """Чем сейчас занято ревью задачи: ожидание CI, ревьюер opencode, мерж или работа исполнителя.
-    Фазу пишет сам aiflow review (runs/<id>/phase.json), пока работает; сводку CI — проход очереди."""
+    Фазу пишет сам aiflow review (.aiflow/<id>/phase.json), пока работает; сводку CI — проход очереди."""
     st = t.get("state")
     ci = ci_text(t.get("ci"))
     if st == "ready":
@@ -242,7 +243,7 @@ def unknown_model_note(model: str, known: list[str]) -> str:
     import difflib
     near = difflib.get_close_matches(model, known, n=2, cutoff=0.6)
     return (f"модели «{model}» нет в списке opencode models" + (f" — возможно, вы имели в виду {' или '.join(near)}" if near else "")
-            + ". Поправьте модель ревьюера в панели («Настройки») или reviewer_model в runs/config.json")
+            + ". Поправьте модель ревьюера в панели («Настройки») или reviewer_model в .aiflow/config.json")
 
 
 def is_direct(t: dict) -> bool:
@@ -287,6 +288,11 @@ DEFAULT_CONFIG = {
     # Кто ищет по коду для планировщика и исполнителя: aiflow — подагент плагина aiflow:explorer;
     # project — как принято в самом проекте (его агенты из .claude/agents, CLAUDE.md): aiflow ничего не подсказывает
     "explorer": "aiflow",
+    # одна строка о проекте: её видят планировщики соседних проектов службы, когда решают, куда поставить задачу
+    "description": "",
+    # задачи других проектов, поставленные «после» задачи этого, ждут не только мержа, но и workflow на коммите
+    # мержа (публикация пакета): пока они идут — ждут, упали — задача уходит к человеку
+    "wait_workflows": True,
     "reviewer_model": "",
     "review_identity": "self",  # self — ревью и мерж от вашего gh; bot — от бота с токеном REVIEW_BOT_TOKEN
     "max_rounds": 5,
@@ -314,7 +320,7 @@ DEFAULT_CONFIG = {
     "watch_integration": True,
     "labels": {"approved": "plan-approved", "needs_human": "needs-human", "retry": "retry"},
     "protected_paths": [
-        ".github/**", ".claude/**", ".opencode/**", "runs/**",
+        ".github/**", ".claude/**", ".opencode/**", ".aiflow/**",
         "design/**", "components/ui/**",
         "**/migrations/**", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "poetry.lock",
         "pyproject.toml", "package.json", "tsconfig*.json", ".eslintrc*", "eslint.config.*",
@@ -674,10 +680,52 @@ def sync_queue(q: dict) -> dict:
     return q
 
 
+STATE_DIR = ".aiflow"
+LEGACY_STATE_DIR = "runs"  # так папка называлась до 0.2.85
+
+
+def state_dir(root: Path) -> Path:
+    """Папка состояния очереди в репозитории. Старая runs/ действует, пока проект не переехал."""
+    new, old = Path(root) / STATE_DIR, Path(root) / LEGACY_STATE_DIR
+    if not new.exists() and (old / "config.json").is_file():
+        return old
+    return new
+
+
+def migrate_state_dir(root: Path) -> str | None:
+    """Переезд runs/ → .aiflow/. Только когда нет идущих задач: у живых сессий старые пути уже в промптах.
+    Возвращает строку для журнала или None, если переезжать нечего или пока нельзя."""
+    root = Path(root)
+    new, old = root / STATE_DIR, root / LEGACY_STATE_DIR
+    if new.exists() or not (old / "config.json").is_file():
+        return None
+    store = Store(root)
+    if any(t.get("state") not in TERMINAL for t in store.tasks()):
+        return None
+    os.rename(old, new)
+    store = Store(root)
+    cfg = read_json(new / "config.json", None)
+    if isinstance(cfg, dict) and isinstance(cfg.get("protected_paths"), list) and "runs/**" in cfg["protected_paths"]:
+        cfg["protected_paths"] = [".aiflow/**" if x == "runs/**" else x for x in cfg["protected_paths"]]
+        write_json(new / "config.json", cfg)
+    gi = root / ".gitignore"
+    if gi.exists():
+        raw = gi.read_bytes().decode("utf-8")
+        eol = "\r\n" if "\r\n" in raw else "\n"
+        lines = raw.splitlines()
+        if ".aiflow/" not in lines:
+            lines = [".aiflow/" if x.strip() in ("runs/", "runs", "/runs/", "/runs") else x for x in lines]
+            if ".aiflow/" not in lines:
+                lines.append(".aiflow/")
+            gi.write_bytes((eol.join(lines) + eol).encode("utf-8"))
+    store.event("config", None, "папка состояния переименована: runs/ → .aiflow/")
+    return "runs/ → .aiflow/"
+
+
 class Store:
     def __init__(self, root: Path):
         self.root = root
-        self.runs = root / "runs"
+        self.runs = state_dir(root)
 
     @property
     def initialized(self) -> bool:
@@ -694,7 +742,7 @@ class Store:
         return cfg
 
     def migrate_config(self) -> list[str]:
-        """Дописать в runs/config.json ключи, появившиеся в новой версии. Заданные значения не меняются:
+        """Дописать в .aiflow/config.json ключи, появившиеся в новой версии. Заданные значения не меняются:
         строка на месте словаря (например, worker_effort: "high") так и остаётся, списки не дополняются."""
         path = self.runs / "config.json"
         user = read_json(path, None)
@@ -715,11 +763,11 @@ class Store:
         return added
 
     def set_config(self, key: str, value) -> None:
-        """Меняет один ключ в runs/config.json, остальное содержимое файла сохраняет как есть."""
+        """Меняет один ключ в .aiflow/config.json, остальное содержимое файла сохраняет как есть."""
         path = self.runs / "config.json"
         user = read_json(path, None)
         if not isinstance(user, dict):
-            raise AiflowError("runs/config.json не найден или повреждён — выполните aiflow init")
+            raise AiflowError(".aiflow/config.json не найден или повреждён — выполните aiflow init")
         user[key] = value
         write_json(path, user)
 
@@ -1320,7 +1368,7 @@ def reviewer_runs(store: "Store", tid: str) -> list[dict]:
 
 
 def reviewer_usage(store: "Store", tid: str) -> dict | None:
-    """Расход ревьюера opencode по задаче (runs/<id>/reviewer.json) в том же виде, что расход сессии Claude."""
+    """Расход ревьюера opencode по задаче (.aiflow/<id>/reviewer.json) в том же виде, что расход сессии Claude."""
     models: dict[str, dict] = {}
     for run in reviewer_runs(store, tid):
         m = models.setdefault(str(run.get("model") or "opencode"),
@@ -1393,12 +1441,189 @@ def with_search_rule(prompt: str, cfg: dict) -> str:
     return prompt[:end + 1] + rule + "\n" + prompt[end + 1:]
 
 
+def neighbours(root: Path) -> dict[str, Path]:
+    """Другие проекты службы aiflow на этой машине: имя папки → корень репозитория."""
+    data = read_json(aiflow_home() / "projects.json", {}) or {}
+    me = os.path.normcase(str(Path(root).resolve()))
+    out: dict[str, Path] = {}
+    for e in data.get("projects") or []:
+        r = Path(str((e or {}).get("root") or ""))
+        try:
+            if not r.is_dir() or os.path.normcase(str(r.resolve())) == me:
+                continue
+        except OSError:
+            continue
+        if (state_dir(r) / "config.json").is_file():
+            out.setdefault(r.name, r)
+    return out
+
+
+def split_dep(d: str) -> tuple[str | None, str]:
+    """Зависимость: "id" — задача этого проекта, "проект/id" — задача соседнего."""
+    project, _, tid = str(d).rpartition("/")
+    return (project or None), tid
+
+
+def dep_task(store: Store, d: str, by_id: dict[str, dict] | None = None) -> tuple[Store | None, dict | None]:
+    project, tid = split_dep(d)
+    if not project:
+        return store, (by_id.get(tid) if by_id is not None else store.task(tid))
+    root = neighbours(store.root).get(project)
+    other = Store(root) if root else None
+    return other, (other.task(tid) if other else None)
+
+
+def merge_workflows(root: Path, task: dict) -> tuple[str, str]:
+    """Workflow на коммите мержа задачи (публикация пакета). ("ok" | "wait" | "failed", пояснение)."""
+    p = run(["gh", "pr", "view", str(task["pr"]), "--json", "mergeCommit,mergedAt"], cwd=root, timeout=60)
+    try:
+        data = json.loads(p.stdout) if p.returncode == 0 else None
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        return "wait", "не удалось узнать коммит мержа"
+    sha = (data.get("mergeCommit") or {}).get("oid")
+    if not sha:
+        return "ok", ""
+    p = run(["gh", "run", "list", "--commit", sha, "--limit", "50", "--json", "status,conclusion,workflowName"],
+            cwd=root, timeout=60)
+    try:
+        runs = json.loads(p.stdout) if p.returncode == 0 else None
+    except ValueError:
+        runs = None
+    if not isinstance(runs, list):
+        return "wait", "не удалось узнать состояние workflow"
+    if not runs:
+        return ("wait", "ждёт запуска workflow после мержа") if age_minutes(data.get("mergedAt")) < 3 else ("ok", "")
+    names = lambda rs: ", ".join(sorted({str(r.get("workflowName") or "?") for r in rs}))  # noqa: E731
+    going = [r for r in runs if r.get("status") != "completed"]
+    if going:
+        return "wait", f"идёт {names(going)}"
+    bad = [r for r in runs if r.get("conclusion") not in ("success", "skipped", "neutral")]
+    if bad:
+        return "failed", f"после мержа упал workflow {names(bad)}"
+    return "ok", ""
+
+
+def waiting_deps(store: Store, t: dict, by_id: dict[str, dict]) -> list[str]:
+    """Зависимости, которых задача ещё ждёт, — для панели."""
+    out = []
+    for d in t.get("depends_on") or []:
+        _, other = dep_task(store, d, by_id)
+        st = (other or {}).get("state")
+        if st not in FINISHED:
+            out.append(d + (" (снята)" if st in (None, "cancelled") else ""))
+        elif split_dep(d)[0] and d not in (t.get("deps_published") or []):
+            note = ((t.get("deps_checked") or {}).get(d) or {}).get("note")
+            if note:
+                out.append(f"{d} ({note})")
+    return out
+
+
+def deps_note(store: Store, t: dict) -> str:
+    """Что сделали задачи, после которых поставлена эта, — в промпт запуска."""
+    lines = []
+    for d in t.get("depends_on") or []:
+        other_store, other = dep_task(store, d)
+        if not other or other.get("state") not in FINISHED:
+            continue
+        rep = other_store.report(other["id"]) or {}
+        line = f"- {d}: {other.get('title') or ''}"
+        if other.get("pr"):
+            line += f" (merged PR #{other['pr']}" + (f", repository {other_store.root}" if split_dep(d)[0] else "") + ")"
+        if rep.get("summary"):
+            line += f". Result: {rep['summary']}"
+        lines.append(line)
+    if not lines:
+        return ""
+    return ("\nThis task was queued after other tasks, and they are finished. Their result is already in the base "
+            "branch (for another repository: merged and published there):\n" + "\n".join(lines) + "\n")
+
+
+def neighbours_note(store: Store, tid: str) -> str:
+    """Соседние проекты службы — планировщику: куда поставить задачу, если она не про этот репозиторий."""
+    others = neighbours(store.root)
+    if not others:
+        return ""
+    items = []
+    for name, root in sorted(others.items()):
+        about = str(Store(root).config().get("description") or "").strip()
+        items.append(f"{name} ({about[:160]})" if about else name)
+    return (
+        "\nOther repositories in this aiflow queue: " + "; ".join(items) + ". You cannot change them from this "
+        "session. If the task needs a change there, queue a task for that repository: "
+        f"aiflow enqueue --project <name> --then {tid} (JSON on stdin: id, title, text; write in the text what to "
+        "change, why, and the contract that this task expects). This task then waits for it: write the plan for the "
+        "part in this repository (route complex, do not do it yourself); the worker starts when that task is merged "
+        "and its publish workflows are complete.\n"
+    )
+
+
+def set_after(store: Store, tid: str, dep: str, remove: bool = False) -> dict:
+    """Поставить задачу tid после dep ("id" или "проект/id") либо убрать такую зависимость."""
+    lock = FileLock(store.runs / "tick.lock", stale_minutes=15)
+    if not lock.acquire(wait_seconds=120):
+        raise AiflowError("очередь занята дольше 2 минут, повторите позже")
+    try:
+        t = store.task(tid)
+        if not t:
+            raise AiflowError(f"нет задачи {tid}")
+        deps = list(t.get("depends_on") or [])
+        if remove:
+            if dep not in deps:
+                raise AiflowError(f"{tid} не зависит от {dep}")
+            deps.remove(dep)
+            note = f"{tid}: больше не ждёт {dep}"
+        else:
+            if t.get("state") in TERMINAL:
+                raise AiflowError(f"{tid} уже завершена")
+            if t.get("state") in ("in_progress", "ready", "in_review"):
+                raise AiflowError(f"{tid}: исполнитель уже работает, поставить её после другой задачи поздно")
+            project, did = split_dep(dep)
+            if not project and did == tid:
+                raise AiflowError("задача не может ждать саму себя")
+            other_store, other = dep_task(store, dep)
+            if project and not other_store:
+                raise AiflowError(f"нет проекта {project} в службе aiflow. Есть: "
+                                  + (", ".join(sorted(neighbours(store.root))) or "других проектов нет"))
+            if not other:
+                raise AiflowError(f"нет задачи {dep}")
+            if other.get("state") == "cancelled":
+                raise AiflowError(f"{dep} снята — она не выполнится")
+            if dep in deps:
+                raise AiflowError(f"{tid} уже ждёт {dep}")
+            if project:
+                if f"{store.root.name}/{tid}" in (other.get("depends_on") or []):
+                    raise AiflowError(f"{dep} сама ждёт {tid}: получится круг")
+            else:
+                seen, todo = set(), [did]
+                while todo:
+                    cur = todo.pop()
+                    if cur == tid:
+                        raise AiflowError(f"{dep} сама ждёт {tid}: получится круг")
+                    if cur in seen:
+                        continue
+                    seen.add(cur)
+                    todo += [x for x in (store.task(cur) or {}).get("depends_on") or [] if not split_dep(x)[0]]
+            deps.append(dep)
+            note = f"{tid}: поставлена после {dep}"
+        t["depends_on"] = deps
+        t["deps_published"] = [d for d in t.get("deps_published") or [] if d in deps]
+        t.pop("deps_checked", None)
+        store.save_task(t)
+        store.event("deps", tid, note)
+    finally:
+        lock.release()
+    return t
+
+
 def planner_prompt(store: Store, t: dict, cfg: dict) -> str:
     tid = t["id"]
     return with_search_rule((
         f"aiflow task {tid}: {t.get('title', '')}\n"
         f"Task file: {store.task_path(tid)}. Read it in full.\n"
         f"Base branch: {cfg['base_branch']}. Task branch: ai/{tid}.\n"
+        + deps_note(store, t) + neighbours_note(store, tid) +
         "First assess the task (section \"Task assessment\" of your instructions) and select one route:\n"
         f"- complex: read the plan rules ({PLANNER_PLAN_MD}) and make a draft PR with a plan. Then run "
         f"aiflow report {tid} --role planner --status plan_ready "
@@ -1505,6 +1730,7 @@ def worker_prompt(store: Store, t: dict, cfg: dict, retry: bool = False) -> str:
             "Search only for what the notes do not answer. The notes name the commit they were written at: files "
             "that changed in the base branch after it can differ from the notes.\n"
         )
+    base += deps_note(store, t).lstrip("\n")
     if retry:
         rep = store.report(t["id"]) or {}
         base += (
@@ -1546,6 +1772,7 @@ def discuss_prompt(store: Store, t: dict, cfg: dict) -> str:
     return with_search_rule((
         f"aiflow discussion {tid}: {t.get('title', '')}\n"
         f"Task file: {store.task_path(tid)}. Read it in full. Base branch: {cfg['base_branch']}.\n"
+        + deps_note(store, t) + neighbours_note(store, tid) +
         f"Discussion mode: read the talk rules ({PLANNER_TALK_MD}). When the work becomes a plan, read the plan rules "
         f"({PLANNER_PLAN_MD}). The user wants to discuss how to do this, not to get a plan immediately. "
         "Study the code and the documentation as much as a useful conversation needs (send documentation questions "
@@ -2063,7 +2290,7 @@ class Dispatcher:
             return  # сеть или доступ: не повод останавливать очередь
         if not cached[1]:
             self.pause("base_missing", None, f"базовой ветки {base} нет на origin: поправьте base_branch "
-                       "в runs/config.json либо создайте ветку")
+                       "в .aiflow/config.json либо создайте ветку")
         else:
             self.unpause("base_missing", f"базовая ветка {base} есть на origin, очередь продолжает")
 
@@ -2348,9 +2575,43 @@ class Dispatcher:
 
     def adv_new(self, t: dict) -> None:
         """Задача в очереди: зависимость, которую сняли, сама не выполнится — сказать об этом."""
-        gone = [d for d in t.get("depends_on") or [] if (self.by_id.get(d) or {}).get("state") in (None, "cancelled")]
+        self.deps_broken(t)
+
+    def dep_status(self, t: dict, d: str, by_id: dict[str, dict] | None = None) -> tuple[str, str]:
+        """Готова ли зависимость: ("ok" | "wait" | "gone" | "failed", пояснение). Задача соседнего проекта готова,
+        когда смержена и завершились workflow на коммите мержа (там публикуется пакет)."""
+        other_store, other = dep_task(self.store, d, self.by_id if by_id is None else by_id)
+        st = (other or {}).get("state")
+        if st in (None, "cancelled"):
+            return "gone", ""
+        if st not in FINISHED:
+            return "wait", ""
+        if not split_dep(d)[0] or st == "done" or not other.get("pr") or d in (t.get("deps_published") or []):
+            return "ok", ""
+        if not other_store.config().get("wait_workflows", True):
+            return "ok", ""
+        last = (t.get("deps_checked") or {}).get(d)
+        if last and age_minutes(last.get("at")) < 1:
+            return last.get("status") or "wait", last.get("note") or ""
+        status, note = merge_workflows(other_store.root, other)
+        if status == "ok":
+            t.setdefault("deps_published", []).append(d)
+            (t.get("deps_checked") or {}).pop(d, None)
+        else:
+            t.setdefault("deps_checked", {})[d] = {"at": iso(), "status": status, "note": note}
+        self.store.save_task(t)
+        return status, note
+
+    def deps_broken(self, t: dict) -> bool:
+        """Зависимость, которая сама не выполнится (снята) или чья публикация упала, — к человеку."""
+        found = [(d, *self.dep_status(t, d)) for d in t.get("depends_on") or []]
+        gone = [d for d, st, _ in found if st == "gone"]
+        failed = [f"{d}: {note}" for d, st, note in found if st == "failed"]
         if gone:
             self.to_human(t, f"зависимость снята или не найдена: {', '.join(gone)}", "deps")
+        elif failed:
+            self.to_human(t, "; ".join(failed) + " — пакет мог не опубликоваться", "deps")
+        return bool(gone or failed)
 
     def adv_plan_review(self, t: dict) -> None:
         pr = self.gh.pr(t["pr"], "state,labels,comments")
@@ -2409,6 +2670,8 @@ class Dispatcher:
 
     def adv_approved(self, t: dict) -> None:
         """Ждёт слот исполнителя (запускает schedule). Пока ждёт, PR могли закрыть."""
+        if self.deps_broken(t):
+            return
         if not t.get("pr"):
             return self.set_state(t, "new", "нет PR: задача начинается заново")
         state = self.gh.pr(t["pr"], "state").get("state")
@@ -2648,6 +2911,7 @@ class Dispatcher:
         t["human_reason"] = None
         t.pop("human_action", None)
         t.pop("human_watch", None)
+        t.pop("deps_checked", None)
         if t.get("pr"):
             self.gh.remove_label(t["pr"], self.cfg["labels"]["needs_human"])
             self.gh.remove_label(t["pr"], self.cfg["labels"]["retry"])
@@ -2725,7 +2989,7 @@ class Dispatcher:
         return True
 
     def deps_ok(self, t: dict, by_id: dict[str, dict]) -> bool:
-        return all((by_id.get(d) or {}).get("state") in FINISHED for d in t.get("depends_on") or [])
+        return all(self.dep_status(t, d, by_id)[0] == "ok" for d in t.get("depends_on") or [])
 
     def schedule(self, tasks: list[dict]) -> None:
         by_id = {t["id"]: t for t in tasks}
@@ -2764,6 +3028,8 @@ class Dispatcher:
                     self.set_state(t, "planning")
                     active += 1
                 self.store.save_task(t)
+            elif st == "approved" and not self.deps_ok(t, by_id):
+                pass  # зависимость добавили после плана (задача в соседнем проекте): исполнитель ждёт её
             elif st == "approved" and is_direct(t):
                 if self.start_direct(t):
                     active += 1
@@ -2956,7 +3222,7 @@ ORCHESTRATOR_NAME = "aiflow"
 
 def orchestrator_session(store: "Store", sessions: dict[str, dict]) -> str | None:
     """Короткий id сессии координатора проекта, к которой можно подключиться, или None.
-    Сначала — сессия, в которой работает монитор (она записала себя в runs/orchestrator.json), затем —
+    Сначала — сессия, в которой работает монитор (она записала себя в .aiflow/orchestrator.json), затем —
     фоновая сессия с именем aiflow. Остановленная и чужая интерактивная (без id) не годятся."""
     usable = {sid: s for sid, s in sessions.items() if sid and s.get("state") != "stopped"}
     seen = (read_json(store.runs / "orchestrator.json", {}) or {}).get("session_id")
@@ -3000,8 +3266,10 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
     prices = price_table()
     project_usage: dict[str, dict] = {}
     out = []
+    by_id = {t["id"]: t for t in tasks}
     for t in tasks:
         st = t.get("state", "new")
+        waits_for = waiting_deps(store, t, by_id) if st in ("new", "approved") else []
         usage, cost, _ = priced(task_usage(t), prices)
         add_usage(project_usage, task_usage(t))
         cur = {}
@@ -3055,7 +3323,9 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
             "action": t.get("human_action") if st == "needs_human" else None,
             "activity": ("планировщик делает сам, PR появится по готовности"
                          + (f". Что делает: {t['route_note']}" if t.get("route_note") else "")) if doing_self
+                        else ("ждёт задачу: " + ", ".join(waits_for)) if waits_for
                         else review_activity(store, t, cur.get("state"), int(cfg["max_rounds"])),
+            "waits_for": waits_for,
             "ci": t.get("ci") if st in ("ready", "in_review") else None,
             "models": {f: t[f] for f in MODEL_FIELDS if t.get(f)},
             "reviewer_session": next((r.get("session") for r in reversed(reviewer_runs(store, t["id"])) if r.get("session")), None),
@@ -3149,14 +3419,14 @@ def cmd_init(args, root: Path) -> int:
         if p.returncode == 0 and p.stdout.strip().startswith("origin/"):
             cfg["base_branch"] = p.stdout.strip()[len("origin/"):]
         write_json(store.runs / "config.json", cfg)
-        created.append("runs/config.json")
+        created.append(".aiflow/config.json")
     else:
         added = store.migrate_config()
         if added:
-            created.append("runs/config.json (+" + ", ".join(added) + ")")
+            created.append(".aiflow/config.json (+" + ", ".join(added) + ")")
     gi = root / ".gitignore"
     lines = gi.read_text(encoding="utf-8").splitlines() if gi.exists() else []
-    add = [x for x in ("runs/", ".claude/worktrees/") if x not in lines]
+    add = [x for x in (store.runs.name + "/", ".claude/worktrees/") if x not in lines]
     if add:
         gi.write_text("\n".join(lines + add) + "\n", encoding="utf-8")
         created.append(".gitignore (+" + ", ".join(add) + ")")
@@ -3191,7 +3461,7 @@ def cmd_init(args, root: Path) -> int:
         created.append("проект добавлен в службу aiflow (~/.aiflow/projects.json)")
     print("Готово:\n  " + "\n  ".join(created))
     print("\nДальше:\n"
-          "  1. Впишите модель ревьюера в runs/config.json → reviewer_model (opencode models deepseek).\n"
+          "  1. Впишите модель ревьюера в .aiflow/config.json → reviewer_model (opencode models deepseek).\n"
           f"  2. Заполните .github/workflows/ci.yml и сделайте job обязательной проверкой для {store.config()['base_branch']}.\n"
           "  3. Добавьте в .claude/settings.json allow-правила для сборки и тестов проекта.\n"
           "  4. Закоммитьте .claude/settings.json, .github/, docs/.\n"
@@ -3238,7 +3508,7 @@ def doctor_checks(root: Path | None, quick: bool) -> list[tuple[bool, str]]:
         res.append(check("git-репозиторий", False, "запустите в репозитории"))
         return res
     store = Store(root)
-    res.append(check("runs/config.json", store.initialized, "выполните aiflow init"))
+    res.append(check(".aiflow/config.json", store.initialized, "выполните aiflow init"))
     identity = store.config().get("review_identity") or "self"
     if identity == "bot":
         token = os.environ.get("REVIEW_BOT_TOKEN") or (Path.home() / ".config" / "ai-review" / "token").is_file()
@@ -3247,7 +3517,7 @@ def doctor_checks(root: Path | None, quick: bool) -> list[tuple[bool, str]]:
         res.append(check(f"review_identity: {identity}", identity == "self", "ожидается self или bot"))
     if store.initialized:
         cfg = store.config()
-        res.append(check("reviewer_model в runs/config.json", bool(cfg.get("reviewer_model")),
+        res.append(check("reviewer_model в .aiflow/config.json", bool(cfg.get("reviewer_model")),
                          "впишите id модели из opencode models"))
     if quick:
         return res
@@ -3262,7 +3532,7 @@ def doctor_checks(root: Path | None, quick: bool) -> list[tuple[bool, str]]:
         base = store.config()["base_branch"]
         p = run(["git", "ls-remote", "--heads", "origin", base], cwd=root, timeout=30)
         res.append(check(f"ветка {base} на origin", p.returncode == 0 and bool(p.stdout.strip()),
-                         f"git push origin {base} или поправьте base_branch в runs/config.json"))
+                         f"git push origin {base} или поправьте base_branch в .aiflow/config.json"))
     return res
 
 
@@ -3340,6 +3610,17 @@ def dependency_cycle(tasks: list[dict]) -> list[str]:
 
 
 def cmd_enqueue(args, root: Path) -> int:
+    home_root, project, then = root, getattr(args, "project", None), getattr(args, "then", None)
+    if project and project != root.name:
+        others = neighbours(root)
+        if project not in others:
+            raise AiflowError(f"no project {project} in the aiflow service. Projects: "
+                              + (", ".join(sorted(others)) or "none besides this one"))
+        root = others[project]
+    else:
+        project = None
+    if then and not Store(home_root).task(then):
+        raise AiflowError(f"--then: нет задачи {then}")
     store = Store(root)
     if not store.initialized:
         raise AiflowError("репозиторий не инициализирован: aiflow init")
@@ -3376,6 +3657,11 @@ def cmd_enqueue(args, root: Path) -> int:
             if t["id"] in existing and existing[t["id"]].get("state") not in TERMINAL:
                 raise AiflowError(f"задача {t['id']} уже есть в очереди")
             for d in t["depends_on"]:
+                if split_dep(d)[0]:
+                    other = dep_task(store, d)[1]
+                    if not other or other.get("state") == "cancelled":
+                        raise AiflowError(f"{t['id']}: зависимости {d} нет или она снята")
+                    continue
                 if d not in ids and d not in existing:
                     raise AiflowError(f"{t['id']}: неизвестная зависимость {d}")
                 if d not in ids and existing[d].get("state") == "cancelled":
@@ -3394,7 +3680,11 @@ def cmd_enqueue(args, root: Path) -> int:
                         + (f" ({t['complexity']})" if t.get("complexity") else ""))
     finally:
         lock.release()
-    print(f"В очереди: {len(tasks)} — " + ", ".join(ids))
+    print(f"В очереди{' проекта ' + project if project else ''}: {len(tasks)} — " + ", ".join(ids))
+    if then:
+        for i in ids:
+            set_after(Store(home_root), then, f"{project}/{i}" if project else i)
+        print(f"{then} ждёт: " + ", ".join(f"{project}/{i}" if project else i for i in ids))
     if not FileLock(store.runs / "monitor.lock").owner():
         print("Монитор не запущен: в сессии оркестратора выполните /aiflow:resume.")
     return 0
@@ -3584,6 +3874,14 @@ def allow_paths(store: Store, tid: str, paths: list[str]) -> list[str]:
     else:
         queue_or_apply(store, {"cmd": "paths_allowed", "id": tid, "paths": clean})
     return added
+
+
+def cmd_after(args, root: Path) -> int:
+    set_after(Store(root), args.id, args.dep, remove=args.remove)
+    print(f"{args.id}: больше не ждёт {args.dep}" if args.remove else
+          f"{args.id} начнётся после {args.dep}"
+          + (" (после мержа и публикации)" if split_dep(args.dep)[0] else " (после мержа)"))
+    return 0
 
 
 def cmd_allow_path(args, root: Path) -> int:
@@ -3857,7 +4155,7 @@ def cmd_projects(args, root: Path | None) -> int:
     for r in roots:
         st = Store(Path(r))
         if not st.initialized:
-            note = "нет runs/config.json"
+            note = "нет .aiflow/config.json"
         else:
             tasks = st.tasks()
             live = sum(1 for t in tasks if t.get("state") not in TERMINAL)
@@ -4030,6 +4328,12 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("file", nargs="?")
     e.add_argument("--separate", action="store_true",
                    help="несколько задач за один вызов: пользователь просил раздельно или это отдельные фичи")
+    e.add_argument("--project", help="поставить в другой проект службы (имя папки репозитория)")
+    e.add_argument("--then", metavar="ID", help="задача этого проекта, которая подождёт поставленные")
+    af = sub.add_parser("after", help="поставить задачу после другой: id или проект/id")
+    af.add_argument("id")
+    af.add_argument("dep")
+    af.add_argument("--remove", action="store_true", help="убрать зависимость")
     r = sub.add_parser("report", help="отчёт сессии")
     r.add_argument("id")
     r.add_argument("--role", required=True, choices=["planner", "worker"])
@@ -4111,7 +4415,7 @@ def main(argv: list[str] | None = None) -> int:
         handlers = {
             "init": cmd_init, "enqueue": cmd_enqueue, "report": cmd_report, "status": cmd_status,
             "tick": cmd_tick, "run": cmd_run, "pause": cmd_pause, "resume": cmd_resume,
-            "retry": cmd_retry, "cancel": cmd_cancel, "allow-path": cmd_allow_path, "model": cmd_model, "approve": cmd_approve, "amend": cmd_amend, "reply": cmd_reply, "review": cmd_review,
+            "retry": cmd_retry, "cancel": cmd_cancel, "allow-path": cmd_allow_path, "after": cmd_after, "model": cmd_model, "approve": cmd_approve, "amend": cmd_amend, "reply": cmd_reply, "review": cmd_review,
             "ui": cmd_ui, "chat": cmd_chat, "stop": cmd_stop,
         }
         return handlers[args.cmd](args, root)

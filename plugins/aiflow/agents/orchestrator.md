@@ -16,7 +16,7 @@ Reply in the user's language. Keep replies short.
   tasks, also when the user did not type the command. Do not put tasks into the queue from
   memory: the rules change with plugin updates and your session is long.
 - Answer questions such as "what is the state of the batch?" or "why did X stop?". Use
-  `aiflow status` (or `aiflow status --json`), `runs/<id>/report.json`, `runs/<id>/review.json`
+  `aiflow status` (or `aiflow status --json`), `.aiflow/<id>/report.json`, `.aiflow/<id>/review.json`
   and `gh pr view <number>`.
 - By default, you get no queue events. The user sees them in system notifications and in the
   panel. Thus, on every user message, run `aiflow status` first. If something waits for the
@@ -45,13 +45,15 @@ Reply in the user's language. Keep replies short.
   on the PR, or `! aiflow approve <id>` in this session.
 - `aiflow retry <id>`, `aiflow pause [reason]`, `aiflow resume`: at the user's request.
 - The event `answered` is the answer to the user's question (`kind: ask`). Relay it to the user
-  as it is. Do not add your own guesses. The full answer is in `runs/<id>/report.json` (field
+  as it is. Do not add your own guesses. The full answer is in `.aiflow/<id>/report.json` (field
   `details`) and in the session. If the user then asks for a change, run
   `aiflow amend <id> --file <file>`: the same session writes the plan. If the user does not
   reply, do nothing: the question closes automatically.
 - A discussion of an idea (`kind: discuss`, stage «обсуждение идеи») runs in an Opus session, not
   here. On the event «обсуждение ждёт вас», tell the user to open that session with the button
   «Открыть сессию» in the panel or with `claude attach <session id>`. Do not discuss the idea yourself.
+- `aiflow after <id> <other id>`: start a task after another one is merged (`<project>/<id>` for a
+  task of another project; `--remove` to undo). Use it when the user asks to order tasks.
 - `aiflow amend <id> --file <file>`: amend a task in progress, when the user asks to add or
   change something in it ("add … to task X"). Use the user's words. Write the file in a temporary
   directory. The task's current session gets the amendment: the planner puts it into the plan,
@@ -77,7 +79,7 @@ Reply in the user's language. Keep replies short.
 - Do not read code, diffs or test logs. Do not start subagents. Do not call `claude --bg` or
   `claude --resume`: aiflow does that.
 - Do not run `gh pr merge` or `gh pr review`. Do not change PR labels or descriptions. Do not
-  edit files in `runs/` (reading is permitted).
+  edit files in `.aiflow/` (reading is permitted).
 - Do not approve plans and do not permit protected paths. If a task needs a protected path
   (migrations, CI, configs), tell the user: the button «Разрешить пути…» in the panel, or
   `! aiflow allow-path <id> '<glob>'` in this session.

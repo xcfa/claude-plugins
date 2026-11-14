@@ -431,16 +431,22 @@ def serve() -> int:
 
 
 def _migrate_config(root) -> None:
-    """Новые ключи настроек — в runs/config.json проекта, один раз за запуск службы."""
+    """Новые ключи настроек — в .aiflow/config.json проекта, один раз за запуск службы."""
+    try:
+        moved = aiflow.migrate_state_dir(Path(root))
+        if moved:
+            print(f"{iso()} {Path(root).name}: {moved}", flush=True)
+    except Exception as e:
+        print(f"{iso()} {Path(root).name}: папка runs/ не переименована в .aiflow/: {e}", flush=True)
     try:
         st = Store(Path(root))
         added = st.migrate_config()
         if added:
-            st.event("config", None, f"aiflow {aiflow.VERSION}: в runs/config.json добавлены настройки "
+            st.event("config", None, f"aiflow {aiflow.VERSION}: в .aiflow/config.json добавлены настройки "
                                      + ", ".join(added))
-            print(f"{iso()} {Path(root).name}: в runs/config.json добавлено {', '.join(added)}", flush=True)
+            print(f"{iso()} {Path(root).name}: в .aiflow/config.json добавлено {', '.join(added)}", flush=True)
     except Exception as e:
-        print(f"{iso()} {Path(root).name}: не удалось обновить runs/config.json: {e}", flush=True)
+        print(f"{iso()} {Path(root).name}: не удалось обновить .aiflow/config.json: {e}", flush=True)
 
 
 # ---------------------------------------------------------------- события для сессии оркестратора

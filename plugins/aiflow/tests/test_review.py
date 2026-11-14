@@ -160,7 +160,7 @@ class ReviewMain(ProjectCase):
     def test_no_checks_is_not_a_pass_when_ci_is_required(self):
         (self.root / ".github" / "workflows").mkdir(parents=True)
         (self.root / ".github" / "workflows" / "ci.yml").write_text("name: CI\n", encoding="utf-8")
-        aiflow.write_json(self.root / "runs" / "config.json", {"ci_appear_minutes": 0.005})
+        aiflow.write_json(self.root / ".aiflow" / "config.json", {"ci_appear_minutes": 0.005})
         self.r.checks = [[]]
         res = self.run_review()
         self.assertEqual(res["status"], "no_ci")
@@ -185,7 +185,7 @@ class ReviewMain(ProjectCase):
         self.assertEqual(self.run_review()["status"], "approved")
 
     def test_red_ci_is_capped(self):
-        aiflow.write_json(self.root / "runs" / "config.json", {"max_ci_fixes": 2})
+        aiflow.write_json(self.root / ".aiflow" / "config.json", {"max_ci_fixes": 2})
         self.r.checks = [[{"name": "build", "bucket": "fail", "link": ""}]]
         self.assertEqual(self.run_review()["status"], "ci_failed")
         self.assertEqual(self.run_review()["status"], "ci_failed")
@@ -195,7 +195,7 @@ class ReviewMain(ProjectCase):
         self.assertEqual(self.reviewer_calls, [])
 
     def test_green_ci_resets_the_cap(self):
-        aiflow.write_json(self.root / "runs" / "config.json", {"max_ci_fixes": 1})
+        aiflow.write_json(self.root / ".aiflow" / "config.json", {"max_ci_fixes": 1})
         self.r.checks = [[{"name": "build", "bucket": "fail", "link": ""}]]
         self.assertEqual(self.run_review()["status"], "ci_failed")
         self.r.checks = [[{"name": "build", "bucket": "pass"}]]
@@ -232,7 +232,7 @@ class ReviewMain(ProjectCase):
         self.assertIn("sha2", self.r.merges[0])
 
     def test_reused_approval_is_not_stopped_by_the_round_limit(self):
-        aiflow.write_json(self.root / "runs" / "config.json", {"max_rounds": 1})
+        aiflow.write_json(self.root / ".aiflow" / "config.json", {"max_rounds": 1})
         self.r.behind = 1
         self.assertEqual(self.run_review()["status"], "merge_conflict")
         self.r.behind = 0
@@ -248,7 +248,7 @@ class ReviewMain(ProjectCase):
         self.assertEqual(len(self.reviewer_calls), 2)
 
     def test_round_limit(self):
-        aiflow.write_json(self.root / "runs" / "config.json", {"max_rounds": 2})
+        aiflow.write_json(self.root / ".aiflow" / "config.json", {"max_rounds": 2})
         self.r.reviews = [{"id": i, "state": "COMMENTED", "body": review.REVIEW_MARKER, "submitted_at": "2026-01-01T00:00:00Z"}
                           for i in (1, 2)]
         self.assertEqual(self.run_review()["status"], "limit_reached")
@@ -279,7 +279,7 @@ class ReviewMain(ProjectCase):
         self.assertIn("необязательны", self.r.published[-1]["body"])
 
     def test_phase_is_written_while_the_round_runs_and_removed_after(self):
-        phase_file = self.root / "runs" / "a" / "phase.json"
+        phase_file = self.root / ".aiflow" / "a" / "phase.json"
         seen = []
 
         def reviewer(r, pr, rnd, max_rounds, model, brief, tmp, *rest):
@@ -306,7 +306,7 @@ class ReviewMain(ProjectCase):
     def test_phase_says_when_github_has_not_started_ci_yet(self):
         (self.root / ".github" / "workflows").mkdir(parents=True)
         (self.root / ".github" / "workflows" / "ci.yml").write_text("name: CI\n", encoding="utf-8")
-        phase_file = self.root / "runs" / "a" / "phase.json"
+        phase_file = self.root / ".aiflow" / "a" / "phase.json"
         seen = []
         self.r.checks = [[], [], [{"name": "build", "bucket": "pass"}]]
         with mock.patch.object(review.time, "sleep", lambda s: seen.append(aiflow.read_json(phase_file)["phase"])):
@@ -497,7 +497,7 @@ class Reviewer(ProjectCase):
 
 class Streak(ProjectCase):
     def test_streak_counts_only_repeats(self):
-        (self.root / "runs" / "a").mkdir()
+        (self.root / ".aiflow" / "a").mkdir()
         self.assertEqual(review.bump_streak(self.root, "a", "ci_failed"), 1)
         self.assertEqual(review.bump_streak(self.root, "a", "ci_failed"), 2)
         self.assertEqual(review.bump_streak(self.root, "a", "human_input", "t1"), 1)

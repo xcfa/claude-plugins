@@ -300,7 +300,7 @@ def start_server(provider, port: int, wake: threading.Event, service: bool = Fal
     def project_state(key: str, store: aiflow.Store) -> dict:
         base = {"key": key, "name": store.root.name, "root": str(store.root)}
         if not store.initialized:
-            return {**base, "error": "проект не инициализирован или удалён (нет runs/config.json)", "tasks": [], "events": []}
+            return {**base, "error": "проект не инициализирован или удалён (нет .aiflow/config.json)", "tasks": [], "events": []}
         try:
             return {**cache(key, store).state(), **base}
         except Exception as e:  # один сломанный проект не должен ронять всю панель
@@ -362,6 +362,7 @@ def start_server(provider, port: int, wake: threading.Event, service: bool = Fal
                 items, error = m.get(q.get("refresh") == ["1"])
                 return self._json(200, {"reviewer_model": st.config().get("reviewer_model") or "",
                                         "explorer": aiflow.explorer_mode(st.config()),
+                                        "description": st.config().get("description") or "",
                                         "models": items, "models_error": error})
             self._send(404, b"not found", "text/plain")
 
@@ -444,6 +445,17 @@ def start_server(provider, port: int, wake: threading.Event, service: bool = Fal
                     value = body.get("value")
                     paths = value if isinstance(value, list) else re.split(r"[,\n]+", str(value or ""))
                     aiflow.allow_paths(store, tid, [p for p in paths if str(p).strip()])
+                elif action == "after" and tid:
+                    value = str(body.get("value") or "").strip()
+                    if not value.lstrip("-").strip():
+                        return self._json(400, {"error": "впишите id задачи или проект/id"})
+                    aiflow.set_after(store, tid, value.lstrip("-").strip(), remove=value.startswith("-"))
+                    wake.set()
+                elif action == "set_description":
+                    value = " ".join(str(body.get("value") or "").split())[:160]
+                    store.set_config("description", value)
+                    store.event("config", None, "описание проекта: " + (value or "убрано") + " (из панели)")
+                    return self._json(200, {"ok": True, "description": value})
                 elif action == "set_explorer":
                     value = str(body.get("value") or "")
                     if value not in aiflow.EXPLORERS:

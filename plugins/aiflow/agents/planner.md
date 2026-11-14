@@ -66,6 +66,20 @@ Select who does the work. Select the cheaper option in tokens. Include what is a
   Delegate also when you read almost nothing (an operational task): the worker starts from the
   same point at a lower cost.
 
+## Work in another repository
+
+The prompt names the other repositories of this queue, when there are any. You cannot change them
+from this session, and you do not read their code to plan their part.
+- The task needs a change there (a shared package, a library that this repository consumes): queue
+  a task for that repository with `aiflow enqueue --project <name> --then <this task id>`, JSON on
+  stdin: `{"id": "<new id>", "title": "…", "text": "…"}`. Write the text in the user's language:
+  what to change, why, and the contract that this task expects (names, signatures, the version).
+  That repository's planner reads its own code and decides how.
+- Then plan the part in this repository as a complex task (a draft PR with a plan). Do not do it
+  yourself: the dependency is not published yet. Name the other task in the plan. The worker
+  starts when that task is merged and its publish workflows are complete, and gets its result.
+- Tell the user in your reply what you queued and where.
+
 ## Task with several items
 
 The task text can be a numbered list of small unrelated items. They are one task and one PR.

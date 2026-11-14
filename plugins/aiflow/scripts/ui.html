@@ -224,6 +224,14 @@ button:disabled:hover { border-color: var(--rule); }
     <div class="hint" id="rmhint">Формат <code>provider/model</code>. Применяется со следующего раунда ревью; пустое поле — модель по умолчанию opencode.</div>
     <div class="hint" id="rmstatus"></div>
   </form>
+  <form class="setting" id="descform" autocomplete="off">
+    <label for="projdesc">О проекте — одна строка для планировщиков других проектов</label>
+    <div class="row">
+      <input id="projdesc" maxlength="160" placeholder="например: общие пакеты и расширения источников, публикуются в Nextcloud" spellcheck="false">
+      <button type="submit" class="primary" id="descsave">Сохранить</button>
+    </div>
+    <div class="hint">Планировщик соседнего проекта видит имя этого проекта и эту строку. По ним он решает, ставить ли сюда задачу, когда работа нужна не в его репозитории.</div>
+  </form>
   <div class="setting">
     <label for="explorer">Поиск по коду в сессиях задач</label>
     <div class="row">
@@ -277,6 +285,16 @@ Glob относительно корня репозитория, через за
     (t && t.wants_paths && t.wants_paths.length ? t.wants_paths : suggestPaths(t && t.needs)).join(", "));
   if (value === null || !value.trim()) return;
   await act("allow_paths", key, id, value);
+}
+
+async function afterTask(key, id) {
+  const t = findTask(key, id);
+  const cur = t && t.depends_on && t.depends_on.length ? `
+Сейчас ждёт: ${t.depends_on.join(", ")}. Чтобы убрать, впишите со знаком минус: -${t.depends_on[0]}` : "";
+  const value = prompt(`Задача ${id} начнётся после другой: после её мержа, а для задачи другого проекта — ещё и после публикации.
+Впишите id задачи этого проекта или проект/id.` + cur, "");
+  if (value === null || !value.trim()) return;
+  await act("after", key, id, value.trim());
 }
 
 async function amendTask(key, id) {
@@ -347,7 +365,7 @@ async function act(action, key, id, value) {
       : (d.started ? "Запустил координатора и открыл чат" : "Открыл чат с координатором") + ": напишите задачи через /aiflow:intake");
     if (action === "open_session" || action === "open_reviewer") return toast(/уже открыт/.test(d.where || "") ? "Вкладка сессии уже открыта — вывел её на передний план" : `Сессия открыта: ${d.where}`);
     if (action === "cancel" && d.warnings && d.warnings.length) { toast("Снята, но: " + d.warnings.join("; ")); setTimeout(load, 600); return; }
-    toast({ amend: "Дополнение принято — его получит сессия задачи", allow_paths: "Пути разрешены, задача продолжит работу", cancel: "Задача снята", approve: "План одобрен", retry: "Повтор поставлен", pause: "Очередь на паузе", resume: "Очередь продолжает", forget: "Проект убран из службы" }[action] || "Готово");
+    toast({ after: "Порядок задач изменён", amend: "Дополнение принято — его получит сессия задачи", allow_paths: "Пути разрешены, задача продолжит работу", cancel: "Задача снята", approve: "План одобрен", retry: "Повтор поставлен", pause: "Очередь на паузе", resume: "Очередь продолжает", forget: "Проект убран из службы" }[action] || "Готово");
     setTimeout(load, 600);
   } catch (e) {
     if (queued) { busy.delete(bk); if (last) render(last); }
@@ -517,7 +535,7 @@ function renderBoard(p) {
     const rounds = t.rounds ? `раунд ${esc(t.rounds)}/${esc(t.max_rounds)}` : (t.review_lock ? "на ревью" : "");
     const rev = t.reviewer_session ? `<button class="link" data-act="open_reviewer" data-project="${k}" data-id="${id}" title="Открыть сессию ревьюера opencode в терминале">Ревьюер</button> ` : "";
     const cancel = isClosed(t) ? (rev ? `<div class="acts-row">${rev}</div>` : "")
-      : `<div class="acts-row">${rev}${t.asks_paths ? `<button class="link" data-allow="${id}" data-project="${k}" title="Задаче нужен защищённый путь${t.wants_paths && t.wants_paths.length ? ": " + esc(t.wants_paths.join(", ")) : ""}">Разрешить пути…</button> · ` : ""}<button class="link" data-amend="${id}" data-project="${k}" title="Добавить правку к идущей задаче">Дополнить${t.amend_pending ? " (" + esc(t.amend_pending) + " ждёт)" : ""}</button> `
+      : `<div class="acts-row">${rev}${t.asks_paths ? `<button class="link" data-allow="${id}" data-project="${k}" title="Задаче нужен защищённый путь${t.wants_paths && t.wants_paths.length ? ": " + esc(t.wants_paths.join(", ")) : ""}">Разрешить пути…</button> · ` : ""}${["new", "planning", "plan_review", "approved", "discussing", "needs_human"].includes(t.state) ? `<button class="link" data-after="${id}" data-project="${k}" title="Начать задачу после другой${t.depends_on && t.depends_on.length ? ". Сейчас ждёт: " + esc(t.depends_on.join(", ")) : ""}">После…</button> · ` : ""}<button class="link" data-amend="${id}" data-project="${k}" title="Добавить правку к идущей задаче">Дополнить${t.amend_pending ? " (" + esc(t.amend_pending) + " ждёт)" : ""}</button> `
       + `<button class="link danger" data-cancel="${id}" data-project="${k}" title="Остановить сессии задачи и закрыть её PR"${dis(p.key, t.id)}>Снять</button></div>`;
     html += `<div class="meta"><div class="num">${pr}${rounds ? ", " + rounds : ""}</div><div class="line2 num">${t.tokens ? tokens(t.tokens) + " токенов" + (t.cost ? " · " + money(t.cost) : "") : "—"}</div>${cancel}</div>`;
     return html;
@@ -634,6 +652,8 @@ document.addEventListener("click", (e) => {
   if (fg) return forgetProject(fg.dataset.forget);
   const cn = e.target.closest("[data-cancel]");
   if (cn) return cancelTask(cn.dataset.project, cn.dataset.cancel);
+  const aft = e.target.closest("[data-after]");
+  if (aft) return afterTask(aft.dataset.project, aft.dataset.after);
   const amd = e.target.closest("[data-amend]");
   if (amd) return amendTask(amd.dataset.project, amd.dataset.amend);
   const al = e.target.closest("[data-allow]");
@@ -655,6 +675,7 @@ async function loadSettings(refresh) {
     const input = $("rmodel");
     if (settingsFor !== key || !refresh) input.value = d.reviewer_model;
     $("explorer").value = d.explorer || "aiflow";
+    $("projdesc").value = d.description || "";
     input.dataset.saved = d.reviewer_model;
     $("rmodels").innerHTML = d.models.map(m => `<option value="${esc(m)}"></option>`).join("");
     settingsFor = key;
@@ -684,6 +705,17 @@ $("rmform").addEventListener("submit", async (e) => {
     setTimeout(load, 300);
   } catch (err) { toast("Не получилось: " + err.message); }
   finally { btn.disabled = false; }
+});
+
+$("descform").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    const r = await fetch("/api/action", { method: "POST", headers: { "Content-Type": "application/json", "X-Aiflow-Token": TOKEN }, body: JSON.stringify({ action: "set_description", project: $("rmproj").value, value: $("projdesc").value.trim() }) });
+    if (r.status === 403) return staleToken();
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || r.statusText);
+    toast("Описание проекта сохранено");
+  } catch (err) { toast("Не получилось: " + err.message); }
 });
 
 $("explorer").addEventListener("change", async () => {

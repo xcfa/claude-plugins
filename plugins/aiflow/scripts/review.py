@@ -8,7 +8,7 @@
 Перед мержем: очередь не на паузе, ветка PR не отстаёт от базовой, мержится ровно проверенный коммит.
 Ревью публикуется от вашего аккаунта gh (review_identity: self, событие COMMENT — GitHub не даёт
 одобрить свой PR) или от бота с отдельным токеном (review_identity: bot, APPROVE/REQUEST_CHANGES).
-Печатает JSON для worker'а. Итоговые статусы записываются в runs/<task>/report.json сами.
+Печатает JSON для worker'а. Итоговые статусы записываются в .aiflow/<task>/report.json сами.
 Неизвестное и непроверенное считается блокирующим (fail-closed).
 """
 from __future__ import annotations
@@ -35,7 +35,7 @@ HUMAN_MARKER = "<!-- human -->"
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 PARSE_ATTEMPTS = 3
 TERMINAL = {"approved", "limit_reached", "already_closed", "error"}
-# статусы, о которых узнаёт очередь (runs/<task>/report.json): итоговые и те, где решает не worker
+# статусы, о которых узнаёт очередь (.aiflow/<task>/report.json): итоговые и те, где решает не worker
 REPORTED = TERMINAL | {"paused", "no_ci"}
 HUMAN_INPUT_REPEATS = 3  # столько раз подряд возвращаем один и тот же комментарий человека
 
@@ -51,7 +51,7 @@ def set_phase(phase: str | None, **detail) -> None:
     if (CTX.get("phase") or (None,))[0] != phase:
         CTX["phase_since"] = aiflow.iso()
     CTX["phase"] = (phase, detail)
-    path = root / "runs" / task["id"] / "phase.json"
+    path = aiflow.state_dir(root) / task["id"] / "phase.json"
     try:
         if phase is None:
             path.unlink(missing_ok=True)
@@ -68,7 +68,7 @@ def finish(status: str, code: int = 0, **data) -> None:
     set_phase(None)
     if root and task:
         try:
-            aiflow.write_json(root / "runs" / task["id"] / "review.json",
+            aiflow.write_json(aiflow.state_dir(root) / task["id"] / "review.json",
                               {"at": aiflow.iso(), "pr": CTX["pr"], "round": CTX["round"], **out})
             if status in REPORTED:
                 aiflow.write_report(root, task["id"], "worker", status, CTX["pr"],
@@ -530,11 +530,11 @@ def tool_note(part: dict) -> str:
 
 
 def record_reviewer(root: Path | None, task: dict | None, entry: dict) -> None:
-    """Дописать прогон ревьюера в runs/<id>/reviewer.json: по нему очередь считает расход, панель
+    """Дописать прогон ревьюера в .aiflow/<id>/reviewer.json: по нему очередь считает расход, панель
     открывает сессию opencode."""
     if not (root and task):
         return
-    path = root / "runs" / task["id"] / "reviewer.json"
+    path = aiflow.state_dir(root) / task["id"] / "reviewer.json"
     try:
         data = aiflow.read_json(path, {}) or {}
         runs = data.get("runs") if isinstance(data.get("runs"), list) else []
@@ -816,7 +816,7 @@ def final_verdict(verdict: str, comments: list[dict], still_open: list[dict], rn
 def bump_streak(root: Path, tid: str, status: str, key: str = "") -> int:
     """Сколько раз подряд раунд заканчивается одним и тем же (ci_failed; human_input по тому же
     комментарию). Счётчик ведёт код: такие исходы не тратят раунд ревью и иначе не ограничены."""
-    path = root / "runs" / tid / "review_state.json"
+    path = aiflow.state_dir(root) / tid / "review_state.json"
     st = aiflow.read_json(path, {}) or {}
     n = int(st.get("n") or 0) + 1 if (st.get("status"), st.get("key")) == (status, key) else 1
     aiflow.write_json(path, {"status": status, "key": key, "n": n})
@@ -824,7 +824,7 @@ def bump_streak(root: Path, tid: str, status: str, key: str = "") -> int:
 
 
 def clear_streak(root: Path, tid: str) -> None:
-    (root / "runs" / tid / "review_state.json").unlink(missing_ok=True)
+    (aiflow.state_dir(root) / tid / "review_state.json").unlink(missing_ok=True)
 
 
 def pause_message(reasons: list[str]) -> str:
@@ -859,7 +859,7 @@ def main(argv: list[str] | None = None) -> int:
         finish("error", 1, message="нужны gh и opencode в PATH")
     identity = cfg.get("review_identity") or "self"
     if identity not in IDENTITIES:
-        finish("error", 1, message=f"review_identity в runs/config.json: {identity!r}, ожидается self или bot")
+        finish("error", 1, message=f"review_identity в .aiflow/config.json: {identity!r}, ожидается self или bot")
     r = Runner(gh, oc, load_token() if identity == "bot" else None, Path.cwd())
     tmp = Path(tempfile.mkdtemp(prefix="aiflow-review-"))
     try:
@@ -991,7 +991,7 @@ def main(argv: list[str] | None = None) -> int:
 
         # Мерж — по одному: под общим lock проверяем паузу и то, что ветка не отстала от базовой.
         set_phase("merge")
-        gate = aiflow.FileLock(root / "runs" / "merge.lock")
+        gate = aiflow.FileLock(aiflow.state_dir(root) / "merge.lock")
         if not gate.acquire(wait_seconds=180):
             raise RuntimeError("мерж занят другим PR дольше 3 минут")
         try:

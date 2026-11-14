@@ -12,5 +12,5 @@ For a question about a symbol (where it is defined, who uses it, who implements 
 it), use the LSP tool if it is available for that language. The tool can be deferred: then load
 it through ToolSearch. If it is not available, use Grep and Glob.
 
-Skip node_modules, vendor, build directories, runs/ and .claude/worktrees/.
+Skip node_modules, vendor, build directories, .aiflow/ and .claude/worktrees/.
 If there is no answer, say so.

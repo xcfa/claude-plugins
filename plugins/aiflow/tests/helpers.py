@@ -132,7 +132,7 @@ class FakeGH:
 
 
 class ProjectCase(unittest.TestCase):
-    """Временный проект с runs/config.json и подделками вместо claude и gh."""
+    """Временный проект с .aiflow/config.json и подделками вместо claude и gh."""
 
     config: dict = {}
 
@@ -140,13 +140,13 @@ class ProjectCase(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="aiflow-test-"))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.root = self.tmp / "repo"
-        (self.root / "runs").mkdir(parents=True)
+        (self.root / ".aiflow").mkdir(parents=True)
         self._env = {k: os.environ.get(k) for k in ("AIFLOW_HOME", "CLAUDE_CONFIG_DIR")}
         os.environ["AIFLOW_HOME"] = str(self.tmp / "home")
         os.environ["CLAUDE_CONFIG_DIR"] = str(self.tmp / "claude")
         self.addCleanup(self._restore_env)
         self.store = aiflow.Store(self.root)
-        aiflow.write_json(self.root / "runs" / "config.json", {"watch_integration": True, **self.config})
+        aiflow.write_json(self.root / ".aiflow" / "config.json", {"watch_integration": True, **self.config})
         aiflow._BASE_SEEN[(str(self.root), "master")] = (time.time(), True)  # без git ls-remote
         self.claude = FakeClaude()
         self.gh = FakeGH()

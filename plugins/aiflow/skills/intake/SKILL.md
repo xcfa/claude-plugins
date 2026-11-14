@@ -44,8 +44,12 @@ user's language and words.
    - If you are not sure, make one task. If the task looks too large for one PR, still make one:
      the planner proposes a split in the plan, or moves a heavy item into a task of its own.
    Give each task an id: lowercase Latin letters, digits, hyphens, 48 characters maximum.
-   Use `depends_on` only between tasks that the user listed separately, when one needs the
-   merged result of the other.
+   Use `depends_on` only when the user said so ("after X", "when X is merged"), or when the new
+   task describes the result of another task (documentation, README, screenshots of a feature
+   that is still in the queue). The task then starts after that one is merged, from the updated
+   base branch. A value is the id of a task in this queue (a task in progress is permitted), or
+   `<project>/<id>` for a task of another project. In all other cases the tasks are independent.
+   For a task that is already queued: `aiflow after <id> <other id>` (`--remove` to undo).
 4. Do not assess complexity and do not set the field `complexity`. The planner (Opus) gets every
    task first. It studies the code and decides: a plan for discussion, a delegation to the worker
    (the model depends on its assessment), or its own work. Also put "start the container" in as an ordinary task.

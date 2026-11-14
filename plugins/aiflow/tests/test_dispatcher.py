@@ -299,14 +299,14 @@ class ReviewQueue(ProjectCase):
         self.assertEqual(self.in_review(), ["a"])
 
     def test_limit_of_one_keeps_strict_order(self):
-        aiflow.write_json(self.root / "runs" / "config.json", {"review_concurrency": 1})
+        aiflow.write_json(self.root / ".aiflow" / "config.json", {"review_concurrency": 1})
         self.to_ready("a", 1, files=["a.py"], ready_minutes_ago=3)
         self.to_ready("b", 2, files=["b.py"], ready_minutes_ago=2)
         self.tick()
         self.assertEqual(self.in_review(), ["a"])
 
     def test_later_pr_does_not_jump_over_an_earlier_one_it_touches(self):
-        aiflow.write_json(self.root / "runs" / "config.json", {"review_concurrency": 3})
+        aiflow.write_json(self.root / ".aiflow" / "config.json", {"review_concurrency": 3})
         self.to_ready("a", 1, files=["a.py"], ready_minutes_ago=5)
         self.to_ready("b", 2, files=["a.py", "b.py"], ready_minutes_ago=4)  # ждёт a
         self.to_ready("c", 3, files=["b.py"], ready_minutes_ago=3)  # не задевает a, но задевает b
@@ -391,7 +391,7 @@ class InReview(ProjectCase):
 
     def phase(self, kind: str, minutes_ago: float = 0, **detail) -> None:
         import os
-        aiflow.write_json(self.root / "runs" / "a" / "phase.json",
+        aiflow.write_json(self.root / ".aiflow" / "a" / "phase.json",
                           {"pid": os.getpid(), "at": ago(minutes_ago), "phase": kind, **detail})
 
     def test_activity_tells_ci_from_the_reviewer(self):
@@ -414,7 +414,7 @@ class InReview(ProjectCase):
 
     def test_phase_of_a_dead_review_process_is_ignored(self):
         self.start()
-        aiflow.write_json(self.root / "runs" / "a" / "phase.json", {"pid": 0, "at": ago(1), "phase": "reviewer", "round": 1})
+        aiflow.write_json(self.root / ".aiflow" / "a" / "phase.json", {"pid": 0, "at": ago(1), "phase": "reviewer", "round": 1})
         self.assertEqual(self.activity(), "исполнитель: слияние с базой, тесты или правки")
 
     def test_activity_for_failed_ci_and_for_the_queue(self):
@@ -763,7 +763,7 @@ class Pauses(ProjectCase):
         self.assertIn("pause_kept", self.kinds(events))
 
     def test_queue_file_of_the_old_version(self):
-        aiflow.write_json(self.root / "runs" / "queue.json",
+        aiflow.write_json(self.root / ".aiflow" / "queue.json",
                           {"paused": {"reason": "manual", "at": ago(5), "until": None}, "review_lock": "x"})
         q = self.store.queue()
         self.assertEqual(sorted(q["pauses"]), ["manual"])
@@ -968,7 +968,7 @@ class ReviewerUsage(ProjectCase):
 
     def test_reviewer_spend_joins_the_task_and_project_totals(self):
         self.to_ready("a", 1, files=["a.py"])
-        aiflow.write_json(self.root / "runs" / "a" / "reviewer.json",
+        aiflow.write_json(self.root / ".aiflow" / "a" / "reviewer.json",
                           {"runs": [self.run_of(), self.run_of(session="ses_2", round=2, cost=0.03)]})
         self.tick()
         st = aiflow.build_state(self.store)
@@ -983,7 +983,7 @@ class ReviewerUsage(ProjectCase):
     def test_last_round_is_counted_when_the_pr_merges(self):
         self.to_ready("a", 1, files=["a.py"])
         self.tick()
-        aiflow.write_json(self.root / "runs" / "a" / "reviewer.json", {"runs": [self.run_of()]})
+        aiflow.write_json(self.root / ".aiflow" / "a" / "reviewer.json", {"runs": [self.run_of()]})
         self.gh.prs[1]["state"] = "MERGED"
         self.tick()
         self.assertEqual(self.state("a"), "merged")
@@ -993,7 +993,7 @@ class ReviewerUsage(ProjectCase):
         import os
         self.to_ready("a", 1, files=["a.py"])
         self.tick()
-        aiflow.write_json(self.root / "runs" / "a" / "phase.json",
+        aiflow.write_json(self.root / ".aiflow" / "a" / "phase.json",
                           {"pid": os.getpid(), "at": aiflow.iso(), "since": aiflow.iso(), "phase": "reviewer", "round": 2,
                            "doing": "читает Import.cs", "steps": 7, "tokens": 66000})
         task = aiflow.build_state(self.store, self.claude.agents())["tasks"][0]
@@ -1051,7 +1051,7 @@ class AutoReview(ProjectCase):
         self.store.save_task(t)
 
     def finish_review(self, status: str, tid: str = "a") -> None:
-        aiflow.write_json(self.root / "runs" / tid / "review.json", {"at": ago(-0.05), "pr": 1, "status": status})
+        aiflow.write_json(self.root / ".aiflow" / tid / "review.json", {"at": ago(-0.05), "pr": 1, "status": status})
 
     def test_up_to_date_branch_is_reviewed_without_waking_the_session(self):
         self.ready()
@@ -1130,7 +1130,7 @@ class AutoReview(ProjectCase):
         self.gh.behind_by = None  # GitHub не сказал, отстаёт ли ветка
         self.tick()
         self.assertEqual((self.spawned, len(self.claude.resumed)), ([], 1))
-        aiflow.write_json(self.root / "runs" / "config.json", {"auto_review": False})
+        aiflow.write_json(self.root / ".aiflow" / "config.json", {"auto_review": False})
         self.ready("b", 2)
         self.gh.behind_by = 0
         self.tick()
@@ -1236,7 +1236,7 @@ class SearchRule(ProjectCase):
     """Кто ищет по коду: подагент aiflow или сам проект — настройка explorer."""
 
     def prompts(self, **cfg) -> list[str]:
-        aiflow.write_json(self.root / "runs" / "config.json", cfg)
+        aiflow.write_json(self.root / ".aiflow" / "config.json", cfg)
         conf = self.store.config()
         t = self.add("a")
         with_pr = {**t, "pr": 7}
@@ -1277,7 +1277,7 @@ class SearchRule(ProjectCase):
         self.assertNotIn("PreToolUse", hooks)
 
     def test_launched_session_gets_no_rule_in_project_mode(self):
-        aiflow.write_json(self.root / "runs" / "config.json", {"explorer": "project"})
+        aiflow.write_json(self.root / ".aiflow" / "config.json", {"explorer": "project"})
         self.add("a")
         self.tick()
         self.assertNotIn("aiflow:explorer", self.claude.launched[-1]["prompt"])
@@ -1394,7 +1394,7 @@ class Coordinator(ProjectCase):
         self.session("w1", "worker: a")
         self.session("o1", "db-schema-cache-test-container")  # имя сессии Claude переименовал сам
         self.session("o2", "aiflow")
-        aiflow.write_json(self.root / "runs" / "orchestrator.json", {"session_id": "uuid-o1"})
+        aiflow.write_json(self.root / ".aiflow" / "orchestrator.json", {"session_id": "uuid-o1"})
         self.assertEqual(aiflow.orchestrator_session(self.store, self.claude.agents()), "o1")
         self.assertEqual(aiflow.open_orchestrator(self.store, self.claude), ("o1", False))
         self.assertEqual(self.claude.launched, [])
@@ -1408,7 +1408,7 @@ class Coordinator(ProjectCase):
 
     def test_stopped_or_missing_coordinator_is_started_anew(self):
         self.session("o1", "aiflow", state="stopped")
-        aiflow.write_json(self.root / "runs" / "orchestrator.json", {"session_id": "uuid-gone"})
+        aiflow.write_json(self.root / ".aiflow" / "orchestrator.json", {"session_id": "uuid-gone"})
         self.assertIsNone(aiflow.orchestrator_session(self.store, self.claude.agents()))
         sid, started = aiflow.open_orchestrator(self.store, self.claude)
         self.assertTrue(started)
@@ -1790,3 +1790,138 @@ class ReviewerModelName(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StateDir(ProjectCase):
+    def legacy(self) -> Path:
+        root = self.tmp / "old"
+        (root / "runs").mkdir(parents=True)
+        aiflow.write_json(root / "runs" / "config.json", {"protected_paths": [".github/**", "runs/**"]})
+        (root / ".gitignore").write_text("bin/\nruns/\n", encoding="utf-8")
+        return root
+
+    def test_old_folder_works_until_the_project_moves(self):
+        root = self.legacy()
+        self.assertEqual(aiflow.Store(root).runs.name, "runs")
+        self.assertEqual(self.store.runs.name, ".aiflow")
+
+    def test_move_waits_for_running_tasks(self):
+        root = self.legacy()
+        st = aiflow.Store(root)
+        t = aiflow.normalize_task({"id": "a", "text": "x"})
+        st.save_task(t)
+        self.assertIsNone(aiflow.migrate_state_dir(root))
+        self.assertTrue((root / "runs").is_dir())
+        t["state"] = "merged"
+        st.save_task(t)
+        self.assertTrue(aiflow.migrate_state_dir(root))
+        self.assertFalse((root / "runs").exists())
+        st = aiflow.Store(root)
+        self.assertEqual(st.runs.name, ".aiflow")
+        self.assertEqual(st.task("a")["state"], "merged")
+        self.assertEqual((root / ".gitignore").read_text(encoding="utf-8"), "bin/\n.aiflow/\n")
+        self.assertIn(".aiflow/**", st.config()["protected_paths"])
+        self.assertNotIn("runs/**", st.config()["protected_paths"])
+        self.assertIsNone(aiflow.migrate_state_dir(root))
+
+
+class LinkedProjects(ProjectCase):
+    def setUp(self):
+        super().setUp()
+        self.lib = self.tmp / "lib"
+        (self.lib / ".aiflow").mkdir(parents=True)
+        aiflow.write_json(self.lib / ".aiflow" / "config.json", {"description": "shared packages"})
+        aiflow.write_json(self.tmp / "home" / "projects.json",
+                          {"projects": [{"root": str(self.root)}, {"root": str(self.lib)}]})
+        self.other = aiflow.Store(self.lib)
+        self.flows = ("ok", "")
+        self.asked = 0
+        real = aiflow.merge_workflows
+        self.addCleanup(setattr, aiflow, "merge_workflows", real)
+
+        def fake(root, task):
+            self.asked += 1
+            return self.flows
+        aiflow.merge_workflows = fake
+
+    def lib_task(self, tid: str, state: str, pr=None) -> None:
+        t = aiflow.normalize_task({"id": tid, "text": "x", "title": "Static covers"})
+        t.update(state=state, pr=pr)
+        self.other.save_task(t)
+
+    def test_task_waits_for_merge_and_publish_in_the_other_project(self):
+        self.lib_task("x", "in_progress", pr=7)
+        self.add("a", depends_on=["lib/x"])
+        self.tick()
+        self.assertEqual(self.state("a"), "new")
+        self.assertEqual(self.asked, 0)
+        self.lib_task("x", "merged", pr=7)
+        self.flows = ("wait", "идёт Publish")
+        self.tick()
+        self.assertEqual(self.state("a"), "new")
+        row = aiflow.build_state(self.store)["tasks"][0]
+        self.assertEqual(row["waits_for"], ["lib/x (идёт Publish)"])
+        self.assertIn("ждёт задачу", row["activity"])
+        self.patch("a", deps_checked={})
+        self.flows = ("ok", "")
+        self.tick()
+        self.assertEqual(self.state("a"), "planning")
+        self.assertEqual(self.task("a")["deps_published"], ["lib/x"])
+        self.assertIn("lib/x: Static covers (merged PR #7", self.claude.launched[-1]["prompt"])
+
+    def test_failed_publish_goes_to_the_user(self):
+        self.lib_task("x", "merged", pr=7)
+        self.add("a", depends_on=["lib/x"])
+        self.flows = ("failed", "после мержа упал workflow Publish")
+        self.tick()
+        self.assertEqual(self.state("a"), "needs_human")
+        self.assertIn("Publish", self.task("a")["human_reason"])
+
+    def test_cancelled_dependency_goes_to_the_user(self):
+        self.lib_task("x", "cancelled")
+        self.add("a", depends_on=["lib/x"])
+        self.tick()
+        self.assertEqual(self.state("a"), "needs_human")
+
+    def test_after_command(self):
+        self.lib_task("x", "new")
+        self.add("a")
+        self.add("b", depends_on=["a"])
+        with self.assertRaisesRegex(aiflow.AiflowError, "круг"):
+            aiflow.set_after(self.store, "a", "b")
+        with self.assertRaisesRegex(aiflow.AiflowError, "нет проекта"):
+            aiflow.set_after(self.store, "a", "nope/x")
+        with self.assertRaisesRegex(aiflow.AiflowError, "нет задачи"):
+            aiflow.set_after(self.store, "a", "lib/y")
+        aiflow.set_after(self.store, "a", "lib/x")
+        self.assertEqual(self.task("a")["depends_on"], ["lib/x"])
+        aiflow.set_after(self.store, "a", "lib/x", remove=True)
+        self.assertEqual(self.task("a")["depends_on"], [])
+
+    def test_worker_waits_for_a_dependency_added_after_the_plan(self):
+        self.lib_task("x", "in_progress", pr=7)
+        self.add("a", state="approved", pr=3, plan_approved=True)
+        aiflow.set_after(self.store, "a", "lib/x")
+        self.tick()
+        self.assertEqual(self.state("a"), "approved")
+        self.lib_task("x", "merged", pr=7)
+        self.tick()
+        self.assertEqual(self.state("a"), "in_progress")
+
+    def test_enqueue_into_the_other_project(self):
+        self.add("a", state="planning")
+        path = self.tmp / "t.json"
+        path.write_text(json.dumps({"id": "y", "text": "add an api"}), encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            aiflow.cmd_enqueue(argparse.Namespace(file=str(path), separate=False, project="lib", then="a"), self.root)
+        self.assertEqual(self.other.task("y")["state"], "new")
+        self.assertIsNone(self.store.task("y"))
+        self.assertEqual(self.task("a")["depends_on"], ["lib/y"])
+        with self.assertRaisesRegex(aiflow.AiflowError, "no project"):
+            aiflow.cmd_enqueue(argparse.Namespace(file=str(path), separate=False, project="zzz", then=None), self.root)
+
+    def test_planner_sees_the_other_projects(self):
+        self.add("a")
+        prompt = aiflow.planner_prompt(self.store, self.task("a"), self.store.config())
+        self.assertIn("lib (shared packages)", prompt)
+        self.assertIn("aiflow enqueue --project <name> --then a", prompt)

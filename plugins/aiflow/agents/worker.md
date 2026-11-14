@@ -132,7 +132,7 @@ prompt that wakes you. It is a part of the task, equal to the plan.
 - Do not merge or approve a PR.
 - Do not add or remove labels.
 - Do not change the plan in the PR description.
-- Do not change `.github/`, `.claude/`, `.opencode/`, `runs/`, `design/`, `components/ui/`, build,
+- Do not change `.github/`, `.claude/`, `.opencode/`, `.aiflow/`, `design/`, `components/ui/`, build,
   test and linter configs, lock files or migrations, unless they are in the plan and in the task's
   `allowed_protected_paths`. Only a human permits them (`aiflow allow-path`).
 - Do not bypass the review round limit.
