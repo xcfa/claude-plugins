@@ -326,10 +326,14 @@ def _start_tray(panel: _Panel) -> bool:
                                   _python(windowless=True), Path(aiflow.__file__).resolve())
 
 
-def app_shortcut(enable: bool) -> str:
+def app_installed() -> bool:
     import aiflow_tray
-    launcher = _write_launcher() if enable else home() / "launcher.py"
-    return aiflow_tray.shortcut(enable, home(), _python(windowless=True), launcher)
+    return aiflow_tray.installed_app(home()) is not None
+
+
+def drop_old_shortcut() -> bool:
+    import aiflow_tray
+    return aiflow_tray.drop_old_shortcut(home())
 
 
 def _write_info(panel: _Panel) -> None:
@@ -414,6 +418,8 @@ def serve() -> int:
     try:
         panel.ensure()
         _write_info(panel)
+        if os.name == "nt":
+            drop_old_shortcut()
         tray = _start_tray(panel)
         print(f"{iso()} служба aiflow {aiflow.VERSION} запущена, панель: {panel_url(info()) or panel.error or 'выключена'}",
               flush=True)
@@ -570,7 +576,16 @@ def _browser() -> list[str] | None:
 
 
 def open_window(url: str) -> str:
-    """Открыть панель отдельным окном (режим приложения Edge/Chrome), иначе — в браузере."""
+    """Открыть панель: установленное приложение (PWA), иначе отдельным окном (режим приложения Edge/Chrome),
+    иначе — в браузере."""
+    import aiflow_tray
+    app = aiflow_tray.installed_app(home())
+    if app:
+        try:
+            os.startfile(str(app))  # noqa: S606 — ярлык из меню «Пуск» пользователя
+            return "приложение aiflow"
+        except OSError:
+            pass
     b = _browser()
     if b:
         try:

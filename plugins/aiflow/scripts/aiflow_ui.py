@@ -334,6 +334,16 @@ def start_server(provider, port: int, wake: threading.Event, service: bool = Fal
                 html = PAGE.read_text(encoding="utf-8").replace("__AIFLOW_TOKEN__", token)
                 return self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
             url = urlsplit(self.path)
+            if url.path in ("/manifest.webmanifest", "/sw.js", "/offline.html", "/icon-192.png", "/icon-512.png"):
+                # панель как устанавливаемое приложение (PWA)
+                import aiflow_pwa
+                if url.path == "/manifest.webmanifest":
+                    return self._send(200, aiflow_pwa.manifest_json(), "application/manifest+json; charset=utf-8")
+                if url.path == "/sw.js":
+                    return self._send(200, aiflow_pwa.SERVICE_WORKER.encode("utf-8"), "text/javascript; charset=utf-8")
+                if url.path == "/offline.html":
+                    return self._send(200, aiflow_pwa.OFFLINE_PAGE.encode("utf-8"), "text/html; charset=utf-8")
+                return self._send(200, aiflow_pwa.icon_png(192 if "192" in url.path else 512), "image/png")
             if url.path in ("/app-preview", "/app-data"):
                 # Просмотр встроенного интерфейса для чата (MCP Apps) без приложения Claude: страница играет
                 # роль чата — отдаёт интерфейсу результат инструмента и отвечает на его запросы.

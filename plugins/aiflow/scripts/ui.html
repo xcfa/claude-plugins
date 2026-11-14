@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="aiflow-token" content="__AIFLOW_TOKEN__">
 <title>aiflow</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" type="image/png" href="/icon-192.png">
+<meta name="theme-color" content="#EDF0EC">
 <style>
 :root {
   color-scheme: light;
@@ -184,6 +187,7 @@ button:disabled:hover { border-color: var(--rule); }
     <h1 id="title">aiflow</h1>
     <div class="sub" id="sub">загрузка…</div>
   </div>
+  <button type="button" id="install" hidden title="Панель станет отдельным приложением: своё окно, значок на панели задач и в меню «Пуск», счётчик задач, которые ждут вас">Установить приложение</button>
 </header>
 
 <section id="waiting" hidden>
@@ -635,6 +639,7 @@ function render(s) {
     $("sub").innerHTML = `<span class="offline">панель одного проекта, служба не запущена — aiflow up запустит её для всех проектов</span>`;
   }
   renderWaiting();
+  setBadge(s.projects.reduce((sum, p) => sum + (p.tasks || []).filter(t => t.needs).length, 0));
   setHTML($("projects"), s.projects.map(renderProject).join(""));
   renderUsage();
   renderEvents();
@@ -737,6 +742,31 @@ function syncPulse() {
   if (!document.getAnimations) return;
   for (const a of document.getAnimations()) if (a.animationName === "halo") a.startTime = 0;
 }
+
+// Установленное приложение: число задач, которые ждут человека, — на значке в панели задач.
+let badge = -1;
+function setBadge(n) {
+  if (n === badge || !navigator.setAppBadge) return;
+  badge = n;
+  (n ? navigator.setAppBadge(n) : navigator.clearAppBadge()).catch(() => {});
+}
+
+// Установка: браузер сам сообщает, что страницу можно поставить приложением, — тогда показываем кнопку.
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+let installPrompt = null;
+window.addEventListener("beforeinstallprompt", (e) => {
+  e.preventDefault();
+  installPrompt = e;
+  $("install").hidden = false;
+});
+window.addEventListener("appinstalled", () => { $("install").hidden = true; toast("aiflow установлен: ищите его в меню «Пуск»"); });
+$("install").addEventListener("click", async () => {
+  if (!installPrompt) return;
+  installPrompt.prompt();
+  await installPrompt.userChoice;
+  installPrompt = null;
+  $("install").hidden = true;
+});
 
 async function load() {
   try {

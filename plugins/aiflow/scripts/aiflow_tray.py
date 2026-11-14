@@ -61,6 +61,9 @@ function Send-Action($body) {
 }
 
 function Open-Panel {
+  # установленное приложение (PWA): его ярлык в меню «Пуск» создаёт сам браузер
+  $app = Get-ChildItem -Path (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs') -Recurse -Filter 'aiflow.lnk' | Select-Object -First 1
+  if ($app) { Start-Process -FilePath $app.FullName; return }
   if ($Browser -and (Test-Path $Browser)) { Start-Process -FilePath $Browser -ArgumentList "--app=$Url/", '--window-size=1320,900' }
   else { Start-Process "$Url/" }
 }
@@ -142,42 +145,6 @@ Update-Tray
 $mutex.ReleaseMutex()
 '''
 
-# Значок приложения для ярлыка: тот же круг, 256 px, PNG внутри контейнера ICO.
-ICON_PS = r'''$ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName System.Drawing
-$bmp = New-Object System.Drawing.Bitmap 256, 256
-$g = [System.Drawing.Graphics]::FromImage($bmp)
-$g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-$g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
-$brush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(42, 120, 214))
-$g.FillEllipse($brush, 8, 8, 240, 240)
-$font = New-Object System.Drawing.Font('Segoe UI', 160, [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Pixel)
-$fmt = New-Object System.Drawing.StringFormat
-$fmt.Alignment = [System.Drawing.StringAlignment]::Center
-$fmt.LineAlignment = [System.Drawing.StringAlignment]::Center
-$g.DrawString('a', $font, [System.Drawing.Brushes]::White, (New-Object System.Drawing.RectangleF 0, 0, 256, 244), $fmt)
-$g.Dispose()
-$ms = New-Object System.IO.MemoryStream
-$bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
-$png = $ms.ToArray()
-$out = New-Object System.IO.MemoryStream
-$w = New-Object System.IO.BinaryWriter $out
-$w.Write([uint16]0); $w.Write([uint16]1); $w.Write([uint16]1)
-$w.Write([byte]0); $w.Write([byte]0); $w.Write([byte]0); $w.Write([byte]0)
-$w.Write([uint16]1); $w.Write([uint16]32); $w.Write([uint32]$png.Length); $w.Write([uint32]22)
-$w.Write($png); $w.Flush()
-[System.IO.File]::WriteAllBytes($env:AIFLOW_ICO, $out.ToArray())
-$sh = New-Object -ComObject WScript.Shell
-$lnk = $sh.CreateShortcut($env:AIFLOW_LNK)
-$lnk.TargetPath = $env:AIFLOW_LNK_TARGET
-$lnk.Arguments = $env:AIFLOW_LNK_ARGS
-$lnk.WorkingDirectory = $env:AIFLOW_LNK_DIR
-$lnk.IconLocation = $env:AIFLOW_ICO
-$lnk.Description = 'aiflow: очередь задач Claude Code'
-$lnk.Save()
-'''
-
-
 def _powershell() -> str | None:
     return shutil.which("powershell.exe") or shutil.which("powershell")
 
@@ -204,32 +171,28 @@ def start_tray(url: str, pid: int, home: Path, browser: str, python: str, aiflow
         return False
 
 
-def shortcut_path() -> Path:
+def _programs() -> Path:
     base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
-    return Path(base) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "aiflow.lnk"
+    return Path(base) / "Microsoft" / "Windows" / "Start Menu" / "Programs"
 
 
-def shortcut(enable: bool, home: Path, python: str, launcher: Path) -> str:
-    """Ярлык aiflow в меню «Пуск»: поднимает службу и открывает окно панели. Только Windows."""
-    lnk, ico = shortcut_path(), home / "aiflow.ico"
-    if not enable:
-        lnk.unlink(missing_ok=True)
-        ico.unlink(missing_ok=True)
-        return str(lnk)
-    ps = _powershell()
-    if os.name != "nt" or not ps:
-        raise OSError("ярлык в меню «Пуск» делается только в Windows")
-    lnk.parent.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ, AIFLOW_ICO=str(ico), AIFLOW_LNK=str(lnk), AIFLOW_LNK_TARGET=python,
-               AIFLOW_LNK_ARGS=f'"{launcher}" open', AIFLOW_LNK_DIR=str(home))
-    script = home / "shortcut.ps1"
-    script.write_text(ICON_PS, encoding="utf-8-sig")
+def drop_old_shortcut(home: Path) -> bool:
+    """Ярлык, который aiflow до 0.2.91 клал в меню «Пуск» сам (его признак — значок aiflow.ico рядом со службой).
+    Теперь ярлык создаёт браузер при установке приложения, под тем же именем."""
+    ico = home / "aiflow.ico"
+    if not ico.is_file():
+        return False
+    (_programs() / "aiflow.lnk").unlink(missing_ok=True)
+    ico.unlink(missing_ok=True)
+    return True
+
+
+def installed_app(home: Path) -> Path | None:
+    """Ярлык установленного приложения aiflow (PWA) в меню «Пуск»; None — не установлено. Только Windows."""
+    if os.name != "nt" or (home / "aiflow.ico").is_file():
+        return None
     try:
-        p = subprocess.run([ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
-                           env=env, timeout=60, stdin=subprocess.DEVNULL, capture_output=True,
-                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    finally:
-        script.unlink(missing_ok=True)
-    if p.returncode != 0 or not lnk.is_file():
-        raise OSError("не удалось создать ярлык: " + (p.stderr or b"").decode("utf-8", "replace").strip()[-300:])
-    return str(lnk)
+        found = sorted(_programs().rglob("aiflow.lnk"))
+    except OSError:
+        return None
+    return found[0] if found else None

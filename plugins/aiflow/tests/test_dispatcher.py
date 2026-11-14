@@ -1973,10 +1973,9 @@ class TrayAndApp(ProjectCase):
     def test_app_command_is_parsed(self):
         import aiflow_service as svc
         calls = []
-        for name in ("autostart", "app_shortcut"):
-            real = getattr(svc, name)
-            self.addCleanup(setattr, svc, name, real)
-            setattr(svc, name, lambda enable, n=name: calls.append((n, enable)) or "x")
+        real = svc.autostart
+        self.addCleanup(setattr, svc, "autostart", real)
+        svc.autostart = lambda enable: calls.append(("autostart", enable)) or "x"
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(aiflow.main(["app", "--remove"]), 0)
         self.assertIn(("autostart", False), calls)
@@ -2011,3 +2010,40 @@ class CoordinatorUsage(ProjectCase):
         aiflow.open_orchestrator(self.store, self.claude)
         self.tick()
         self.assertEqual(aiflow.build_state(self.store)["coordinator"]["tokens"], 170)
+
+
+class InstallableApp(ProjectCase):
+    def get(self, path: str):
+        import threading
+        import urllib.request
+        import aiflow_ui
+        if not hasattr(self, "srv"):
+            self.srv, _ = aiflow_ui.start_server(lambda: [self.store], 0, threading.Event())
+            self.addCleanup(self.srv.shutdown)
+        r = urllib.request.urlopen(f"http://127.0.0.1:{self.srv.server_address[1]}{path}", timeout=10)
+        return r.headers.get("Content-Type"), r.read()
+
+    def test_panel_serves_what_a_browser_needs_to_install_it(self):
+        ctype, body = self.get("/manifest.webmanifest")
+        self.assertIn("application/manifest+json", ctype)
+        m = json.loads(body.decode("utf-8"))
+        self.assertEqual((m["name"], m["start_url"], m["display"]), ("aiflow", "/", "standalone"))
+        self.assertEqual({i["sizes"] for i in m["icons"]}, {"192x192", "512x512"})
+        ctype, body = self.get("/icon-192.png")
+        self.assertEqual(ctype, "image/png")
+        self.assertEqual(body[:8], b"\x89PNG\r\n\x1a\n")
+        self.assertEqual(body[16:24], (192).to_bytes(4, "big") * 2)
+        ctype, body = self.get("/sw.js")
+        self.assertIn("javascript", ctype)
+        self.assertIn(b"/offline.html", body)
+        self.assertIn("не запущена", self.get("/offline.html")[1].decode("utf-8"))
+        page = self.get("/")[1].decode("utf-8")
+        self.assertIn('rel="manifest"', page)
+        self.assertIn("serviceWorker.register", page)
+
+    def test_own_shortcut_is_not_taken_for_the_installed_app(self):
+        import aiflow_tray
+        home = self.tmp / "home"
+        home.mkdir(exist_ok=True)
+        (home / "aiflow.ico").write_bytes(b"x")
+        self.assertIsNone(aiflow_tray.installed_app(home))

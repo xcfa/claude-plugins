@@ -4222,12 +4222,15 @@ def cmd_up(args, root: Path | None) -> int:
 
 
 def cmd_app(args, root: Path | None) -> int:
-    """aiflow как приложение: автозапуск при входе в систему, ярлык в меню «Пуск», значок рядом с часами."""
+    """aiflow как приложение: автозапуск службы при входе в систему и установка панели приложением (PWA)."""
+    import webbrowser
     import aiflow_service as svc
     if args.remove:
         print("Автозапуск выключен: " + svc.autostart(False))
         if os.name == "nt":
-            print("Ярлык убран: " + svc.app_shortcut(False))
+            svc.drop_old_shortcut()
+        print("Само приложение удаляется в его окне: меню «…» → «Параметры приложения» → «Удалить», "
+              "либо в параметрах Windows, раздел «Приложения».")
         print("Служба продолжает работать до aiflow down. Значок рядом с часами: \"tray\": false в "
               f"{svc.home() / 'config.json'}.")
         return 0
@@ -4235,15 +4238,21 @@ def cmd_app(args, root: Path | None) -> int:
         print(f"Проект {root.name} добавлен в службу.")
     print("Автозапуск при входе в систему включён: " + svc.autostart(True))
     if os.name == "nt":
-        try:
-            print("Ярлык в меню «Пуск»: " + svc.app_shortcut(True))
-        except OSError as e:
-            print(f"Ярлык не создан: {e}")
+        svc.drop_old_shortcut()
     data = svc.ensure()
     url = svc.panel_url(data)
     print(f"Служба aiflow {data.get('version', '?')} работает (pid {data['pid']})" + (f"; панель: {url}" if url else ""))
-    if url and not args.no_open:
-        svc.open_window(url)
+    if not url:
+        return 0
+    if svc.app_installed():
+        print("Приложение aiflow уже установлено" + ("." if args.no_open else ": открываю."))
+        if not args.no_open:
+            svc.open_window(url)
+        return 0
+    print("Установите приложение: в открывшейся панели нажмите «Установить приложение» (Edge или Chrome). "
+          "Оно появится в меню «Пуск» со своим значком и окном.")
+    if not args.no_open:
+        webbrowser.open(url)  # обычная вкладка: в окне без адресной строки браузер установку не предлагает
     return 0
 
 
@@ -4474,8 +4483,8 @@ def main(argv: list[str] | None = None) -> int:
     up.add_argument("--foreground", action="store_true", help="служба в этом терминале")
     up.add_argument("--autostart", action="store_true", default=None, help="запускать службу при входе в систему")
     up.add_argument("--no-autostart", dest="autostart", action="store_false", help="выключить автозапуск")
-    app_p = sub.add_parser("app", help="aiflow как приложение Windows: автозапуск, ярлык в «Пуске», окно панели")
-    app_p.add_argument("--remove", action="store_true", help="убрать ярлык и автозапуск")
+    app_p = sub.add_parser("app", help="aiflow как приложение: автозапуск службы и установка панели приложением (PWA)")
+    app_p.add_argument("--remove", action="store_true", help="выключить автозапуск")
     app_p.add_argument("--no-open", action="store_true", help="не открывать окно панели")
     dn = sub.add_parser("down", help="остановить службу")
     dn.add_argument("--no-autostart", action="store_true", help="и выключить автозапуск")
