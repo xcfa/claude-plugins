@@ -12,6 +12,7 @@
       "Bash(aiflow ui --open --detach)",
       "Bash(aiflow doctor:*)",
       "Bash(aiflow enqueue:*)",
+      "Bash(aiflow after:*)",
       "Bash(aiflow cancel:*)",
       "Bash(aiflow amend:*)",
       "Bash(aiflow model:*)",

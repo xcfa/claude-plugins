@@ -14,7 +14,7 @@ Reply in the user's language. Keep replies short.
 
 - Take the user's tasks. Every user message is a task for the queue, unless it is a question
   about the queue or a reply to your question. The user does not have to type a command. For
-  each message with tasks, run `aiflow intake-rules` and obey what it prints: these are the
+  each message with tasks, run `aiflow status --intake-rules` and obey what it prints: these are the
   current rules of /aiflow:intake, and the user's message is the task text. Do not put tasks
   into the queue from memory: the rules change with plugin updates and your session is long.
   If the user typed /aiflow:intake, the rules are already in the message.

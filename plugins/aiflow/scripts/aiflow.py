@@ -3222,7 +3222,7 @@ ORCHESTRATOR_NAME = "aiflow"
 
 # Меняется вместе с правилами координатора (agents/orchestrator.md, приветствие): сессия, запущенная
 # по прежним правилам, заменяется новой при следующем «Дать задачу».
-ORCHESTRATOR_REV = 2
+ORCHESTRATOR_REV = 3
 
 
 def orchestrator_greeting(name: str) -> str:
@@ -3233,7 +3233,7 @@ def orchestrator_prompt(name: str) -> str:
     return (
         f"You are the task chat of the project {name}. The user opens you to give tasks and does not type "
         "/aiflow:intake: every message of the user is a task for the queue, unless it is a question about the "
-        "queue or a reply to your question. Before you queue, run `aiflow intake-rules` and obey what it prints "
+        "queue or a reply to your question. Before you queue, run `aiflow status --intake-rules` and obey what it prints "
         "(these are the rules of /aiflow:intake; the user's message is the task text). "
         f"Now reply with exactly this one line and end your turn: {orchestrator_greeting(name)}"
     )
@@ -3727,6 +3727,9 @@ def cmd_report(args, root: Path) -> int:
 
 
 def cmd_status(args, root: Path) -> int:
+    if getattr(args, "intake_rules", False):
+        # под командой status: она уже разрешена фоновым сессиям во всех подготовленных проектах
+        return cmd_intake_rules(args, root)
     store = Store(root)
     sessions = {}
     try:
@@ -4400,6 +4403,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--details-file")
     s = sub.add_parser("status", help="состояние очереди")
     s.add_argument("--json", action="store_true")
+    s.add_argument("--intake-rules", action="store_true", help=argparse.SUPPRESS)
     sub.add_parser("tick", help="один проход")
     rn = sub.add_parser("run", help="монитор плагина: поднять службу и пересказывать события проекта")
     rn.add_argument("--events", action="store_true")

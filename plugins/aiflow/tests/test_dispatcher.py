@@ -1394,7 +1394,7 @@ class Coordinator(ProjectCase):
         sid, started = aiflow.open_orchestrator(self.store, self.claude)
         self.assertTrue(started)
         self.assertEqual(self.claude.launched[-1]["agent"], "aiflow:orchestrator")
-        self.assertIn("aiflow intake-rules", self.claude.launched[-1]["prompt"])
+        self.assertIn("aiflow status --intake-rules", self.claude.launched[-1]["prompt"])
         self.assertIn("Напишите, что сделать в проекте repo", self.claude.launched[-1]["prompt"])
         self.claude.sessions[sid].update(name="db-schema-cache", state="done")  # имя Claude переименовал сам
         self.assertEqual(aiflow.open_orchestrator(self.store, self.claude), (sid, False))
