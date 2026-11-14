@@ -191,7 +191,7 @@ function taskRow(t) {
   const cost = t.cost ? money(t.cost) : "";
   return `<div class="task ${done ? "done" : ""}">
     <div><div class="id">${esc(t.id)}</div><div class="title" title="${esc(t.title)}">${esc(t.title)}</div>${note}</div>
-    <div class="side"><div class="steps" role="img" aria-label="стадия ${stage + 1} из ${STEPS}">${steps}</div>
+    <div class="side">${done ? "" : `<div class="steps" role="img" aria-label="стадия ${stage + 1} из ${STEPS}">${steps}</div>`}
       <div>${esc(t.label || t.state)}</div><div>${pr}${cost}${t.updated_at ? " · " + ago(t.updated_at) : ""}</div></div></div>`;
 }
 

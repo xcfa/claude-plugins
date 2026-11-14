@@ -343,7 +343,9 @@ def start_server(provider, port: int, wake: threading.Event, service: bool = Fal
                 args = {k: q[k][0] for k in ("project", "scope", "days") if q.get(k)}
                 if url.path == "/app-data":
                     return self._json(200, aiflow_mcp.call_tool("aiflow_" + view, args))
-                page = APP_PREVIEW.replace("__APP__", json.dumps(aiflow_mcp.APP_PAGE.read_text(encoding="utf-8")))
+                # «</» внутри строки закрыл бы тег <script> самой страницы просмотра
+                app = json.dumps(aiflow_mcp.APP_PAGE.read_text(encoding="utf-8")).replace("</", "<\\/")
+                page = APP_PREVIEW.replace("__APP__", app)
                 page = page.replace("__VIEW__", view).replace("__ARGS__", json.dumps(args, ensure_ascii=False))
                 return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
             if url.path == "/api/state":
