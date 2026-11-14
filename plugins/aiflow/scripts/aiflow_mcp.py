@@ -290,5 +290,100 @@ def desktop_entry() -> dict:
     return {"command": sys.executable, "args": ["-X", "utf8", str(write_launcher())]}
 
 
+def desktop_configs() -> list[Path]:
+    """Файлы настроек приложения Claude, которые есть на этой машине."""
+    import os
+    found = []
+    if os.name == "nt":
+        local = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+        roaming = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+        found += sorted((local / "Claude-Data").glob("*/claude_desktop_config.json"))  # приложение из Microsoft Store
+        found.append(roaming / "Claude" / "claude_desktop_config.json")
+    elif sys.platform == "darwin":
+        found.append(Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json")
+    else:
+        found.append(Path.home() / ".config" / "Claude" / "claude_desktop_config.json")
+    return [p for p in found if p.is_file()]
+
+
+def install_entry(path: Path) -> bool:
+    """Дописать сервер aiflow в mcpServers, остальное не трогать. → изменился ли файл."""
+    raw = path.read_text(encoding="utf-8-sig")
+    data = json.loads(raw) if raw.strip() else {}
+    entry = desktop_entry()
+    if (data.get("mcpServers") or {}).get("aiflow") == entry:
+        return False
+    data.setdefault("mcpServers", {})["aiflow"] = entry
+    indent = 2 if '\n  "' in raw or not raw.strip() else (1 if '\n "' in raw else None)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=indent) + ("\n" if raw.endswith("\n") else ""),
+                    encoding="utf-8", newline="\n")
+    return True
+
+
+def desktop_app_running() -> bool:
+    """Запущено ли приложение Claude (Windows). CLI тоже зовётся claude.exe — отличаем по папке."""
+    import shutil
+    import subprocess
+    ps = shutil.which("powershell.exe") or shutil.which("powershell")
+    if not ps:
+        return False
+    script = ("$p = Get-CimInstance Win32_Process -Filter \"Name='claude.exe'\" | Where-Object { $_.ExecutablePath -match "
+              "'\\\\WindowsApps\\\\Claude_|\\\\AnthropicClaude\\\\' }; if ($p) { exit 1 } else { exit 0 }")
+    try:
+        return subprocess.run([ps, "-NoProfile", "-NonInteractive", "-Command", script], timeout=60,
+                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).returncode == 1
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def install(wait: bool = False, hours: float = 48) -> int:
+    """Подключить сервер к приложению Claude. Работающее приложение держит настройки в памяти и при
+    сохранении затирает правку файла, поэтому wait=True ждёт, пока приложение закроют, и пишет после."""
+    import time
+    files = desktop_configs()
+    if not files:
+        print("Не нашёл claude_desktop_config.json: откройте в приложении Settings → Developer → Edit Config и повторите.")
+        return 1
+    until = time.time() + hours * 3600
+    while wait and desktop_app_running() and time.time() < until:
+        time.sleep(3)
+    for p in files:
+        print(("Сервер aiflow добавлен: " if install_entry(p) else "Сервер aiflow уже подключён: ") + str(p))
+    return 0
+
+
+def install_later() -> bool:
+    """Windows: оставить ждать закрытия приложения отдельный процесс вне его группы процессов (через WMI)."""
+    import os
+    import shutil
+    import subprocess
+    ps = shutil.which("powershell.exe") or shutil.which("powershell")
+    if os.name != "nt" or not ps:
+        return False
+    py = Path(sys.executable)
+    pyw = py.parent / "pythonw.exe"
+    cmdline = f'"{pyw if pyw.is_file() else py}" -X utf8 "{HERE / "aiflow_mcp.py"}" --install --wait'
+    script = ("$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments "
+              "@{CommandLine=$env:AIFLOW_SPAWN_CMD; CurrentDirectory=$env:AIFLOW_SPAWN_CWD}; exit [int]$r.ReturnValue")
+    try:
+        env = dict(os.environ, AIFLOW_SPAWN_CMD=cmdline, AIFLOW_SPAWN_CWD=str(svc.home()))
+        return subprocess.run([ps, "-NoProfile", "-NonInteractive", "-Command", script], env=env, timeout=40,
+                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 if __name__ == "__main__":
+    if "--install" in sys.argv:
+        if sys.stdout is None:  # pythonw: печатать некуда
+            import os
+            sys.stdout = open(os.devnull, "w", encoding="utf-8")
+        sys.exit(install(wait="--wait" in sys.argv))
+    if "--install-later" in sys.argv:
+        ok = install_later()
+        print("Жду закрытия приложения Claude: после него сервер aiflow появится в настройках." if ok
+              else "Не получилось оставить ожидание: закройте приложение и выполните aiflow_mcp.py --install.")
+        sys.exit(0 if ok else 1)
     sys.exit(serve())
