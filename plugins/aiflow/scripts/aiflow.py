@@ -3773,6 +3773,20 @@ def stop_ui(store: Store) -> bool:
     return ok
 
 
+def cmd_chat(args, root: Path) -> int:
+    """Чат с координатором проекта в этом терминале. Заголовок вкладки — имя проекта, и он не меняется:
+    сам Claude Code переименовывает вкладку по теме разговора («aiflow resume»), здесь это отключено."""
+    store = Store(root)
+    if not store.initialized:
+        raise AiflowError("репозиторий не инициализирован: aiflow init")
+    sid, started = open_orchestrator(store)
+    print("Запустил координатора." if started else "Подключаюсь к координатору.", flush=True)
+    sys.stdout.write(f"]0;{root.name}")  # OSC 0: заголовок вкладки терминала
+    sys.stdout.flush()
+    env = dict(claude_env(), CLAUDE_CODE_DISABLE_TERMINAL_TITLE="1")
+    return subprocess.call([need("claude"), "attach", sid], cwd=root, env=env)
+
+
 def cmd_ui(args, root: Path) -> int:
     import aiflow_service as svc
     store = Store(root)
@@ -3939,6 +3953,7 @@ def main(argv: list[str] | None = None) -> int:
     rp.add_argument("--body-file", required=True)
     rv = sub.add_parser("review", help="один раунд ревью PR")
     rv.add_argument("--pr", type=int, required=True)
+    sub.add_parser("chat", help="чат с координатором проекта в этом терминале; вкладка названа именем проекта")
     u = sub.add_parser("ui", help="панель в браузере")
     u.add_argument("--port", type=int)
     u.add_argument("--open", action="store_true")
@@ -3963,7 +3978,7 @@ def main(argv: list[str] | None = None) -> int:
             "init": cmd_init, "enqueue": cmd_enqueue, "report": cmd_report, "status": cmd_status,
             "tick": cmd_tick, "run": cmd_run, "pause": cmd_pause, "resume": cmd_resume,
             "retry": cmd_retry, "cancel": cmd_cancel, "allow-path": cmd_allow_path, "model": cmd_model, "approve": cmd_approve, "amend": cmd_amend, "reply": cmd_reply, "review": cmd_review,
-            "ui": cmd_ui, "stop": cmd_stop,
+            "ui": cmd_ui, "chat": cmd_chat, "stop": cmd_stop,
         }
         return handlers[args.cmd](args, root)
     except AiflowError as e:

@@ -149,7 +149,8 @@ def _open_tab(root: Path, command: list[str], title: str, manual: str, exact: bo
             # --suppressApplicationTitle: Claude Code меняет заголовок, а по нему вкладка ищется в следующий раз.
             subprocess.Popen([wt, "-w", WT_WINDOW, "new-tab", "-d", str(root), "--title", title,
                               "--suppressApplicationTitle", claude, *attach, sid],
-                             cwd=root, creationflags=flags, env=aiflow.claude_env())
+                             cwd=root, creationflags=flags,
+                             env=dict(aiflow.claude_env(), CLAUDE_CODE_DISABLE_TERMINAL_TITLE="1"))
             where = "вкладке Windows Terminal"
         else:
             subprocess.Popen(["cmd", "/c", "start", title, "/D", str(root), claude, *attach, sid],
@@ -244,6 +245,31 @@ def _save_repo_url(root: str, url: str) -> None:
             aiflow.write_json(_repo_urls_path(), data)
 
 
+APP_PREVIEW = """<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>aiflow · просмотр интерфейса для чата</title>
+<style>body{margin:0;padding:24px;font:14px system-ui,sans-serif;background:#f4f4f1;color:#222}
+@media (prefers-color-scheme: dark){body{background:#111;color:#ddd}iframe{background:#1a1a19!important;border-color:#333!important}}
+p{max-width:760px;margin:0 auto 12px;color:#777}iframe{display:block;width:100%;max-width:760px;margin:0 auto;border:1px solid #ddd;border-radius:12px;background:#fcfcfb}</style>
+</head><body><p>Так интерфейс aiflow выглядит в чате Claude. Здесь страница заменяет чат.</p><iframe id="f" sandbox="allow-scripts"></iframe>
+<script>
+const f = document.getElementById("f"), view = "__VIEW__", args = __ARGS__;
+const data = () => fetch("/app-data?" + new URLSearchParams(Object.assign({view}, args)), {cache: "no-store"}).then(r => r.json());
+const send = m => f.contentWindow.postMessage(Object.assign({jsonrpc: "2.0"}, m), "*");
+window.addEventListener("message", async ev => {
+  const m = ev.data;
+  if (ev.source !== f.contentWindow || !m || m.jsonrpc !== "2.0") return;
+  if (m.method === "ui/initialize") send({id: m.id, result: {protocolVersion: "2026-01-26", hostInfo: {name: "preview", version: "1"},
+    hostCapabilities: {}, hostContext: {theme: matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"}}});
+  else if (m.method === "ui/notifications/initialized") { send({method: "ui/notifications/tool-input", params: {arguments: args}});
+    send({method: "ui/notifications/tool-result", params: await data()}); }
+  else if (m.method === "ui/notifications/size-changed") f.style.height = (m.params.height + 2) + "px";
+  else if (m.method === "tools/call") send({id: m.id, result: await data()});
+  else if (m.method === "ui/open-link") { window.open(m.params.url, "_blank", "noopener"); send({id: m.id, result: {}}); }
+  else if (m.id !== undefined) send({id: m.id, error: {code: -32601, message: "method not found"}});
+});
+f.srcdoc = __APP__;
+</script></body></html>"""
+
+
 def start_server(provider, port: int, wake: threading.Event, service: bool = False):
     """provider() — список Store проектов панели. service=True — общая панель службы."""
     import aiflow_service as svc
@@ -308,6 +334,18 @@ def start_server(provider, port: int, wake: threading.Event, service: bool = Fal
                 html = PAGE.read_text(encoding="utf-8").replace("__AIFLOW_TOKEN__", token)
                 return self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
             url = urlsplit(self.path)
+            if url.path in ("/app-preview", "/app-data"):
+                # Просмотр встроенного интерфейса для чата (MCP Apps) без приложения Claude: страница играет
+                # роль чата — отдаёт интерфейсу результат инструмента и отвечает на его запросы.
+                import aiflow_mcp
+                q = parse_qs(url.query)
+                view = "usage" if q.get("view") == ["usage"] else "tasks"
+                args = {k: q[k][0] for k in ("project", "scope", "days") if q.get(k)}
+                if url.path == "/app-data":
+                    return self._json(200, aiflow_mcp.call_tool("aiflow_" + view, args))
+                page = APP_PREVIEW.replace("__APP__", json.dumps(aiflow_mcp.APP_PAGE.read_text(encoding="utf-8")))
+                page = page.replace("__VIEW__", view).replace("__ARGS__", json.dumps(args, ensure_ascii=False))
+                return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
             if url.path == "/api/state":
                 return self._json(200, {"version": aiflow.VERSION, "service": service, "now": aiflow.iso(),
                                         "projects": [project_state(k, st) for k, st in stores().items()]})

@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>aiflow</title>
+<style>
+:root {
+  --bg: var(--color-background-primary, #fcfcfb);
+  --ink: var(--color-text-primary, #0b0b0b);
+  --ink2: var(--color-text-secondary, #52514e);
+  --muted: #898781;
+  --rule: var(--color-border-primary, #e1e0d9);
+  --axis: #c3c2b7;
+  --track: #e1e0d9;
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300;
+  --warn: #fab219; --crit: #d03b3b; --good: #0ca30c;
+  --font: var(--font-sans, system-ui, -apple-system, "Segoe UI", sans-serif);
+  --mono: var(--font-mono, ui-monospace, Consolas, monospace);
+}
+:root[data-theme="dark"] {
+  --bg: var(--color-background-primary, #1a1a19);
+  --ink: var(--color-text-primary, #f0efec);
+  --ink2: var(--color-text-secondary, #c3c2b7);
+  --rule: var(--color-border-primary, #2c2c2a);
+  --axis: #383835;
+  --track: #383835;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #0ca30c;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: transparent; }
+body { font: 14px/1.45 var(--font); color: var(--ink); padding: 14px 16px 16px; }
+button { font: inherit; color: var(--ink2); background: none; border: 1px solid var(--rule); border-radius: 6px; padding: 3px 10px; cursor: pointer; }
+button:hover { color: var(--ink); border-color: var(--axis); }
+button:focus-visible, a:focus-visible { outline: 2px solid var(--s1); outline-offset: 2px; }
+a { color: inherit; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.top h1 { font-size: 15px; font-weight: 600; margin: 0; }
+.top .meta { color: var(--muted); font-size: 12.5px; display: flex; gap: 10px; align-items: center; }
+.empty { color: var(--ink2); padding: 8px 0; }
+
+/* задачи */
+.proj { margin-top: 14px; }
+.proj:first-of-type { margin-top: 0; }
+.phead { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; padding-bottom: 6px; border-bottom: 1px solid var(--rule); }
+.phead b { font-size: 14px; }
+.phead span { color: var(--muted); font-size: 12.5px; }
+.badge { border: 1px solid var(--rule); border-radius: 999px; padding: 0 8px; font-size: 12px; color: var(--ink2); }
+.task { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 16px; padding: 8px 0; border-bottom: 1px solid var(--rule); align-items: center; }
+.task .id { font-weight: 600; overflow-wrap: anywhere; }
+.task .title { color: var(--ink2); font-size: 13px; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+.task .note { font-size: 12.5px; color: var(--ink2); margin-top: 2px; overflow-wrap: anywhere; }
+.task .note.wait { color: var(--ink); }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: var(--warn); }
+.dot.fail { background: var(--crit); }
+.task.done .id, .task.done .title { color: var(--muted); font-weight: 500; }
+.side { text-align: right; font-size: 12.5px; color: var(--ink2); white-space: nowrap; }
+.steps { display: flex; gap: 2px; justify-content: flex-end; margin-bottom: 4px; }
+.steps i { width: 14px; height: 4px; border-radius: 2px; background: var(--track); }
+.steps i.on { background: var(--s1); }
+.more { color: var(--muted); font-size: 12.5px; padding-top: 8px; }
+
+/* расход */
+.hero { display: flex; gap: 28px; flex-wrap: wrap; margin: 2px 0 14px; }
+.hero div b { display: block; font-size: 24px; font-weight: 600; letter-spacing: -0.01em; }
+.hero div span { color: var(--ink2); font-size: 12.5px; }
+h2 { font-size: 13px; font-weight: 600; margin: 18px 0 8px; color: var(--ink2); }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12.5px; color: var(--ink2); margin-bottom: 6px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.chart { position: relative; }
+.chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+.chart text { font: 11px var(--font); fill: var(--muted); }
+.tip { position: absolute; pointer-events: none; background: var(--bg); border: 1px solid var(--axis); border-radius: 8px; padding: 8px 10px; font-size: 12.5px; min-width: 150px; box-shadow: 0 4px 14px rgba(0,0,0,.12); display: none; z-index: 2; }
+.tip b { display: block; margin-bottom: 4px; }
+.tip div { display: flex; justify-content: space-between; gap: 14px; color: var(--ink2); }
+.tip div span:last-child { color: var(--ink); font-variant-numeric: tabular-nums; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: right; padding: 5px 0 5px 14px; border-bottom: 1px solid var(--rule); font-variant-numeric: tabular-nums; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; }
+th:first-child, td:first-child { text-align: left; padding-left: 0; }
+.bars .row { display: grid; grid-template-columns: minmax(0, 38%) minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 4px 0; font-size: 13px; }
+.bars .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bars .bar { height: 10px; }
+.bars .bar i { display: block; height: 100%; border-radius: 0 4px 4px 0; background: var(--s1); min-width: 2px; }
+.bars .val { font-variant-numeric: tabular-nums; color: var(--ink2); }
+[hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="top">
+  <h1 id="heading">aiflow</h1>
+  <div class="meta"><span id="stamp"></span><button id="refresh" type="button">Обновить</button></div>
+</div>
+<div id="root"><div class="empty">Загружаю данные…</div></div>
+
+<script>
+"use strict";
+// Встроенный интерфейс MCP Apps: общается с приложением Claude сообщениями JSON-RPC через postMessage.
+const pending = new Map();
+let seq = 1, lastArgs = {}, lastData = null, showTable = false;
+
+function post(msg) { window.parent.postMessage(Object.assign({ jsonrpc: "2.0" }, msg), "*"); }
+function request(method, params) {
+  const id = seq++;
+  return new Promise((resolve, reject) => {
+    pending.set(id, { resolve, reject });
+    post({ id, method, params: params || {} });
+    setTimeout(() => { if (pending.delete(id)) reject(new Error("нет ответа")); }, 20000);
+  });
+}
+function notify(method, params) { post({ method, params: params || {} }); }
+
+window.addEventListener("message", (ev) => {
+  const m = ev.data;
+  if (!m || m.jsonrpc !== "2.0") return;
+  if (m.id !== undefined && !m.method) {  // ответ на наш запрос
+    const p = pending.get(m.id);
+    if (!p) return;
+    pending.delete(m.id);
+    return m.error ? p.reject(new Error(m.error.message || "ошибка")) : p.resolve(m.result);
+  }
+  if (m.method === "ui/notifications/tool-input") lastArgs = (m.params && m.params.arguments) || {};
+  else if (m.method === "ui/notifications/tool-result") show(m.params);
+  else if (m.method === "ui/notifications/host-context-changed") applyContext(m.params);
+  else if (m.id !== undefined) post({ id: m.id, result: {} });  // ping, ui/resource-teardown
+});
+
+function applyContext(ctx) {
+  if (!ctx) return;
+  if (ctx.theme) document.documentElement.dataset.theme = ctx.theme;
+  const vars = ctx.styles && ctx.styles.variables;
+  if (vars) for (const k in vars) if (vars[k]) document.documentElement.style.setProperty(k, vars[k]);
+}
+
+function show(result) {
+  const data = result && result.structuredContent;
+  if (!data) { setHTML("root", `<div class="empty">${esc(textOf(result) || "Нет данных.")}</div>`); return; }
+  lastData = data;
+  render();
+}
+function textOf(result) { const c = result && result.content; return c && c[0] && c[0].text; }
+
+// -- отрисовка
+const $ = (id) => document.getElementById(id);
+function setHTML(id, html) { $(id).innerHTML = html; }
+function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+function money(v) { return "$" + (Number(v) || 0).toFixed(2); }
+function short(n) { n = Number(n) || 0; return n >= 1e9 ? (n / 1e9).toFixed(1) + " млрд" : n >= 1e6 ? (n / 1e6).toFixed(1) + " млн" : n >= 1e3 ? Math.round(n / 1e3) + " тыс." : String(n); }
+function plural(n, one, few, many) { const a = n % 10, b = n % 100; return a === 1 && b !== 11 ? one : a >= 2 && a <= 4 && (b < 10 || b >= 20) ? few : many; }
+function ago(ts) {
+  const m = Math.max(0, Math.round((Date.now() - Date.parse(ts)) / 60000));
+  if (!isFinite(m)) return "";
+  if (m < 1) return "только что";
+  if (m < 60) return m + " мин назад";
+  if (m < 1440) return Math.round(m / 60) + " ч назад";
+  return Math.round(m / 1440) + " дн назад";
+}
+const DONE = new Set(["merged", "done", "cancelled", "answered"]);
+const STEPS = 7;
+
+function render() {
+  const d = lastData;
+  $("stamp").textContent = d.generated ? new Date(d.generated).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" }) : "";
+  if (d.view === "usage") renderUsage(d); else renderTasks(d);
+  queueMicrotask(reportSize);
+}
+
+function renderTasks(d) {
+  $("heading").textContent = d.scope === "all" ? "Задачи aiflow — все" : "Задачи aiflow";
+  if (!d.projects || !d.projects.length) { setHTML("root", `<div class="empty">Проектов нет.</div>`); return; }
+  setHTML("root", d.projects.map((p) => {
+    const active = p.tasks.filter((t) => !DONE.has(t.state)).length;
+    const waiting = p.tasks.filter((t) => t.needs).length;
+    const head = `<div class="phead"><b>${esc(p.name)}</b><span>${active} в работе</span>`
+      + (waiting ? `<span><i class="dot"></i>${waiting} ${plural(waiting, "ждёт", "ждут", "ждут")} вас</span>` : "")
+      + (p.paused ? `<span class="badge">очередь на паузе</span>` : "") + `</div>`;
+    if (p.error) return `<section class="proj">${head}<div class="empty">${esc(p.error)}</div></section>`;
+    const rows = p.tasks.map(taskRow).join("") || `<div class="empty">Сейчас задач нет.</div>`;
+    const more = p.hidden ? `<div class="more">Ещё ${p.hidden} ${plural(p.hidden, "завершённая задача", "завершённые задачи", "завершённых задач")} — попросите показать все.</div>` : "";
+    return `<section class="proj">${head}${rows}${more}</section>`;
+  }).join(""));
+}
+
+function taskRow(t) {
+  const done = DONE.has(t.state);
+  const stage = typeof t.stage === "number" ? t.stage : -1;
+  const steps = Array.from({ length: STEPS }, (_, i) => `<i class="${i <= stage ? "on" : ""}"></i>`).join("");
+  const note = t.needs ? `<div class="note wait"><i class="dot ${t.state === "needs_human" ? "fail" : ""}"></i>Ждёт вас: ${esc(t.needs)}</div>`
+    : t.activity ? `<div class="note">${esc(t.activity)}</div>` : "";
+  const pr = t.pr_url ? `<a data-link="${esc(t.pr_url)}">PR #${esc(t.pr)}</a> · ` : "";
+  const cost = t.cost ? money(t.cost) : "";
+  return `<div class="task ${done ? "done" : ""}">
+    <div><div class="id">${esc(t.id)}</div><div class="title" title="${esc(t.title)}">${esc(t.title)}</div>${note}</div>
+    <div class="side"><div class="steps" role="img" aria-label="стадия ${stage + 1} из ${STEPS}">${steps}</div>
+      <div>${esc(t.label || t.state)}</div><div>${pr}${cost}${t.updated_at ? " · " + ago(t.updated_at) : ""}</div></div></div>`;
+}
+
+const SERIES = { "Opus": "--s1", "Sonnet": "--s2", "Haiku": "--s3", "Fable": "--s4", "Ревьюер": "--s5", "Другое": "--s6" };
+function color(name) { return `var(${SERIES[name] || "--s6"})`; }
+
+function renderUsage(d) {
+  $("heading").textContent = `Расход aiflow за ${d.days} ${plural(d.days, "день", "дня", "дней")}`;
+  if (!d.by_model || !d.by_model.length) { setHTML("root", `<div class="empty">За это время расхода нет.</div>`); return; }
+  const tokens = d.by_model.reduce((s, m) => s + m.tokens, 0);
+  const hero = `<div class="hero"><div><b>${money(d.total)}</b><span>всего</span></div>
+    <div><b>${short(tokens)}</b><span>токенов, вместе с чтением из кэша</span></div></div>`;
+  const legend = `<div class="legend">${d.models.map((m) => `<span><i style="background:${color(m)}"></i>${esc(m)}</span>`).join("")}</div>`;
+  const dayTable = `<table><thead><tr><th>День</th>${d.models.map((m) => `<th>${esc(m)}</th>`).join("")}<th>Всего</th></tr></thead><tbody>`
+    + d.by_day.map((r) => `<tr><td>${esc(r.day)}</td>${d.models.map((m) => `<td>${money(r[m])}</td>`).join("")}<td>${money(dayTotal(d, r))}</td></tr>`).join("")
+    + `</tbody></table>`;
+  const models = `<table><thead><tr><th>Модель</th><th>Стоимость</th><th>Токены</th><th>Вывод</th><th>Чтение из кэша</th></tr></thead><tbody>`
+    + d.by_model.map((m) => `<tr><td><i style="display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;background:${color(m.model)}"></i>${esc(m.model)}</td><td>${money(m.cost)}</td><td>${short(m.tokens)}</td><td>${short(m.output)}</td><td>${short(m.cache_read)}</td></tr>`).join("")
+    + `</tbody></table>`;
+  const max = Math.max.apply(null, d.top.map((t) => t.cost).concat([0.01]));
+  const top = d.top.length ? `<h2>Самые дорогие задачи</h2><div class="bars">` + d.top.map((t) =>
+    `<div class="row"><div class="name" title="${esc(t.title)}">${t.pr_url ? `<a data-link="${esc(t.pr_url)}">${esc(t.id)}</a>` : esc(t.id)}</div>
+      <div class="bar"><i style="width:${Math.max(1, t.cost / max * 100)}%"></i></div><div class="val">${money(t.cost)}</div></div>`).join("") + `</div>` : "";
+  const projects = d.by_project && d.by_project.length > 1 ? `<h2>По проектам</h2><table><thead><tr><th>Проект</th><th>Стоимость</th><th>Токены</th></tr></thead><tbody>`
+    + d.by_project.map((p) => `<tr><td>${esc(p.name)}</td><td>${money(p.cost)}</td><td>${short(p.tokens)}</td></tr>`).join("") + `</tbody></table>` : "";
+  setHTML("root", hero
+    + `<h2 style="display:flex;justify-content:space-between;align-items:center;margin-top:0">Стоимость по дням <button id="mode" type="button">${showTable ? "График" : "Таблица"}</button></h2>`
+    + (showTable ? dayTable : legend + `<div class="chart" id="chart"></div>`)
+    + `<h2>По моделям</h2>` + models + top + projects);
+  $("mode").onclick = () => { showTable = !showTable; render(); };
+  if (!showTable) drawChart(d);
+}
+function dayTotal(d, r) { return d.models.reduce((s, m) => s + (Number(r[m]) || 0), 0); }
+
+function drawChart(d) {
+  const box = $("chart"), W = Math.max(320, box.clientWidth || 640), H = 200, L = 38, B = 22, T = 8, GAP = 2;
+  const days = d.by_day, n = days.length;
+  const top = Math.max.apply(null, days.map((r) => dayTotal(d, r)).concat([1]));
+  const step = niceStep(top / 3), maxY = Math.ceil(top / step) * step;
+  const y = (v) => T + (H - T - B) * (1 - v / maxY);
+  const slot = (W - L) / Math.max(1, n), bw = Math.min(28, Math.max(4, slot * 0.6));
+  let svg = "";
+  for (let v = 0; v <= maxY + 1e-9; v += step)
+    svg += `<line x1="${L}" x2="${W}" y1="${y(v)}" y2="${y(v)}" stroke="${v ? "var(--rule)" : "var(--axis)"}" stroke-width="1"/>`
+      + `<text x="${L - 6}" y="${y(v) + 4}" text-anchor="end">$${v}</text>`;
+  const every = Math.ceil(n / Math.max(1, Math.floor((W - L) / 46)));
+  days.forEach((r, i) => {
+    const cx = L + slot * (i + 0.5), x = cx - bw / 2;
+    let acc = 0;
+    const parts = d.models.filter((m) => r[m] > 0);
+    parts.forEach((m, k) => {
+      const y1 = y(acc + r[m]), h = Math.max(1, y(acc) - y1 - (k < parts.length - 1 ? GAP : 0));
+      const last = k === parts.length - 1, rr = Math.min(4, bw / 2, h);
+      svg += last
+        ? `<path d="M${x},${y1 + h} V${y1 + rr} Q${x},${y1} ${x + rr},${y1} H${x + bw - rr} Q${x + bw},${y1} ${x + bw},${y1 + rr} V${y1 + h} Z" fill="${color(m)}"/>`
+        : `<rect x="${x}" y="${y1 + GAP}" width="${bw}" height="${Math.max(1, h)}" fill="${color(m)}"/>`;
+      acc += r[m];
+    });
+    if (i % every === 0) svg += `<text x="${cx}" y="${H - 6}" text-anchor="middle">${r.day.slice(8, 10)}.${r.day.slice(5, 7)}</text>`;
+    svg += `<rect data-i="${i}" x="${L + slot * i}" y="${T}" width="${slot}" height="${H - T - B}" fill="transparent"/>`;
+  });
+  box.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Стоимость по дням и моделям">${svg}</svg><div class="tip" id="tip"></div>`;
+  const tip = $("tip");
+  box.querySelectorAll("rect[data-i]").forEach((el) => {
+    el.addEventListener("mousemove", (e) => {
+      const r = days[+el.dataset.i];
+      tip.innerHTML = `<b>${esc(r.day)}</b>` + d.models.filter((m) => r[m] > 0).map((m) =>
+        `<div><span><i style="display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:5px;background:${color(m)}"></i>${esc(m)}</span><span>${money(r[m])}</span></div>`).join("")
+        + `<div><span>Всего</span><span>${money(dayTotal(d, r))}</span></div>`;
+      tip.style.display = "block";
+      const b = box.getBoundingClientRect(), px = e.clientX - b.left;
+      tip.style.left = Math.min(Math.max(0, px + 12), b.width - tip.offsetWidth) + "px";
+      tip.style.top = Math.max(0, e.clientY - b.top - tip.offsetHeight - 8) + "px";
+    });
+    el.addEventListener("mouseleave", () => { tip.style.display = "none"; });
+  });
+}
+function niceStep(raw) {
+  const p = Math.pow(10, Math.floor(Math.log10(Math.max(raw, 0.01))));
+  const f = raw / p;
+  return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * p;
+}
+
+// -- действия
+document.addEventListener("click", (e) => {
+  const a = e.target.closest("[data-link]");
+  if (!a) return;
+  e.preventDefault();
+  request("ui/open-link", { url: a.dataset.link }).catch(() => {});
+});
+$("refresh").addEventListener("click", async () => {
+  const btn = $("refresh");
+  btn.disabled = true;
+  try {
+    const name = lastData && lastData.view === "usage" ? "aiflow_usage" : "aiflow_tasks";
+    show(await request("tools/call", { name, arguments: lastArgs }));
+  } catch (err) {
+    $("stamp").textContent = "не обновилось: " + err.message;
+  } finally { btn.disabled = false; }
+});
+
+function reportSize() {
+  const el = document.documentElement;
+  notify("ui/notifications/size-changed", { width: Math.ceil(el.scrollWidth), height: Math.ceil(document.body.scrollHeight) });
+}
+new ResizeObserver(() => { if (lastData && lastData.view === "usage" && !showTable) drawChart(lastData); reportSize(); }).observe(document.body);
+
+// -- рукопожатие
+if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) document.documentElement.dataset.theme = "dark";
+request("ui/initialize", { appInfo: { name: "aiflow", version: "1" }, appCapabilities: {}, protocolVersion: "2026-01-26" })
+  .then((res) => { applyContext(res && res.hostContext); notify("ui/notifications/initialized"); })
+  .catch(() => notify("ui/notifications/initialized"));
+</script>
+</body>
+</html>

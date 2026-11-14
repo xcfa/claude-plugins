@@ -1588,5 +1588,63 @@ class EarlyPr(ProjectCase):
         self.assertEqual((self.state("a"), self.task("a")["pr"]), ("in_progress", 8))
 
 
+class McpServer(ProjectCase):
+    def setUp(self):
+        super().setUp()
+        import aiflow_mcp
+        self.mcp = aiflow_mcp
+        self.orig = aiflow_mcp.load_projects
+        aiflow_mcp.load_projects = lambda: [{**aiflow.build_state(self.store), "key": "k1", "name": "demo"}]
+
+    def tearDown(self):
+        self.mcp.load_projects = self.orig
+        super().tearDown()
+
+    def ask(self, method, params=None, mid=1):
+        return self.mcp.handle({"jsonrpc": "2.0", "id": mid, "method": method, "params": params or {}})
+
+    def test_handshake_tools_and_ui_resource(self):
+        self.assertEqual(self.ask("initialize", {"protocolVersion": "2025-06-18"})["result"]["protocolVersion"], "2025-06-18")
+        self.assertEqual(self.ask("server/discover")["error"]["code"], -32601)
+        self.assertIsNone(self.mcp.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+        tools = self.ask("tools/list")["result"]["tools"]
+        self.assertEqual([t["name"] for t in tools], ["aiflow_tasks", "aiflow_usage"])
+        self.assertTrue(all(t["_meta"]["ui"]["resourceUri"] == self.mcp.APP_URI for t in tools))
+        page = self.ask("resources/read", {"uri": self.mcp.APP_URI})["result"]["contents"][0]
+        self.assertEqual(page["mimeType"], "text/html;profile=mcp-app")
+        self.assertIn("ui/initialize", page["text"])
+        self.assertIn("error", self.ask("resources/read", {"uri": "ui://other"}))
+
+    def test_tasks_tool_filters_by_project_and_returns_the_board(self):
+        self.add("a")
+        res = self.ask("tools/call", {"name": "aiflow_tasks", "arguments": {"project": "DEM"}})["result"]
+        self.assertIn("demo: 1 in work", res["content"][0]["text"])
+        board = res["structuredContent"]
+        self.assertEqual((board["view"], board["projects"][0]["tasks"][0]["id"]), ("tasks", "a"))
+        none = self.ask("tools/call", {"name": "aiflow_tasks", "arguments": {"project": "zzz"}})["result"]
+        self.assertEqual(none["structuredContent"]["projects"], [])
+        self.assertTrue(self.ask("tools/call", {"name": "nope"})["result"]["isError"])
+
+    def test_usage_tool_sums_cost_by_day_and_model(self):
+        self.mcp.load_projects = lambda: [{"name": "demo", "key": "k1", "tasks": [
+            {"id": "a", "title": "t", "cost": 3.0, "tokens": 30, "updated_at": aiflow.iso(),
+             "usage": {"claude-opus-5-5": {"input": 1, "output": 2, "cache_read": 20, "cache_write": 7, "cost": 2.5},
+                       "opencode-go/deepseek": {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "cost": 0.5}}},
+            {"id": "old", "title": "t", "cost": 9.0, "tokens": 1, "updated_at": "2020-01-01T00:00:00+00:00",
+             "usage": {"claude-sonnet-5-5": {"cost": 9.0}}}]}]
+        use = self.ask("tools/call", {"name": "aiflow_usage", "arguments": {"days": 7}})["result"]["structuredContent"]
+        self.assertEqual((use["total"], use["models"]), (3.0, ["Opus", "Ревьюер"]))
+        self.assertEqual(use["by_day"][0]["Opus"], 2.5)
+        self.assertEqual([t["id"] for t in use["top"]], ["a"])
+
+    def test_stdio_loop_answers_line_by_line(self):
+        src = io.BytesIO(b'{"jsonrpc":"2.0","id":7,"method":"ping"}' + b"\nnot json\n\n")
+        out = io.BytesIO()
+        self.mcp.serve(src, out)
+        lines = [json.loads(x) for x in out.getvalue().decode("utf-8").splitlines()]
+        self.assertEqual(lines[0], {"jsonrpc": "2.0", "id": 7, "result": {}})
+        self.assertEqual(lines[1]["error"]["code"], -32700)
+
+
 if __name__ == "__main__":
     unittest.main()
