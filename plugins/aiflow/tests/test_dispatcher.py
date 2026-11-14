@@ -72,6 +72,7 @@ class Planning(ProjectCase):
             self.tick()
             self.gh.add_pr(pr, tid, body=PLAN)
             self.report(tid, "planner", "plan_ready", pr=pr, complexity=cx)
+            self.claude.finish_turn(self.sid(tid, "planner"))
             self.tick()
             self.gh.add_label(pr, "plan-approved")
             self.tick()
@@ -98,6 +99,7 @@ class Planning(ProjectCase):
         self.report("a", "planner", "plan_ready", pr=7)  # доработка плана без новых заметок
         self.tick()
         self.assertIn("## Code map", notes.read_text(encoding="utf-8"))
+        self.claude.finish_turn(self.sid("a", "planner"))
         self.gh.add_label(7, "plan-approved")
         self.tick()
         self.assertIn(str(notes), self.claude.launched[-1]["prompt"])
@@ -1644,6 +1646,44 @@ class McpServer(ProjectCase):
         lines = [json.loads(x) for x in out.getvalue().decode("utf-8").splitlines()]
         self.assertEqual(lines[0], {"jsonrpc": "2.0", "id": 7, "result": {}})
         self.assertEqual(lines[1]["error"]["code"], -32700)
+
+
+class ApproveWhilePlannerWorks(ProjectCase):
+    def plan_review(self) -> str:
+        self.add("a")
+        self.tick()
+        self.gh.prs[1] = {"state": "OPEN", "headRefName": "ai/a", "isDraft": True, "body": PLAN, "labels": [], "comments": []}
+        self.report("a", "planner", "plan_ready", 1, complexity="complex")
+        sid = self.task("a")["sessions"]["planner"][-1]["id"]
+        self.claude.finish_turn(sid)
+        self.tick()
+        self.assertEqual(self.state("a"), "plan_review")
+        return sid
+
+    def test_approval_waits_for_the_end_of_the_planner_turn(self):
+        sid = self.plan_review()
+        self.claude.sessions[sid]["state"] = "working"  # пользователь ответил в чате планировщика
+        self.gh.add_label(1, "plan-approved")
+        self.tick()
+        self.assertEqual(self.state("a"), "plan_review")
+        self.assertTrue(self.task("a")["approve_hold"])
+        self.assertIsNone(aiflow.build_state(self.store, self.claude.agents())["tasks"][0]["needs"])
+        self.claude.finish_turn(sid)  # планировщик только ответил, план не менял
+        self.tick()
+        self.assertIn(self.state("a"), ("approved", "in_progress"))
+
+    def test_plan_changed_after_the_approval_needs_a_new_approval(self):
+        sid = self.plan_review()
+        self.claude.sessions[sid]["state"] = "working"
+        self.gh.add_label(1, "plan-approved")
+        self.tick()
+        self.report("a", "planner", "plan_ready", 1, complexity="complex")
+        self.claude.finish_turn(sid)
+        events = self.tick()
+        self.assertEqual(self.state("a"), "plan_review")
+        self.assertNotIn("plan-approved", self.gh.labels(1))
+        self.assertIn("после одобрения", " ".join(e["text"] for e in events))
+        self.assertEqual(aiflow.build_state(self.store)["tasks"][0]["needs"], "обсудить и одобрить план")
 
 
 if __name__ == "__main__":

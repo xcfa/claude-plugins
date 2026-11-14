@@ -2275,6 +2275,30 @@ class Dispatcher:
         if self.cfg["labels"]["approved"] in labels or t.get("plan_approved") or is_direct(t):
             # plan_approved и задача без плана в этой стадии — записи старой версии: то же «ждёт исполнителя»
             if not is_direct(t):
+                held = t.get("approve_hold")
+                # дольше 20 минут не ждём: зависший планировщик не должен держать одобренный план вечно
+                if self.sstate(self.cur(t, "planner")) == "working" and not (held and age_minutes(held) > 20):
+                    # План одобрили, пока планировщик его дорабатывает (ответ в его чате, комментарий в PR).
+                    # Исполнитель, запущенный сейчас, взял бы план, который через минуту изменится: ждём конца хода.
+                    if not held:
+                        t["approve_hold"] = iso()
+                        self.emit(t, "approve_hold", f"{t['id']}: план одобрен, но планировщик ещё дорабатывает его — "
+                                  "жду конца его хода", key=f"hold:{iso()[:16]}")
+                    return
+                rep = self.new_report(t, "planner")
+                if rep and rep.get("status") == "plan_ready":
+                    if rep.get("complexity") in ("simple", "complex"):
+                        t["complexity"] = rep["complexity"]
+                    self.save_notes(t, rep)
+                    if t.pop("approve_hold", None):
+                        # одобрен был прежний текст: новый план пользователь ещё не видел
+                        self.gh.remove_label(t["pr"], self.cfg["labels"]["approved"])
+                        t["plan_approved"] = False
+                        t["revising"] = False
+                        self.emit(t, "plan_updated", f"{t['id']}: план изменён после одобрения — посмотрите и одобрите "
+                                  f"снова, PR #{t['pr']}", key=f"plan:{rep['rid']}")
+                        return
+                t.pop("approve_hold", None)
                 t["plan_approved"] = True
             self.set_state(t, "approved", "план одобрен")
             return
@@ -2892,7 +2916,9 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
         review = store.review(t["id"]) or {}
         pr = t.get("pr")
         needs = None
-        if st == "plan_review" and not t.get("plan_approved"):
+        if st == "plan_review" and t.get("approve_hold"):
+            needs = None  # одобрено: ждём, пока планировщик закончит доработку
+        elif st == "plan_review" and not t.get("plan_approved"):
             needs = "обсудить и одобрить план"
         elif st == "needs_human":
             needs = short_reason(t.get("human_reason")) or "нужен человек"
