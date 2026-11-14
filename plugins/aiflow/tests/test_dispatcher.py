@@ -1716,6 +1716,34 @@ class BlockedSessionSaysWhy(ProjectCase):
         row = aiflow.build_state(self.store, self.claude.agents())["tasks"][0]
         self.assertEqual(row["needs"], "сессия ждёт ответа: Разрешите защищённый путь .claude/skills/x")
 
+    def test_path_request_stays_until_the_path_is_allowed(self):
+        sid = self.start()
+        self.claude.sessions[sid].update(state="blocked", waitingFor="ответ")
+        with mock.patch.object(aiflow, "last_words", return_value="Нужен защищённый путь `.claude/skills/x/SKILL.md`"):
+            self.tick()
+        row = aiflow.build_state(self.store, self.claude.agents())["tasks"][0]
+        self.assertEqual((row["asks_paths"], row["wants_paths"]), (True, [".claude/skills/x/SKILL.md"]))
+        # пользователь ответил в чате: сессия работает, вопроса в панели больше нет, а путь всё ещё нужен
+        self.claude.sessions[sid].update(state="working", waitingFor=None)
+        with mock.patch.object(aiflow, "last_words", return_value="Понял, жду"):
+            self.tick()
+        row = aiflow.build_state(self.store, self.claude.agents())["tasks"][0]
+        self.assertIsNone(row["needs"])
+        self.assertTrue(row["asks_paths"])
+        with mock.patch.object(aiflow, "queue_or_apply"):
+            aiflow.allow_paths(self.store, "a", [".claude/skills/x/SKILL.md"])
+        row = aiflow.build_state(self.store, self.claude.agents())["tasks"][0]
+        self.assertEqual((row["asks_paths"], row["wants_paths"]), (False, []))
+
+    def test_review_finding_on_a_protected_file_asks_for_the_path(self):
+        t = {"id": "a", "state": "in_review", "allowed_protected_paths": []}
+        review = {"comments": [{"file": ".claude/skills/x/SKILL.md"}, {"file": "src/a.py"}]}
+        cfg = {"protected_paths": [".claude/**"]}
+        self.assertEqual(aiflow.wanted_paths(t, review, cfg), [".claude/skills/x/SKILL.md"])
+        t["allowed_protected_paths"] = [".claude/skills/**"]
+        self.assertEqual(aiflow.wanted_paths(t, review, cfg), [])
+        self.assertEqual(aiflow.wanted_paths({"id": "a", "state": "merged"}, review, cfg), [])
+
     def test_allowed_path_wakes_the_session_that_asked(self):
         sid = self.start()
         self.claude.sessions[sid].update(state="blocked", waitingFor="ответ")

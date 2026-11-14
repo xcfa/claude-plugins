@@ -274,7 +274,7 @@ async function allowPaths(key, id) {
 Glob относительно корня репозитория, через запятую. После этого задача продолжит работу.` +
     (t && t.allowed_paths.length ? `
 Уже разрешено: ${t.allowed_paths.join(", ")}` : ""),
-    suggestPaths(t && t.needs).join(", "));
+    (t && t.wants_paths && t.wants_paths.length ? t.wants_paths : suggestPaths(t && t.needs)).join(", "));
   if (value === null || !value.trim()) return;
   await act("allow_paths", key, id, value);
 }
@@ -459,7 +459,7 @@ function renderWaiting() {
     const acts = [];
     if (t.state === "plan_review") acts.push(`<button class="primary" data-act="approve" data-project="${k}" data-id="${id}"${d}>Одобрить план</button>`);
     if (t.state === "needs_human") acts.push(`<button class="primary" data-act="retry" data-project="${k}" data-id="${id}"${d}>Повторить</button>`);
-    if (/защищ|protected|allow-path/i.test(t.needs || "")) acts.push(`<button data-allow="${id}" data-project="${k}"${d}>Разрешить пути…</button>`);
+    if (t.asks_paths || /защищ|protected|allow-path/i.test(t.needs || "")) acts.push(`<button data-allow="${id}" data-project="${k}"${d}>Разрешить пути…</button>`);
     if (t.pr_url) acts.push(`<a href="${esc(t.pr_url)}" target="_blank" rel="noopener">PR #${esc(t.pr)}</a>`);
     if (t.session && t.session.id) acts.push(`<button data-act="open_session" data-project="${k}" data-id="${id}">Открыть сессию</button>`);
     acts.push(`<button class="danger" data-cancel="${id}" data-project="${k}"${d}>Снять</button>`);
@@ -517,7 +517,7 @@ function renderBoard(p) {
     const rounds = t.rounds ? `раунд ${esc(t.rounds)}/${esc(t.max_rounds)}` : (t.review_lock ? "на ревью" : "");
     const rev = t.reviewer_session ? `<button class="link" data-act="open_reviewer" data-project="${k}" data-id="${id}" title="Открыть сессию ревьюера opencode в терминале">Ревьюер</button> ` : "";
     const cancel = isClosed(t) ? (rev ? `<div class="acts-row">${rev}</div>` : "")
-      : `<div class="acts-row">${rev}<button class="link" data-amend="${id}" data-project="${k}" title="Добавить правку к идущей задаче">Дополнить${t.amend_pending ? " (" + esc(t.amend_pending) + " ждёт)" : ""}</button> `
+      : `<div class="acts-row">${rev}${t.asks_paths ? `<button class="link" data-allow="${id}" data-project="${k}" title="Задаче нужен защищённый путь${t.wants_paths && t.wants_paths.length ? ": " + esc(t.wants_paths.join(", ")) : ""}">Разрешить пути…</button> · ` : ""}<button class="link" data-amend="${id}" data-project="${k}" title="Добавить правку к идущей задаче">Дополнить${t.amend_pending ? " (" + esc(t.amend_pending) + " ждёт)" : ""}</button> `
       + `<button class="link danger" data-cancel="${id}" data-project="${k}" title="Остановить сессии задачи и закрыть её PR"${dis(p.key, t.id)}>Снять</button></div>`;
     html += `<div class="meta"><div class="num">${pr}${rounds ? ", " + rounds : ""}</div><div class="line2 num">${t.tokens ? tokens(t.tokens) + " токенов" + (t.cost ? " · " + money(t.cost) : "") : "—"}</div>${cancel}</div>`;
     return html;

@@ -213,6 +213,28 @@ def context_choice(cfg: dict, t: dict, role: str) -> int:
     return max(100000, min(n, 1000000)) if n > 0 else 0  # пределы флага --autocompact
 
 
+PATH_ASK_RE = re.compile(r"защищ|protected|allow-path", re.I)
+
+
+def wanted_paths(t: dict, review: dict | None, cfg: dict) -> list[str]:
+    """Защищённые пути, которые задаче нужны, но ещё не разрешены. Берутся из замечаний последнего ревью
+    (файл замечания защищён) и из запроса самой сессии. Держатся, пока путь не разрешат: вопрос сессии
+    меняется и пропадает из панели, стоит ей ответить, а путь по-прежнему нужен."""
+    if t.get("state") in TERMINAL:
+        return []
+    allowed = t.get("allowed_protected_paths") or []
+    protected = cfg.get("protected_paths") or []
+    out = []
+    for c in (review or {}).get("comments") or []:
+        f = str(c.get("file") or "").replace("\\", "/")
+        if f and path_matches(f, protected) and not path_matches(f, allowed) and f not in out:
+            out.append(f)
+    for f in t.get("path_request") or []:
+        if not path_matches(f, allowed) and f not in out:
+            out.append(f)
+    return out
+
+
 def is_direct(t: dict) -> bool:
     """Задача без плана: исполнитель делает её сразу (поручил планировщик или trivial вручную)."""
     return bool(t.get("direct")) or t.get("complexity") == "trivial"
@@ -1749,6 +1771,12 @@ class Dispatcher:
         # чего именно она ждёт — в её последнем сообщении: без него в панели только «сессия ждёт ответа»
         said = last_words(e.get("session_id") or (self.sess(e) or {}).get("sessionId"))
         t["waits"] = {"sid": e["id"], "text": said}
+        if PATH_ASK_RE.search(said):
+            # пути из её слов: `…` с косой чертой; пусто — панель всё равно предложит кнопку
+            asked = [re.sub(r"^(\./)+", "", m) for m in re.findall(r"[`\"']([^`\"'\s]+/[^`\"'\s]*)[`\"']", said)]
+            asked = [p for p in asked if p and not p.endswith("/")]  # папку целиком не предлагаем: только файлы
+            t["path_request"] = sorted(set((t.get("path_request") or []) + asked))
+            t["path_asked"] = True
         self.emit(t, "needs_input", f"{t['id']}: {who} ждёт вас в своей сессии ({w})"
                   + (f": {short_reason(said, 200)}" if said else ""), key=f"blocked:{e['id']}:{w}")
         self.check_limit(e, t)
@@ -3014,6 +3042,10 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
             "launching": bool(t.get("launching")), "review_lock": t["id"] in (q.get("review_locks") or []),
             "amendments": len(t.get("amendments") or []),
             "amend_pending": sum(1 for a in t.get("amendments") or [] if not a.get("delivered_at")),
+            # защищённые пути, которые задаче нужны и не разрешены: кнопка «Разрешить пути…» держится до разрешения
+            "wants_paths": wanted_paths(t, review, cfg),
+            "asks_paths": bool(wanted_paths(t, review, cfg) or (t.get("path_asked") and st not in TERMINAL)
+                               or (st == "needs_human" and PATH_ASK_RE.search(str(t.get("human_reason") or "")))),
         })
     total_usage, total_cost, unpriced = priced(project_usage, prices)
     return {
@@ -3514,6 +3546,8 @@ def allow_paths(store: Store, tid: str, paths: list[str]) -> list[str]:
         allowed = t.setdefault("allowed_protected_paths", [])
         added = [g for g in clean if g not in allowed]
         allowed.extend(added)
+        t.pop("path_asked", None)
+        t.pop("path_request", None)
         t.setdefault("history", []).append({"at": iso(), "from": t.get("state"), "to": t.get("state"),
                                             "note": "разрешены защищённые пути: " + ", ".join(clean)})
         if t.get("state") == "needs_human":
