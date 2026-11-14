@@ -434,7 +434,8 @@ function renderUsage() {
   let grand = 0, shown = 0;
   for (const p of last.projects) {
     const tasks = (p.tasks || []).filter(t => Object.keys(t.usage || {}).length).sort(newestFirst);
-    if (!tasks.length) continue;
+    const coord = (p.coordinator && p.coordinator.usage) || {};
+    if (!tasks.length && !Object.keys(coord).length) continue;
     shown++;
     grand += p.cost || 0;
     (p.unpriced || []).forEach(m => unpriced.add(m));
@@ -449,6 +450,7 @@ function renderUsage() {
       + `<td>задач: ${tasks.length}</td>${usageCells(usageSum(p.usage))}<td class="cost">${money(p.cost)}</td></tr>`);
     if (!open) continue;
     if (Object.keys(p.usage || {}).length > 1) rows.push(modelRows("по моделям", p.usage, "u-task sum"));
+    if (Object.keys(coord).length) rows.push(modelRows("координатор (чат «Дать задачу»)", coord, "u-task"));
     for (const t of tasks) rows.push(modelRows(esc(t.id), t.usage, "u-task"));
   }
   if (shown > 1) {

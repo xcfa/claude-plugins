@@ -1980,3 +1980,34 @@ class TrayAndApp(ProjectCase):
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(aiflow.main(["app", "--remove"]), 0)
         self.assertIn(("autostart", False), calls)
+
+
+class CoordinatorUsage(ProjectCase):
+    def transcript(self, session_id: str, out: int) -> None:
+        d = self.tmp / "claude" / "projects" / "p"
+        d.mkdir(parents=True, exist_ok=True)
+        msg = {"type": "assistant", "message": {"id": f"m-{session_id}-{out}", "model": "claude-sonnet-5-5",
+                                                "usage": {"input_tokens": 100, "output_tokens": out}}}
+        (d / f"{session_id}.jsonl").write_text(json.dumps(msg) + "\n", encoding="utf-8")
+
+    def test_chat_tokens_are_counted_in_the_project_total(self):
+        sid, _ = aiflow.open_orchestrator(self.store, self.claude)
+        session_id = self.claude.sessions[sid]["sessionId"]
+        self.transcript(session_id, 50)
+        self.add("a", state="merged")
+        self.tick()
+        state = aiflow.build_state(self.store)
+        co = state["coordinator"]
+        self.assertEqual(co["tokens"], 150)
+        self.assertEqual(co["usage"]["claude-sonnet-5-5"]["output"], 50)
+        self.assertEqual(state["usage"]["claude-sonnet-5-5"]["output"], 50)
+        self.assertEqual(len(co["chats"]), 1)
+        self.assertNotIn("raw", co)
+
+    def test_replaced_chat_keeps_its_usage(self):
+        self.claude.sessions["old"] = {"id": "old", "name": "aiflow", "state": "done", "sessionId": "uuid-old",
+                                       "cwd": str(self.root)}
+        self.transcript("uuid-old", 70)
+        aiflow.open_orchestrator(self.store, self.claude)
+        self.tick()
+        self.assertEqual(aiflow.build_state(self.store)["coordinator"]["tokens"], 170)

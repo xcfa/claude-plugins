@@ -171,7 +171,28 @@ def usage_result(args: dict) -> dict:
             p_tokens += int(t.get("tokens") or 0)
             top.append({"id": t.get("id"), "title": t.get("title"), "project": p.get("name"), "pr_url": t.get("pr_url"),
                         "cost": round(float(t.get("cost") or 0), 2), "tokens": int(t.get("tokens") or 0)})
-        by_project.append({"name": p.get("name"), "cost": round(p_cost, 2), "tokens": int(p_tokens)})
+        co = p.get("coordinator") or {}
+        co_cost = co_tokens = 0.0
+        for chat in co.get("chats") or []:  # чаты координатора: день — когда чат последний раз работал
+            day = str(chat.get("at") or "")[:10]
+            if not day or aiflow.age_minutes(day + "T00:00:00+00:00") > days * 24 * 60:
+                continue
+            for model, u in (chat.get("usage") or {}).items():
+                fam = model_family(model)
+                cost = float(u.get("cost") or 0)
+                tokens = sum(int(u.get(k) or 0) for k in ("input", "output", "cache_read", "cache_write"))
+                by_day.setdefault(day, {})[fam] = by_day.get(day, {}).get(fam, 0.0) + cost
+                m = by_model.setdefault(fam, {"model": fam, "cost": 0.0, "tokens": 0, "output": 0, "cache_read": 0})
+                m["cost"] += cost
+                m["tokens"] += tokens
+                m["output"] += int(u.get("output") or 0)
+                m["cache_read"] += int(u.get("cache_read") or 0)
+                co_cost += cost
+                co_tokens += int(u.get("input") or 0) + int(u.get("output") or 0) + int(u.get("cache_write") or 0)
+        if co_cost or co_tokens:
+            top.append({"id": "координатор", "title": "Чат «Дать задачу»", "project": p.get("name"), "pr_url": None,
+                        "cost": round(co_cost, 2), "tokens": int(co_tokens)})
+        by_project.append({"name": p.get("name"), "cost": round(p_cost + co_cost, 2), "tokens": int(p_tokens + co_tokens)})
     top.sort(key=lambda x: -x["cost"])
     order = [f for f in ("Opus", "Sonnet", "Haiku", "Fable", "Ревьюер", "Другое") if f in by_model]
     total = round(sum(m["cost"] for m in by_model.values()), 2)

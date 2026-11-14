@@ -1389,6 +1389,54 @@ def task_usage(t: dict) -> dict[str, dict]:
     return out
 
 
+def coordinator_sessions(store: "Store") -> dict[str, dict]:
+    """Чаты координатора проекта, которые запускал aiflow: id сессии Claude → запись с расходом."""
+    data = read_json(store.runs / "coordinator.json", {}) or {}
+    return data.get("sessions") if isinstance(data.get("sessions"), dict) else {}
+
+
+def track_coordinator(store: "Store", session_id: str | None, sid: str | None = None) -> None:
+    """Запомнить чат координатора: его расход считается вместе с расходом задач проекта."""
+    if not session_id:
+        return
+    sessions = coordinator_sessions(store)
+    if session_id not in sessions:
+        sessions[session_id] = {"sid": sid, "started_at": iso()}
+        write_json(store.runs / "coordinator.json", {"sessions": sessions})
+
+
+def collect_coordinator_usage(store: "Store") -> None:
+    """Обновить расход чатов координатора по их транскриптам. Чат, который молчит больше часа, не перечитывается."""
+    sessions = coordinator_sessions(store)
+    changed = False
+    for session_id, e in sessions.items():
+        age = transcript_age_minutes(session_id)
+        if age is None or (e.get("usage") and age > 60):
+            continue
+        u = transcript_usage(session_id)
+        if u and u != e.get("usage"):
+            e["usage"], e["at"] = u, iso()
+            changed = True
+    if changed:
+        write_json(store.runs / "coordinator.json", {"sessions": sessions})
+
+
+def coordinator_state(store: "Store", prices: dict) -> dict:
+    """Расход координатора для панели: общий по моделям и по чатам (день — когда чат последний раз работал)."""
+    total: dict[str, dict] = {}
+    chats = []
+    for e in coordinator_sessions(store).values():
+        models = (e.get("usage") or {}).get("models") or {}
+        if not models:
+            continue
+        add_usage(total, models)
+        usage, cost, _ = priced(models, prices)
+        chats.append({"at": e.get("at") or e.get("started_at"), "usage": usage, "cost": round(cost, 4)})
+    usage, cost, _ = priced(total, prices)
+    return {"usage": usage, "cost": round(cost, 4), "raw": total, "chats": chats,
+            "tokens": sum(u["input"] + u["output"] + u["cache_write"] for u in total.values())}
+
+
 def done_note(t: dict) -> str | None:
     """Итог задачи, законченной без PR: строка отчёта, с которой она перешла в done."""
     return next((h.get("note") for h in reversed(t.get("history") or []) if h.get("to") == "done" and h.get("note")), None)
@@ -2221,6 +2269,7 @@ class Dispatcher:
         if not self.q.get("pauses"):
             self.schedule(tasks)
         self.collect_usage(tasks)
+        collect_coordinator_usage(self.store)
         self.check_batch_done(tasks)
         self.store.save_queue(self.q)
         return self.events
@@ -3251,11 +3300,14 @@ def open_orchestrator(store: "Store", claude=None) -> tuple[str, bool]:
     mine = next((sid for sid, s in sessions.items() if mark.get("session_id") and s.get("sessionId") == mark["session_id"]
                  and s.get("state") != "stopped"), None)
     if mine and mark.get("rev") == ORCHESTRATOR_REV:
+        track_coordinator(store, mark["session_id"], mine)
         return mine, False
     root = str(store.root).replace("\\", "/").rstrip("/").lower()
     for sid, s in sessions.items():  # прежние чаты координатора: два чата с одним именем только путают
         old = sid == mine or (s.get("name") == ORCHESTRATOR_NAME
                               and str(s.get("cwd") or "").replace("\\", "/").rstrip("/").lower() in ("", root))
+        if old:
+            track_coordinator(store, s.get("sessionId"), sid)  # расход прежних чатов не теряется
         if old and s.get("state") not in ("stopped", "working"):
             claude.stop(sid)
     sid, out = claude.launch("aiflow:orchestrator", ORCHESTRATOR_NAME, orchestrator_prompt(store.root.name),
@@ -3264,6 +3316,7 @@ def open_orchestrator(store: "Store", claude=None) -> tuple[str, bool]:
         raise AiflowError("не удалось запустить сессию координатора: " + out[-200:])
     session_id = (claude.agents().get(sid) or {}).get("sessionId")
     write_json(mark_path, {"sid": sid, "session_id": session_id, "rev": ORCHESTRATOR_REV, "at": iso()})
+    track_coordinator(store, session_id, sid)
     return sid, True
 
 
@@ -3367,12 +3420,15 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
             "asks_paths": bool(wanted_paths(t, review, cfg) or (t.get("path_asked") and st not in TERMINAL)
                                or (st == "needs_human" and PATH_ASK_RE.search(str(t.get("human_reason") or "")))),
         })
+    coordinator = coordinator_state(store, prices)
+    add_usage(project_usage, coordinator.pop("raw"))
     total_usage, total_cost, unpriced = priced(project_usage, prices)
     return {
         "version": VERSION, "repo": store.root.name, "repo_url": repo_url, "base": cfg["base_branch"],
         "paused": q.get("paused"), "review_lock": q.get("review_lock"), "concurrency": cfg["concurrency"],
         "monitor_pid": FileLock(store.runs / "monitor.lock").owner(),
         "usage": total_usage, "cost": round(total_cost, 4), "unpriced": unpriced,
+        "coordinator": coordinator,  # чаты «Дать задачу»: входят в итог проекта, но не относятся ни к одной задаче
         "tasks": out, "events": list(reversed(store.events(40))), "now": iso(),
     }
 
@@ -3423,6 +3479,9 @@ def print_status(state: dict) -> None:
     widths = [max(len(str(r[i])) for r in rows) for i in range(len(rows[0]))]
     for r in rows:
         print("  ".join(str(c).ljust(w) for c, w in zip(r, widths)))
+    co = state.get("coordinator") or {}
+    if co.get("tokens"):
+        print(f"Координатор: {fmt_tokens(co['tokens'])} токенов" + (f", ${co['cost']:.2f}" if co.get("cost") else ""))
     if state.get("cost"):
         print(f"Всего по проекту: ${state['cost']:.2f} по ценам API"
               + (f" (без цены: {', '.join(state['unpriced'])})" if state.get("unpriced") else ""))
