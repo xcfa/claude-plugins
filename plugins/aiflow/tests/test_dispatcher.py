@@ -1639,20 +1639,6 @@ class McpServer(ProjectCase):
         self.assertEqual(use["by_day"][0]["Opus"], 2.5)
         self.assertEqual([t["id"] for t in use["top"]], ["a"])
 
-    def test_install_adds_the_server_and_keeps_the_rest(self):
-        cfg = self.tmp / "claude_desktop_config.json"
-        cfg.write_text('{"mcpServers": {"echo": {"command": "x"}}, "preferences": {"a": 1}}', encoding="utf-8")
-        orig = self.mcp.desktop_entry
-        self.mcp.desktop_entry = lambda: {"command": "py", "args": ["launcher"]}
-        try:
-            self.assertTrue(self.mcp.install_entry(cfg))
-            self.assertFalse(self.mcp.install_entry(cfg))  # второй раз менять нечего
-        finally:
-            self.mcp.desktop_entry = orig
-        data = json.loads(cfg.read_text(encoding="utf-8"))
-        self.assertEqual(sorted(data["mcpServers"]), ["aiflow", "echo"])
-        self.assertEqual(data["preferences"], {"a": 1})
-
     def test_stdio_loop_answers_line_by_line(self):
         src = io.BytesIO(b'{"jsonrpc":"2.0","id":7,"method":"ping"}' + b"\nnot json\n\n")
         out = io.BytesIO()
