@@ -3220,34 +3220,62 @@ class Dispatcher:
 ORCHESTRATOR_NAME = "aiflow"
 
 
-def orchestrator_session(store: "Store", sessions: dict[str, dict]) -> str | None:
-    """Короткий id сессии координатора проекта, к которой можно подключиться, или None.
-    Сначала — сессия, в которой работает монитор (она записала себя в .aiflow/orchestrator.json), затем —
-    фоновая сессия с именем aiflow. Остановленная и чужая интерактивная (без id) не годятся."""
-    usable = {sid: s for sid, s in sessions.items() if sid and s.get("state") != "stopped"}
-    seen = (read_json(store.runs / "orchestrator.json", {}) or {}).get("session_id")
-    if seen:
-        for sid, s in usable.items():
-            if s.get("sessionId") == seen:
-                return sid
-    root = str(store.root).replace("\\", "/").rstrip("/").lower()
-    named = [sid for sid, s in usable.items() if s.get("name") == ORCHESTRATOR_NAME
-             and str(s.get("cwd") or "").replace("\\", "/").rstrip("/").lower() in ("", root)]
-    return max(named, key=lambda sid: usable[sid].get("startedAt") or 0) if named else None
+# Меняется вместе с правилами координатора (agents/orchestrator.md, приветствие): сессия, запущенная
+# по прежним правилам, заменяется новой при следующем «Дать задачу».
+ORCHESTRATOR_REV = 2
+
+
+def orchestrator_greeting(name: str) -> str:
+    return f"Готов. Напишите, что сделать в проекте {name}, — поставлю задачу в очередь."
+
+
+def orchestrator_prompt(name: str) -> str:
+    return (
+        f"You are the task chat of the project {name}. The user opens you to give tasks and does not type "
+        "/aiflow:intake: every message of the user is a task for the queue, unless it is a question about the "
+        "queue or a reply to your question. Before you queue, run `aiflow intake-rules` and obey what it prints "
+        "(these are the rules of /aiflow:intake; the user's message is the task text). "
+        f"Now reply with exactly this one line and end your turn: {orchestrator_greeting(name)}"
+    )
 
 
 def open_orchestrator(store: "Store", claude=None) -> tuple[str, bool]:
-    """Сессия координатора проекта: существующая или только что запущенная. → (id, запущена ли новая)."""
+    """Чат координатора проекта, готовый принимать задачи: уже запущенный отсюда или новый.
+    → (id, запущена ли новая). Сессию узнаём по записи .aiflow/orchestrator_chat.json, а не по имени: имя
+    Claude Code меняет сам. Сессия, где пользователь когда-то набрал /aiflow:resume, не годится: это
+    обычный Claude без правил координатора, и задачи в нём нужно давать командой."""
     claude = claude or Claude(store.root)
-    sid = orchestrator_session(store, claude.agents())
-    if sid:
-        return sid, False
-    sid, out = claude.launch("aiflow:orchestrator", ORCHESTRATOR_NAME,
-                             "Be ready for tasks. The user gives them through /aiflow:intake.",
+    sessions = claude.agents()
+    mark_path = store.runs / "orchestrator_chat.json"
+    mark = read_json(mark_path, {}) or {}
+    mine = next((sid for sid, s in sessions.items() if mark.get("session_id") and s.get("sessionId") == mark["session_id"]
+                 and s.get("state") != "stopped"), None)
+    if mine and mark.get("rev") == ORCHESTRATOR_REV:
+        return mine, False
+    root = str(store.root).replace("\\", "/").rstrip("/").lower()
+    for sid, s in sessions.items():  # прежние чаты координатора: два чата с одним именем только путают
+        old = sid == mine or (s.get("name") == ORCHESTRATOR_NAME
+                              and str(s.get("cwd") or "").replace("\\", "/").rstrip("/").lower() in ("", root))
+        if old and s.get("state") not in ("stopped", "working"):
+            claude.stop(sid)
+    sid, out = claude.launch("aiflow:orchestrator", ORCHESTRATOR_NAME, orchestrator_prompt(store.root.name),
                              mode=store.config().get("permission_mode"))
     if not sid:
         raise AiflowError("не удалось запустить сессию координатора: " + out[-200:])
+    session_id = (claude.agents().get(sid) or {}).get("sessionId")
+    write_json(mark_path, {"sid": sid, "session_id": session_id, "rev": ORCHESTRATOR_REV, "at": iso()})
     return sid, True
+
+
+def cmd_intake_rules(args, root: Path | None) -> int:
+    """Правила приёма задач самой новой установленной версии плагина — для чата координатора."""
+    import aiflow_service as svc
+    path = svc.newest_install()[1].parent.parent / "skills" / "intake" / "SKILL.md"
+    text = path.read_text(encoding="utf-8")
+    text = re.sub(r"\A---\n.*?\n---\n", "", text, flags=re.S)  # без шапки навыка
+    text = text.replace("$ARGUMENTS", "(the user's last message in this chat)")
+    sys.stdout.buffer.write(text.encode("utf-8"))
+    return 0
 
 
 # ---------------------------------------------------------------- status / state for UI
@@ -4420,6 +4448,7 @@ def main(argv: list[str] | None = None) -> int:
     rp.add_argument("--body-file", required=True)
     rv = sub.add_parser("review", help="один раунд ревью PR")
     rv.add_argument("--pr", type=int, required=True)
+    sub.add_parser("intake-rules", help=argparse.SUPPRESS)
     sub.add_parser("chat", help="чат с координатором проекта в этом терминале; вкладка названа именем проекта")
     u = sub.add_parser("ui", help="панель в браузере")
     u.add_argument("--port", type=int)
@@ -4435,7 +4464,7 @@ def main(argv: list[str] | None = None) -> int:
             root = repo_root()
         except AiflowError:
             root = None
-        rootless = {"doctor": cmd_doctor, "statusline": cmd_statusline, "service": cmd_service, "up": cmd_up, "app": cmd_app,
+        rootless = {"doctor": cmd_doctor, "statusline": cmd_statusline, "service": cmd_service, "up": cmd_up, "app": cmd_app, "intake-rules": cmd_intake_rules,
                     "down": cmd_down, "projects": cmd_projects, "forget": cmd_forget}
         if args.cmd in rootless:
             return rootless[args.cmd](args, root)

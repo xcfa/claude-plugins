@@ -1390,31 +1390,44 @@ class Coordinator(ProjectCase):
         self.claude.sessions[sid] = {"id": sid, "name": name, "state": state, "sessionId": f"uuid-{sid}",
                                      "cwd": str(self.root), "startedAt": len(self.claude.sessions), **extra}
 
-    def test_session_running_the_monitor_is_the_coordinator(self):
-        self.session("w1", "worker: a")
-        self.session("o1", "db-schema-cache-test-container")  # имя сессии Claude переименовал сам
-        self.session("o2", "aiflow")
-        aiflow.write_json(self.root / ".aiflow" / "orchestrator.json", {"session_id": "uuid-o1"})
-        self.assertEqual(aiflow.orchestrator_session(self.store, self.claude.agents()), "o1")
-        self.assertEqual(aiflow.open_orchestrator(self.store, self.claude), ("o1", False))
-        self.assertEqual(self.claude.launched, [])
-
-    def test_falls_back_to_a_session_named_aiflow(self):
-        self.session("old", "aiflow")
-        self.session("new", "aiflow")
-        self.session("far", "aiflow", cwd=str(self.tmp / "other-project"))
-        self.session("w1", "worker: a")
-        self.assertEqual(aiflow.orchestrator_session(self.store, self.claude.agents()), "new")
-
-    def test_stopped_or_missing_coordinator_is_started_anew(self):
-        self.session("o1", "aiflow", state="stopped")
-        aiflow.write_json(self.root / ".aiflow" / "orchestrator.json", {"session_id": "uuid-gone"})
-        self.assertIsNone(aiflow.orchestrator_session(self.store, self.claude.agents()))
+    def test_chat_started_for_tasks_is_reused_under_any_name(self):
         sid, started = aiflow.open_orchestrator(self.store, self.claude)
         self.assertTrue(started)
         self.assertEqual(self.claude.launched[-1]["agent"], "aiflow:orchestrator")
-        self.assertEqual(self.claude.launched[-1]["name"], "aiflow")
-        self.assertEqual(aiflow.open_orchestrator(self.store, self.claude), (sid, False))  # второй раз — та же
+        self.assertIn("aiflow intake-rules", self.claude.launched[-1]["prompt"])
+        self.assertIn("Напишите, что сделать в проекте repo", self.claude.launched[-1]["prompt"])
+        self.claude.sessions[sid].update(name="db-schema-cache", state="done")  # имя Claude переименовал сам
+        self.assertEqual(aiflow.open_orchestrator(self.store, self.claude), (sid, False))
+        self.assertEqual(len(self.claude.launched), 1)
+
+    def test_plain_or_old_sessions_are_replaced(self):
+        self.session("plain", "shizuka")  # обычный Claude, где набрали /aiflow:resume
+        self.session("old", "aiflow")     # координатор прежних правил
+        self.session("busy", "aiflow", state="working")
+        self.session("far", "aiflow", cwd=str(self.tmp / "other-project"))
+        aiflow.write_json(self.root / ".aiflow" / "orchestrator.json", {"session_id": "uuid-plain"})
+        sid, started = aiflow.open_orchestrator(self.store, self.claude)
+        self.assertTrue(started)
+        self.assertNotIn(sid, ("plain", "old", "busy", "far"))
+        states = {k: v["state"] for k, v in self.claude.sessions.items()}
+        self.assertEqual((states["old"], states["plain"], states["busy"], states["far"]), ("stopped", "done", "working", "done"))
+
+    def test_chat_of_older_rules_is_started_anew(self):
+        sid, _ = aiflow.open_orchestrator(self.store, self.claude)
+        self.claude.finish_turn(sid)
+        mark = aiflow.read_json(self.root / ".aiflow" / "orchestrator_chat.json", {})
+        aiflow.write_json(self.root / ".aiflow" / "orchestrator_chat.json", {**mark, "rev": 1})
+        new, started = aiflow.open_orchestrator(self.store, self.claude)
+        self.assertTrue(started)
+        self.assertNotEqual(new, sid)
+        self.assertEqual(self.claude.sessions[sid]["state"], "stopped")
+
+    def test_stopped_chat_is_started_anew(self):
+        sid, _ = aiflow.open_orchestrator(self.store, self.claude)
+        self.claude.stop(sid)
+        new, started = aiflow.open_orchestrator(self.store, self.claude)
+        self.assertTrue(started)
+        self.assertNotEqual(new, sid)
 
     def test_launch_failure_is_reported(self):
         self.claude.fail_launch = True

@@ -362,7 +362,7 @@ async function act(action, key, id, value) {
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || r.statusText);
     if (action === "open_orchestrator") return toast(/уже открыт/.test(d.where || "") ? "Чат с координатором уже открыт — вывел его на передний план"
-      : (d.started ? "Запустил координатора и открыл чат" : "Открыл чат с координатором") + ": напишите задачи через /aiflow:intake");
+      : (d.started ? "Запустил координатора и открыл чат" : "Открыл чат с координатором") + ": напишите в нём, что сделать");
     if (action === "open_session" || action === "open_reviewer") return toast(/уже открыт/.test(d.where || "") ? "Вкладка сессии уже открыта — вывел её на передний план" : `Сессия открыта: ${d.where}`);
     if (action === "cancel" && d.warnings && d.warnings.length) { toast("Снята, но: " + d.warnings.join("; ")); setTimeout(load, 600); return; }
     toast({ after: "Порядок задач изменён", amend: "Дополнение принято — его получит сессия задачи", allow_paths: "Пути разрешены, задача продолжит работу", cancel: "Задача снята", approve: "План одобрен", retry: "Повтор поставлен", pause: "Очередь на паузе", resume: "Очередь продолжает", forget: "Проект убран из службы" }[action] || "Готово");
@@ -499,7 +499,7 @@ function renderBoard(p) {
   const isEnded = t => isClosed(t) || t.state === "answered";
   const active = p.tasks.filter(t => !isEnded(t)).sort(newestCreatedFirst), ended = p.tasks.filter(isEnded).sort(newestFirst);
   if (!p.tasks.length) {
-    html += `<div class="empty" style="grid-column: 1 / -1">Задач нет. Напишите их в сессии оркестратора этого проекта: <code>/aiflow:intake …</code></div>`;
+    html += `<div class="empty" style="grid-column: 1 / -1">Задач нет. Нажмите «Дать задачу» и напишите в открывшемся чате, что сделать.</div>`;
   } else if (!active.length) {
     html += `<div class="empty" style="grid-column: 1 / -1">Активных задач нет.</div>`;
   }
@@ -573,7 +573,7 @@ function renderProject(p) {
   const why = r => r === "integration_red" ? "ветка " + p.base + " красная" : REASONS[r] || r;
   const reason = pz ? (pz.reasons || [pz.reason]).map(why).join(", ") : "";
   const qstate = pz ? `<span class="state paused">Пауза: ${esc(reason)}${pz.until ? ", до " + time(pz.until) : ""}</span>` : `<span class="state">${queueLabel(p)}</span>`;
-  const give = `<button class="primary" data-act="open_orchestrator" data-project="${k}" title="Открыть чат с координатором проекта: задачи пишутся там через /aiflow:intake">Дать задачу</button> `;
+  const give = `<button class="primary" data-act="open_orchestrator" data-project="${k}" title="Открыть чат с координатором проекта: просто напишите там, что сделать">Дать задачу</button> `;
   const qbtn = give + `<button data-act="${pz ? "resume" : "pause"}" data-project="${k}"${dis(p.key, null)}>${pz ? "Продолжить очередь" : "Поставить на паузу"}</button>`;
   return `<section class="project">
     <div class="phead">
