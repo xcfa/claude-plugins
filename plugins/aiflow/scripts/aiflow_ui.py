@@ -406,7 +406,9 @@ def start_server(provider, port: int, wake: threading.Event, service: bool = Fal
                     sid = _task_session(t) if t else None
                     if not sid:
                         return self._json(400, {"error": "у задачи ещё нет сессии"})
-                    where = open_terminal(store.root, sid, session_title(t, sid))
+                    # В заголовке — ещё и id сессии: у задачи их бывает несколько (исполнителя будят новой
+                    # сессией), и по одному названию задачи находилась вкладка старой, уже законченной.
+                    where = open_terminal(store.root, sid, f"{session_title(t, sid)[:52]} · {sid[:6]}")
                     return self._json(200, {"ok": True, "where": where, "command": f"claude attach {sid}"})
                 elif action == "open_orchestrator":
                     # чат с координатором проекта: вкладка названа именем проекта
@@ -423,7 +425,7 @@ def start_server(provider, port: int, wake: threading.Event, service: bool = Fal
                     where = Path(str(run.get("dir") or ""))  # opencode ищет сессию по проекту, где она шла
                     where = where if where.is_dir() else store.root
                     title = "ревьюер " + session_title(t, run["session"])
-                    place = open_terminal(where, run["session"], title[:60], tool="opencode")
+                    place = open_terminal(where, run["session"], f"{title[:50]} · {str(run['session'])[-6:]}", tool="opencode")
                     return self._json(200, {"ok": True, "where": place, "command": f"opencode -s {run['session']}"})
                 elif action == "cancel" and tid:
                     warnings = aiflow.cancel_tasks(store, [tid], note="из панели")
