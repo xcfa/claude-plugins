@@ -185,11 +185,35 @@ def _python(windowless: bool = False) -> str:
     return str(py)
 
 
+def _spawn_wmi() -> bool:
+    """Windows: запустить службу через WMI (Win32_Process.Create). Процесс создаёт системная служба WMI,
+    а не мы, поэтому он не попадает в job-объект того, кто его запросил. Приложение Claude держит свои
+    сессии в job-объекте без права выхода: служба, поднятая из такой сессии обычным способом, погибала
+    при закрытии приложения. Окружения WMI не передаёт — PATH несёт запускалка (как при автозапуске)."""
+    import shutil
+    ps = shutil.which("powershell.exe") or shutil.which("powershell")
+    if not ps:
+        return False
+    try:
+        launcher = _write_launcher()
+        env = dict(os.environ, AIFLOW_SPAWN_CMD=f'"{_python(windowless=True)}" "{launcher}"', AIFLOW_SPAWN_CWD=str(home()))
+        script = ("$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments "
+                  "@{CommandLine=$env:AIFLOW_SPAWN_CMD; CurrentDirectory=$env:AIFLOW_SPAWN_CWD}; exit [int]$r.ReturnValue")
+        p = subprocess.run([ps, "-NoProfile", "-NonInteractive", "-Command", script], env=env, timeout=40,
+                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return p.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def spawn(via_helper: bool = True) -> None:
     """Запустить службу отдельным процессом. Через промежуточный процесс, который сразу
     выходит: у службы не остаётся живого родителя, и завершение дерева процессов того,
     кто её запустил (например, инструмента Monitor), её не заденет."""
     home().mkdir(parents=True, exist_ok=True)
+    if via_helper and os.name == "nt" and _spawn_wmi():
+        return
     script = newest_install()[1] if via_helper else Path(aiflow.__file__)
     cmd = [_python(), "-X", "utf8", str(script.resolve()), "service"]
     if via_helper:
