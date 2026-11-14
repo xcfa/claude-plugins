@@ -208,6 +208,10 @@ def handle(msg: dict) -> dict | None:
     if mid is None:
         return None
     if method == "initialize":
+        try:  # для установки: приложение запустило сервер, сторожить файл настроек больше незачем
+            connected_marker().write_text(aiflow.iso(), encoding="utf-8")
+        except OSError:
+            pass
         want = params.get("protocolVersion")
         result = {"protocolVersion": want if want in PROTOCOLS else PROTOCOLS[0],
                   "capabilities": {"tools": {}, "resources": {}},
@@ -320,37 +324,38 @@ def install_entry(path: Path) -> bool:
     return True
 
 
-def desktop_app_running() -> bool:
-    """Запущено ли приложение Claude (Windows). CLI тоже зовётся claude.exe — отличаем по папке."""
-    import shutil
-    import subprocess
-    ps = shutil.which("powershell.exe") or shutil.which("powershell")
-    if not ps:
-        return False
-    script = ("$p = Get-CimInstance Win32_Process -Filter \"Name='claude.exe'\" | Where-Object { $_.ExecutablePath -match "
-              "'\\\\WindowsApps\\\\Claude_|\\\\AnthropicClaude\\\\' }; if ($p) { exit 1 } else { exit 0 }")
-    try:
-        return subprocess.run([ps, "-NoProfile", "-NonInteractive", "-Command", script], timeout=60,
-                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).returncode == 1
-    except (OSError, subprocess.SubprocessError):
-        return False
+def connected_marker() -> Path:
+    """Сервер ставит эту метку, когда приложение его запустило и поздоровалось."""
+    return svc.home() / "mcp_connected"
 
 
 def install(wait: bool = False, hours: float = 48) -> int:
-    """Подключить сервер к приложению Claude. Работающее приложение держит настройки в памяти и при
-    сохранении затирает правку файла, поэтому wait=True ждёт, пока приложение закроют, и пишет после."""
+    """Подключить сервер к приложению Claude. Работающее приложение держит настройки в памяти и при каждом
+    сохранении затирает правку файла, а перезапускается оно за пару секунд. Поэтому wait=True не ловит
+    момент, когда приложение закрыто, а сторожит файл: возвращает запись сразу после каждой перезаписи,
+    пока приложение не запустится с ней и не подключит сервер (метка connected_marker)."""
     import time
     files = desktop_configs()
     if not files:
         print("Не нашёл claude_desktop_config.json: откройте в приложении Settings → Developer → Edit Config и повторите.")
         return 1
-    until = time.time() + hours * 3600
-    while wait and desktop_app_running() and time.time() < until:
-        time.sleep(3)
-    for p in files:
-        print(("Сервер aiflow добавлен: " if install_entry(p) else "Сервер aiflow уже подключён: ") + str(p))
-    return 0
+    started, until = time.time(), time.time() + hours * 3600
+    while True:
+        for p in files:
+            try:
+                changed = install_entry(p)
+            except (OSError, ValueError):
+                continue  # файл как раз переписывают — в следующий заход
+            if not wait:
+                print(("Сервер aiflow добавлен: " if changed else "Сервер aiflow уже подключён: ") + str(p))
+        if not wait or time.time() > until:
+            return 0
+        try:
+            if connected_marker().stat().st_mtime > started:
+                return 0
+        except OSError:
+            pass
+        time.sleep(0.5)
 
 
 def install_later() -> bool:
@@ -383,7 +388,7 @@ if __name__ == "__main__":
         sys.exit(install(wait="--wait" in sys.argv))
     if "--install-later" in sys.argv:
         ok = install_later()
-        print("Жду закрытия приложения Claude: после него сервер aiflow появится в настройках." if ok
+        print("Сторожу настройки приложения Claude до его перезапуска: сервер aiflow подключится при следующем запуске." if ok
               else "Не получилось оставить ожидание: закройте приложение и выполните aiflow_mcp.py --install.")
         sys.exit(0 if ok else 1)
     sys.exit(serve())
