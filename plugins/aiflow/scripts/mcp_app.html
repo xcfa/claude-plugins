@@ -187,12 +187,12 @@ function taskRow(t) {
   const steps = Array.from({ length: STEPS }, (_, i) => `<i class="${i <= stage ? "on" : ""}"></i>`).join("");
   const note = t.needs ? `<div class="note wait"><i class="dot ${t.state === "needs_human" ? "fail" : ""}"></i>Ждёт вас: ${esc(t.needs)}</div>`
     : t.activity ? `<div class="note">${esc(t.activity)}</div>` : "";
-  const pr = t.pr_url ? `<a data-link="${esc(t.pr_url)}">PR #${esc(t.pr)}</a> · ` : "";
-  const cost = t.cost ? money(t.cost) : "";
+  const meta = [t.pr_url ? `<a data-link="${esc(t.pr_url)}">PR #${esc(t.pr)}</a>` : "", t.cost ? money(t.cost) : "",
+    t.updated_at ? ago(t.updated_at) : ""].filter(Boolean).join(" · ");
   return `<div class="task ${done ? "done" : ""}">
     <div><div class="id">${esc(t.id)}</div><div class="title" title="${esc(t.title)}">${esc(t.title)}</div>${note}</div>
     <div class="side">${done ? "" : `<div class="steps" role="img" aria-label="стадия ${stage + 1} из ${STEPS}">${steps}</div>`}
-      <div>${esc(t.label || t.state)}</div><div>${pr}${cost}${t.updated_at ? " · " + ago(t.updated_at) : ""}</div></div></div>`;
+      <div>${esc(t.label || t.state)}</div><div>${meta}</div></div></div>`;
 }
 
 const SERIES = { "Opus": "--s1", "Sonnet": "--s2", "Haiku": "--s3", "Fable": "--s4", "Ревьюер": "--s5", "Другое": "--s6" };

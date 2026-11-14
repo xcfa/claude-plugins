@@ -149,6 +149,17 @@ Claude Code монитор плагина повторно не запускае
 модель ревьюера opencode для выбранного проекта из списка `opencode models` (или вписывается вручную как `provider/model`).
 Значение пишется в `reviewer_model` в `runs/config.json` и действует со следующего раунда ревью.
 
+### В чате Claude
+
+`scripts/aiflow_mcp.py` — MCP-сервер только для чтения: инструменты `aiflow_tasks` (доска задач, все
+проекты или один) и `aiflow_usage` (расход токенов по дням и моделям) со встроенным интерфейсом
+(MCP Apps), который рисуется прямо в чате приложения Claude. Запись для `mcpServers` в
+`claude_desktop_config.json` (Settings → Developer → Edit Config) печатает
+`python scripts/aiflow_mcp.py --config`; после правки сразу перезапустите приложение: работающее
+приложение при своём сохранении затирает правку файла. Тот же интерфейс без приложения —
+`http://127.0.0.1:8765/app-preview?view=tasks` и `?view=usage`. В Claude Code сервер не подключается:
+сессиям задач его инструменты не нужны.
+
 ### В Claude Desktop
 
 `aiflow init` добавляет в `.claude/launch.json` две конфигурации для Browser pane вкладки Code:
@@ -187,6 +198,7 @@ Claude Code монитор плагина повторно не запускае
 | `aiflow down [--no-autostart]` / `aiflow stop` | Остановить службу и панель |
 | `aiflow projects` / `forget [путь]` | Проекты службы / убрать проект |
 | `aiflow ui [--open] [--detach]` | Открыть панель (окном приложения с `--open`) |
+| `aiflow chat` | Чат с координатором проекта в этом терминале; вкладка названа именем проекта и не переименовывается |
 | `aiflow tick` | Один проход вручную |
 | `aiflow enqueue` | Поставить задачи (JSON со stdin; использует intake) |
 | `aiflow report`, `review`, `reply` | Команды для агентов |
