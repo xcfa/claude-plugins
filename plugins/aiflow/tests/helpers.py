@@ -49,7 +49,7 @@ class FakeClaude:
         self.launched.append({"agent": agent, "name": name, "prompt": prompt, "sid": sid, **kw})
         return sid, ""
 
-    def resume(self, session_id, prompt, mode=None, cwd=None, model=None, effort=None, window=0):
+    def resume(self, session_id, prompt, mode=None, cwd=None, model=None, effort=None, window=0, name=None):
         if self.fail_resume:
             return None, "resume failed"
         for sid, s in self.sessions.items():

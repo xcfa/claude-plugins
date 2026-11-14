@@ -459,7 +459,7 @@ function renderWaiting() {
     const acts = [];
     if (t.state === "plan_review") acts.push(`<button class="primary" data-act="approve" data-project="${k}" data-id="${id}"${d}>Одобрить план</button>`);
     if (t.state === "needs_human") acts.push(`<button class="primary" data-act="retry" data-project="${k}" data-id="${id}"${d}>Повторить</button>`);
-    if (t.state === "needs_human" && /защищ|protected/i.test(t.needs || "")) acts.push(`<button data-allow="${id}" data-project="${k}"${d}>Разрешить пути…</button>`);
+    if (/защищ|protected|allow-path/i.test(t.needs || "")) acts.push(`<button data-allow="${id}" data-project="${k}"${d}>Разрешить пути…</button>`);
     if (t.pr_url) acts.push(`<a href="${esc(t.pr_url)}" target="_blank" rel="noopener">PR #${esc(t.pr)}</a>`);
     if (t.session && t.session.id) acts.push(`<button data-act="open_session" data-project="${k}" data-id="${id}">Открыть сессию</button>`);
     acts.push(`<button class="danger" data-cancel="${id}" data-project="${k}"${d}>Снять</button>`);

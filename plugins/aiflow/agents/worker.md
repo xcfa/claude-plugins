@@ -108,6 +108,10 @@ and go directly to the table.
 | `approved` | Done. End your turn with one line |
 | `limit_reached`, `already_closed`, `no_ci`, `error` | Stop and end your turn. Give the open blocking findings and your opinion of the cause (the code, the plan, or a disagreement with the reviewer) |
 
+If a fix needs a protected path that the task does not allow, do not ask in the chat. Run
+`aiflow report <id> --role worker --status blocked --summary "protected path <glob>: <why it is necessary>"`
+and end your turn. The user then sees the cause and a button to allow the path, and aiflow wakes you.
+
 `aiflow review` writes the final statuses into the report itself. A `nit` blocks approval only in
 the first round. After that the PR is approved with open nits, but fix those that you can.
 Write reply files in `$CLAUDE_JOB_DIR/tmp/`.

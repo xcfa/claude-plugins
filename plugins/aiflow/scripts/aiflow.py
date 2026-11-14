@@ -934,11 +934,15 @@ class Claude:
         return (self._short_id(out) if p.returncode == 0 else None), out.strip()
 
     def resume(self, session_id: str, prompt: str, mode=None, cwd: str | None = None, model=None,
-               effort=None, window: int = 0) -> tuple[str | None, str]:
+               effort=None, window: int = 0, name: str | None = None) -> tuple[str | None, str]:
         """cwd — папка сессии: --resume работает там, откуда вызван, а не там, где сессия жила.
         model и effort — те же, с которыми сессия работала: без них продолженная сессия берёт модель по
         умолчанию. Это и не та модель, и полная перезапись кэша диалога — кэш у каждой модели свой."""
         cmd = [self.bin, "--resume", session_id, "--bg"]
+        if name:
+            # без имени Claude Code называет продолженную сессию по теме разговора («reviewer: pr-309»),
+            # и вкладку исполнителя задачи по названию уже не найти
+            cmd += ["--name", name]
         if window:
             cmd += ["--autocompact", str(window)]
         if mode:
@@ -1182,6 +1186,37 @@ def _file_msgs(path: str) -> dict[str, tuple[str, dict]]:
             per_msg[msg.get("id") or f"{path}:{i}"] = (model, msg["usage"])
     _usage_cache[path] = (mtime, per_msg)
     return per_msg
+
+
+def last_words(session_id: str | None, limit: int = 420) -> str:
+    """Начало последнего сообщения сессии: на чём она остановилась и чего ждёт. Пусто, если журнала нет."""
+    if not session_id:
+        return ""
+    base = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    files = glob.glob(str(base / "projects" / "*" / f"{session_id}.jsonl"))
+    if not files:
+        return ""
+    try:
+        with open(files[0], "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 400_000))
+            tail = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+    for line in reversed(tail.splitlines()):
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        msg = obj.get("message") if isinstance(obj, dict) else None
+        if not isinstance(msg, dict) or obj.get("type") != "assistant" or obj.get("isSidechain"):
+            continue
+        parts = msg.get("content") if isinstance(msg.get("content"), list) else []
+        text = " ".join(str(b.get("text") or "") for b in parts if isinstance(b, dict) and b.get("type") == "text")
+        text = re.sub(r"\s+", " ", text).strip()
+        if text:
+            return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+    return ""
 
 
 def add_usage(into: dict[str, dict], models: dict[str, dict]) -> dict[str, dict]:
@@ -1711,7 +1746,11 @@ class Dispatcher:
         """Сессия ждёт ответа: сказать человеку всегда; заодно проверить, не лимит ли это."""
         w = (self.sess(e) or {}).get("waitingFor") or "ответ"
         who = "планировщик" if role == "planner" else role
-        self.emit(t, "needs_input", f"{t['id']}: {who} ждёт вас в своей сессии ({w})", key=f"blocked:{e['id']}:{w}")
+        # чего именно она ждёт — в её последнем сообщении: без него в панели только «сессия ждёт ответа»
+        said = last_words(e.get("session_id") or (self.sess(e) or {}).get("sessionId"))
+        t["waits"] = {"sid": e["id"], "text": said}
+        self.emit(t, "needs_input", f"{t['id']}: {who} ждёт вас в своей сессии ({w})"
+                  + (f": {short_reason(said, 200)}" if said else ""), key=f"blocked:{e['id']}:{w}")
         self.check_limit(e, t)
 
     def try_resume(self, t: dict, role: str, state: str, why: str, auto: bool) -> bool:
@@ -1847,7 +1886,8 @@ class Dispatcher:
         model, effort = self.session_model(t, role, entry)
         new_id, out = self.claude.resume(sid_full, prompt, mode=self.cfg.get("permission_mode"), cwd=cwd,
                                          model=model, effort=effort,
-                                         window=context_choice(self.cfg, t, role))
+                                         window=context_choice(self.cfg, t, role),
+                                         name=entry.get("name") or f"{role}: {t['id']}")
         if new_id and new_id != entry["id"]:
             self.adopt(t, role, new_id, entry.get("name", f"{role}: {t['id']}"), model, effort)
             if cwd:
@@ -1952,6 +1992,15 @@ class Dispatcher:
                 t = by_id[c["id"]]
                 t["retry_requested"] = True
                 self.store.save_task(t)
+            elif kind == "paths_allowed" and c.get("id") in by_id:
+                # задача не в «нужен человек»: её сессия спросила разрешение и ждёт ответа в чате
+                t = by_id[c["id"]]
+                role = "worker" if self.cur(t, "worker") else "planner"
+                if t.get("state") not in TERMINAL and self.sstate(self.cur(t, role)) != "working":
+                    self.wake(t, role, f"The user allowed these protected paths for task {t['id']}: "
+                              + ", ".join(c.get("paths") or []) + ". You can change them now. Continue the work.")
+                    t.pop("waits", None)
+                    self.store.save_task(t)
 
     def check_pause_timer(self) -> None:
         due = [r for r, p in (self.q.get("pauses") or {}).items()
@@ -2927,7 +2976,8 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
                      else "обсуждение ждёт вас — откройте сессию")
         elif cur.get("state") == "blocked" and st not in TERMINAL:
             # у завершённой задачи сессия хранится, но её вопрос уже никого не ждёт
-            needs = f"сессия ждёт ответа ({cur.get('waiting') or 'вопрос'})"
+            said = (t.get("waits") or {}).get("text") if (t.get("waits") or {}).get("sid") == cur.get("id") else ""
+            needs = f"сессия ждёт ответа: {said}" if said else f"сессия ждёт ответа ({cur.get('waiting') or 'вопрос'})"
         last_stage = None
         if st not in STAGES:
             for h in reversed(t.get("history") or []):
@@ -3475,6 +3525,8 @@ def allow_paths(store: Store, tid: str, paths: list[str]) -> list[str]:
         lock.release()
     if needs_retry:
         queue_or_apply(store, {"cmd": "retry", "id": tid})
+    else:
+        queue_or_apply(store, {"cmd": "paths_allowed", "id": tid, "paths": clean})
     return added
 
 

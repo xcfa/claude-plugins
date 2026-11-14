@@ -1686,5 +1686,44 @@ class ApproveWhilePlannerWorks(ProjectCase):
         self.assertEqual(aiflow.build_state(self.store)["tasks"][0]["needs"], "обсудить и одобрить план")
 
 
+class BlockedSessionSaysWhy(ProjectCase):
+    def start(self) -> str:
+        self.add("a")
+        self.tick()
+        return self.sid("a", "planner")
+
+    def test_last_words_reads_the_last_assistant_text(self):
+        base = self.tmp / "claude"
+        log = base / "projects" / "p" / "sess-1.jsonl"
+        log.parent.mkdir(parents=True)
+        rows = [{"type": "assistant", "message": {"content": [{"type": "text", "text": "first"}]}},
+                {"type": "user", "message": {"content": "ok"}},
+                {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash", "input": {}}]}},
+                {"type": "assistant", "message": {"content": [{"type": "text", "text": "Need the path\n.claude/x allowed. " + "y" * 600}]}}]
+        log.write_text("\n".join(json.dumps(x) for x in rows), encoding="utf-8")
+        with mock.patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": str(base)}):
+            said = aiflow.last_words("sess-1")
+            self.assertTrue(said.startswith("Need the path .claude/x allowed."))
+            self.assertLessEqual(len(said), 420)
+            self.assertEqual(aiflow.last_words("nope"), "")
+
+    def test_panel_shows_what_the_blocked_session_asks(self):
+        sid = self.start()
+        self.claude.sessions[sid].update(state="blocked", waitingFor="ответ")
+        with mock.patch.object(aiflow, "last_words", return_value="Разрешите защищённый путь .claude/skills/x"):
+            events = self.tick()
+        self.assertIn("защищённый путь", " ".join(e["text"] for e in events))
+        row = aiflow.build_state(self.store, self.claude.agents())["tasks"][0]
+        self.assertEqual(row["needs"], "сессия ждёт ответа: Разрешите защищённый путь .claude/skills/x")
+
+    def test_allowed_path_wakes_the_session_that_asked(self):
+        sid = self.start()
+        self.claude.sessions[sid].update(state="blocked", waitingFor="ответ")
+        self.tick()
+        self.store.command({"cmd": "paths_allowed", "id": "a", "paths": [".claude/skills/x/SKILL.md"]})
+        self.tick()
+        self.assertIn("allowed these protected paths", self.claude.resumed[-1]["prompt"])
+
+
 if __name__ == "__main__":
     unittest.main()
