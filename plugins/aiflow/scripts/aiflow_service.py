@@ -317,6 +317,21 @@ class _Panel:
             self.srv.shutdown()
 
 
+def _start_tray(panel: _Panel) -> bool:
+    """Значок в области уведомлений Windows (tray: false в ~/.aiflow/config.json — без него)."""
+    if os.name != "nt" or not panel.srv or global_config().get("tray", True) is False:
+        return False
+    import aiflow_tray
+    return aiflow_tray.start_tray(f"http://127.0.0.1:{panel.port}", os.getpid(), home(), (_browser() or [""])[0],
+                                  _python(windowless=True), Path(aiflow.__file__).resolve())
+
+
+def app_shortcut(enable: bool) -> str:
+    import aiflow_tray
+    launcher = _write_launcher() if enable else home() / "launcher.py"
+    return aiflow_tray.shortcut(enable, home(), _python(windowless=True), launcher)
+
+
 def _write_info(panel: _Panel) -> None:
     write_json(home() / "service.json", {
         "pid": os.getpid(), "version": aiflow.VERSION, "script": str(Path(aiflow.__file__).resolve()),
@@ -399,6 +414,7 @@ def serve() -> int:
     try:
         panel.ensure()
         _write_info(panel)
+        tray = _start_tray(panel)
         print(f"{iso()} служба aiflow {aiflow.VERSION} запущена, панель: {panel_url(info()) or panel.error or 'выключена'}",
               flush=True)
         migrated: set[str] = set()
@@ -407,6 +423,7 @@ def serve() -> int:
             panel.ensure()
             if bool(panel.srv) != had_panel:
                 _write_info(panel)
+                tray = tray or _start_tray(panel)
             forced = wake.is_set()
             wake.clear()
             roots = projects()
@@ -594,6 +611,10 @@ os.environ["PATH"] = {path!r} + os.pathsep + os.environ.get("PATH", "")
 import time
 with open(home / "service.log", "ab") as log:
     stamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    if sys.argv[1:] == ["open"]:  # ярлык в меню «Пуск»: поднять службу, если её нет, и открыть окно панели
+        flags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
+        sys.exit(subprocess.call([sys.executable, "-X", "utf8", script, "up", "--open"], cwd=str(home), stdout=log,
+                                 stderr=log, stdin=subprocess.DEVNULL, creationflags=flags))
     log.write(f"{{stamp}} автозапуск: {{script}}\\n".encode("utf-8"))
     log.flush()
     sys.exit(subprocess.call([sys.executable, "-X", "utf8", script, "service"], stdout=log, stderr=log))

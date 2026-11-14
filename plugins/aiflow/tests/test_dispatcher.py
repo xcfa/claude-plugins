@@ -1925,3 +1925,34 @@ class LinkedProjects(ProjectCase):
         prompt = aiflow.planner_prompt(self.store, self.task("a"), self.store.config())
         self.assertIn("lib (shared packages)", prompt)
         self.assertIn("aiflow enqueue --project <name> --then a", prompt)
+
+
+class TrayAndApp(ProjectCase):
+    def test_tray_command_names_the_panel_and_the_service(self):
+        import aiflow_tray
+        from pathlib import Path
+        cmd = aiflow_tray.tray_command(Path("t.ps1"), "http://127.0.0.1:8765/", 42, Path("h"), "edge.exe", "pythonw", Path("a.py"))
+        self.assertEqual(cmd[cmd.index("-Url") + 1], "http://127.0.0.1:8765")
+        self.assertEqual(cmd[cmd.index("-ServicePid") + 1], "42")
+        self.assertIn("/api/tray", aiflow_tray.TRAY_PS)
+
+    def test_launcher_opens_the_panel_for_the_shortcut(self):
+        import aiflow_service as svc
+        text = svc._write_launcher().read_text(encoding="utf-8")
+        compile(text, "launcher.py", "exec")
+        self.assertIn('sys.argv[1:] == ["open"]', text)
+        self.assertIn('"up", "--open"', text)
+
+    def test_tray_summary_counts_waiting_tasks(self):
+        import threading
+        import urllib.request
+        import aiflow_ui
+        self.add("a", state="needs_human", human_reason="упал тест")
+        self.add("b", state="in_progress")
+        self.add("c", state="merged")
+        srv, url = aiflow_ui.start_server(lambda: [self.store], 0, threading.Event())
+        self.addCleanup(srv.shutdown)
+        data = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{srv.server_address[1]}/api/tray", timeout=10).read().decode("utf-8"))
+        self.assertEqual([w["id"] for w in data["waiting"]], ["a"])
+        self.assertEqual(data["active"], 1)
+        self.assertEqual(data["projects"][0]["name"], "repo")

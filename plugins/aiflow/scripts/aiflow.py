@@ -4131,6 +4131,32 @@ def cmd_up(args, root: Path | None) -> int:
     return 0
 
 
+def cmd_app(args, root: Path | None) -> int:
+    """aiflow как приложение: автозапуск при входе в систему, ярлык в меню «Пуск», значок рядом с часами."""
+    import aiflow_service as svc
+    if args.remove:
+        print("Автозапуск выключен: " + svc.autostart(False))
+        if os.name == "nt":
+            print("Ярлык убран: " + svc.app_shortcut(False))
+        print("Служба продолжает работать до aiflow down. Значок рядом с часами: \"tray\": false в "
+              f"{svc.home() / 'config.json'}.")
+        return 0
+    if root is not None and Store(root).initialized and svc.register(root):
+        print(f"Проект {root.name} добавлен в службу.")
+    print("Автозапуск при входе в систему включён: " + svc.autostart(True))
+    if os.name == "nt":
+        try:
+            print("Ярлык в меню «Пуск»: " + svc.app_shortcut(True))
+        except OSError as e:
+            print(f"Ярлык не создан: {e}")
+    data = svc.ensure()
+    url = svc.panel_url(data)
+    print(f"Служба aiflow {data.get('version', '?')} работает (pid {data['pid']})" + (f"; панель: {url}" if url else ""))
+    if url and not args.no_open:
+        svc.open_window(url)
+    return 0
+
+
 def cmd_down(args, root: Path | None) -> int:
     import aiflow_service as svc
     if args.no_autostart:
@@ -4357,6 +4383,9 @@ def main(argv: list[str] | None = None) -> int:
     up.add_argument("--foreground", action="store_true", help="служба в этом терминале")
     up.add_argument("--autostart", action="store_true", default=None, help="запускать службу при входе в систему")
     up.add_argument("--no-autostart", dest="autostart", action="store_false", help="выключить автозапуск")
+    ap = sub.add_parser("app", help="aiflow как приложение Windows: автозапуск, ярлык в «Пуске», окно панели")
+    ap.add_argument("--remove", action="store_true", help="убрать ярлык и автозапуск")
+    ap.add_argument("--no-open", action="store_true", help="не открывать окно панели")
     dn = sub.add_parser("down", help="остановить службу")
     dn.add_argument("--no-autostart", action="store_true", help="и выключить автозапуск")
     sub.add_parser("projects", help="проекты службы")
@@ -4406,7 +4435,7 @@ def main(argv: list[str] | None = None) -> int:
             root = repo_root()
         except AiflowError:
             root = None
-        rootless = {"doctor": cmd_doctor, "statusline": cmd_statusline, "service": cmd_service, "up": cmd_up,
+        rootless = {"doctor": cmd_doctor, "statusline": cmd_statusline, "service": cmd_service, "up": cmd_up, "app": cmd_app,
                     "down": cmd_down, "projects": cmd_projects, "forget": cmd_forget}
         if args.cmd in rootless:
             return rootless[args.cmd](args, root)

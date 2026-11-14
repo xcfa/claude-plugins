@@ -348,6 +348,20 @@ def start_server(provider, port: int, wake: threading.Event, service: bool = Fal
                 page = APP_PREVIEW.replace("__APP__", app)
                 page = page.replace("__VIEW__", view).replace("__ARGS__", json.dumps(args, ensure_ascii=False))
                 return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
+            if url.path == "/api/tray":
+                # короткая сводка для значка в области уведомлений: кто ждёт человека и сколько задач идёт
+                waiting, names, active, paused = [], [], 0, False
+                for k, st in stores().items():
+                    ps = project_state(k, st)
+                    names.append({"key": k, "name": ps["name"]})
+                    paused = paused or bool(ps.get("paused"))
+                    for t in ps.get("tasks") or []:
+                        if t.get("needs"):
+                            waiting.append({"key": k, "project": ps["name"], "id": t["id"], "title": t.get("title") or "",
+                                            "needs": str(t["needs"])[:160]})
+                        elif t.get("state") not in aiflow.TERMINAL:
+                            active += 1
+                return self._json(200, {"waiting": waiting, "projects": names, "active": active, "paused": paused})
             if url.path == "/api/state":
                 return self._json(200, {"version": aiflow.VERSION, "service": service, "now": aiflow.iso(),
                                         "projects": [project_state(k, st) for k, st in stores().items()]})
