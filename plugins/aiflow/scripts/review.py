@@ -484,6 +484,26 @@ def events_usage(events: list[dict]) -> dict:
     return u
 
 
+def reviewer_failure(r: Runner, model: str, events: list[dict]) -> str:
+    """Понятная причина сбоя ревьюера, если её можно назвать: неизвестная модель или ошибка самого opencode.
+    На неверное имя модели opencode отвечает только «Unexpected server error», поэтому имя сверяем сами."""
+    if model:
+        try:
+            out = r.run([r.opencode, "models"], env=r.plain_env, check=False, timeout=90).stdout or ""
+        except Exception:
+            out = ""
+        known = [x.strip() for x in ANSI_RE.sub("", out).splitlines() if "/" in x and " " not in x.strip()]
+        note = aiflow.unknown_model_note(model, known)
+        if note:
+            return note
+    for ev in reversed(events):
+        if ev.get("type") == "error":
+            msg = ((ev.get("error") or {}).get("data") or {}).get("message") or (ev.get("error") or {}).get("name")
+            if msg:
+                return f"opencode сообщил об ошибке: {msg}"
+    return ""
+
+
 def events_text(events: list[dict]) -> str:
     """Ответ модели: текстовые части после последнего вызова инструмента."""
     texts: list[str] = []
@@ -571,6 +591,9 @@ def call_reviewer(r: Runner, pr: int, rnd: int, max_rounds: int, model: str, bri
             # opencode упал до ответа модели. Бывает, что в каталоге проекта ломается один из
             # встроенных плагинов opencode; ревьюеру они не нужны — повторяем без них.
             cmd = cmd[:2] + ["--pure"] + cmd[2:]
+    why = reviewer_failure(r, model, events)
+    if why:
+        raise RuntimeError(why)
     tail = last[-2000:] if last.strip() else "(пусто)"
     raise RuntimeError("ревьюер не вернул валидный JSON. Конец вывода:\n" + tail
                        + (f"\nstderr opencode: {err[-800:]}" if err else ""))

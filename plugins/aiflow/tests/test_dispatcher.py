@@ -1774,5 +1774,19 @@ class SettleWaitingSessions(ProjectCase):
         self.assertEqual(self.claude.sessions[sid]["state"], "stopped")
 
 
+class ReviewerModelName(unittest.TestCase):
+    KNOWN = ["opencode-go/deepseek-v4.1-flash", "opencode-go/deepseek-v4-pro", "opencode/deepseek-v4.1-flash"]
+
+    def test_typo_in_the_model_name_is_explained(self):
+        note = aiflow.unknown_model_note("opencode-gp/deepseek-v4.1-flash", self.KNOWN)
+        self.assertIn("нет в списке opencode models", note)
+        self.assertIn("opencode-go/deepseek-v4.1-flash", note)
+
+    def test_known_model_and_unknown_list_give_no_note(self):
+        self.assertEqual(aiflow.unknown_model_note("opencode-go/deepseek-v4-pro", self.KNOWN), "")
+        self.assertEqual(aiflow.unknown_model_note("x/y", []), "")  # списка нет — не гадаем
+        self.assertEqual(aiflow.unknown_model_note("", self.KNOWN), "")
+
+
 if __name__ == "__main__":
     unittest.main()

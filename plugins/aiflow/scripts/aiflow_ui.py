@@ -457,6 +457,13 @@ def start_server(provider, port: int, wake: threading.Event, service: bool = Fal
                     value = value.strip() if isinstance(value, str) else None
                     if value is None or len(value) > 200 or (value and not MODEL_RE.match(value)):
                         return self._json(400, {"error": "модель указывается как provider/model, например deepseek/deepseek-chat"})
+                    if value:
+                        # опечатка в имени стоит двух сорванных ревью: сверяем со списком opencode, если он есть
+                        with lock:
+                            known = models.setdefault(svc.project_key(store.root), _Models(store.root))
+                        note = aiflow.unknown_model_note(value, known.get()[0])
+                        if note:
+                            return self._json(400, {"error": note})
                     store.set_config("reviewer_model", value)
                     store.event("config", None, f"модель ревьюера: {value or 'по умолчанию opencode'} (из панели)")
                     return self._json(200, {"ok": True, "reviewer_model": value})

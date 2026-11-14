@@ -235,6 +235,16 @@ def wanted_paths(t: dict, review: dict | None, cfg: dict) -> list[str]:
     return out
 
 
+def unknown_model_note(model: str, known: list[str]) -> str:
+    """Пояснение, если модели ревьюера нет в списке opencode: чаще всего это опечатка в имени."""
+    if not model or not known or model in known:
+        return ""
+    import difflib
+    near = difflib.get_close_matches(model, known, n=2, cutoff=0.6)
+    return (f"модели «{model}» нет в списке opencode models" + (f" — возможно, вы имели в виду {' или '.join(near)}" if near else "")
+            + ". Поправьте модель ревьюера в панели («Настройки») или reviewer_model в runs/config.json")
+
+
 def is_direct(t: dict) -> bool:
     """Задача без плана: исполнитель делает её сразу (поручил планировщик или trivial вручную)."""
     return bool(t.get("direct")) or t.get("complexity") == "trivial"
