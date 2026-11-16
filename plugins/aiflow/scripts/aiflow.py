@@ -47,7 +47,24 @@ STAGES = ["new", "planning", "plan_review", "in_progress", "ready", "in_review",
 # шаг доски для каждого состояния задачи; done — последний шаг «Готово»: на нём стоит всякая законченная задача
 STATION = {"new": 0, "planning": 1, "plan_check": 1, "discussing": 1, "answered": 1, "plan_review": 2, "approved": 2,
            "in_progress": 3, "ready": 4, "in_review": 5, "merged": 6, "done": 7}
-HISTORY_KEEP = 60  # столько последних переходов хранит задача
+HISTORY_KEEP = 60  # столько последних переходов хранит задача (защита от роста файла, если стадии зациклятся)
+
+
+def visited_stations(t: dict) -> set[int]:
+    """Шаги доски, через которые задача прошла. Хранятся в самой задаче (stations) и от длины истории не
+    зависят. У задачи из прежней версии их нет: тогда считаются по истории, а если её начало уже обрезано,
+    всё до самого дальнего шага считается пройденным — пропуски там не узнать."""
+    if isinstance(t.get("stations"), list):
+        return {0, *(int(i) for i in t["stations"])}
+    history = t.get("history") or []
+    visited = {0}
+    for h in history:
+        for key in ("from", "to"):
+            if h.get(key) in STATION and h[key] != "done":
+                visited.add(STATION[h[key]])
+    if len(history) >= HISTORY_KEEP:
+        visited |= set(range(max(visited) + 1))
+    return visited
 # approved — план одобрен (или повтор с готовым PR), задача ждёт слот исполнителя
 SIDE_STATES = ["needs_human", "cancelled", "discussing", "answered", "approved"]
 TALK_KINDS = ("discuss", "ask")  # разговор в сессии планировщика: PR только по договорённости
@@ -1979,6 +1996,8 @@ class Dispatcher:
     def set_state(self, t: dict, state: str, note: str = "") -> None:
         if t.get("state") != state:
             t.setdefault("history", []).append({"at": iso(), "from": t.get("state"), "to": state, "note": note})
+            seen = visited_stations(t) | {STATION[s] for s in (t.get("state"), state) if s in STATION and s != "done"}
+            t["stations"] = sorted(seen)
             del t["history"][:-HISTORY_KEEP]
             t["state"] = state
             t["state_at"] = iso()
@@ -3459,15 +3478,9 @@ def board_position(t: dict, has_pr: bool) -> tuple[int | None, list[int]]:
     st = t.get("state", "new")
     final = STATION["done"]
     history = t.get("history") or []
-    visited = {0}
-    for h in history:
-        for key in ("from", "to"):
-            if h.get(key) in STATION and h[key] != "done":
-                visited.add(STATION[h[key]])
+    visited = visited_stations(t)
     if t.get("route") == "self" or t.get("self_executed"):
         visited.add(STATION["in_progress"])  # планировщик делал сам: состояние было planning, шаг — реализация
-    if len(history) >= HISTORY_KEEP:
-        visited |= set(range(max(visited) + 1))  # начало истории обрезано: пропуски в нём уже не узнать
     if st in ("merged", "done", "answered"):
         stage = final
     elif st == "planning" and t.get("route") == "self":

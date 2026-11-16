@@ -1475,9 +1475,9 @@ class BoardSteps(ProjectCase):
         self.gh.add_label(7, "plan-approved")
         self.tick()
         t = self.task("a")
+        d = aiflow.Dispatcher(self.store, self.claude, self.gh)
         for st in ("ready", "in_review", "merged"):
-            t["history"].append({"at": aiflow.iso(), "from": t["state"], "to": st})
-            t["state"] = st
+            d.set_state(t, st)
         self.store.save_task(t)
         self.assertEqual((self.row()["stage"], self.row()["skipped"]), (self.FINAL, []))
 
@@ -1502,6 +1502,24 @@ class BoardSteps(ProjectCase):
             {"from": None, "to": "new"}, {"from": "new", "to": "planning"}, {"from": "planning", "to": "ready"},
             {"from": "ready", "to": "in_review"}, {"from": "in_review", "to": "merged"}]}
         self.assertEqual(aiflow.board_position(t, True), (self.FINAL, [aiflow.STAGES.index("plan_review")]))
+
+    def test_skipped_steps_survive_a_history_longer_than_it_is_kept(self):
+        self.add("a")
+        self.tick()
+        self.report("a", "planner", "delegate", summary="мелочь", details="указания")
+        self.tick()
+        d = aiflow.Dispatcher(self.store, self.claude, self.gh)
+        t = self.task("a")
+        for _ in range(aiflow.HISTORY_KEEP):  # задача много раз ходит между реализацией и очередью ревью
+            d.set_state(t, "ready")
+            d.set_state(t, "in_progress")
+        self.assertEqual(len(t["history"]), aiflow.HISTORY_KEEP)
+        self.assertNotIn("planning", [h.get("to") for h in t["history"]])  # начало истории обрезано
+        self.assertEqual(aiflow.board_position(t, True), (aiflow.STAGES.index("in_progress"), [aiflow.STAGES.index("plan_review")]))
+
+    def test_task_of_an_older_version_with_a_cut_history_shows_early_steps_as_passed(self):
+        t = {"state": "in_progress", "history": [{"from": "ready", "to": "in_progress"}] * aiflow.HISTORY_KEEP}
+        self.assertEqual(aiflow.board_position(t, True), (aiflow.STAGES.index("in_progress"), []))
 
     def test_cancelled_task_stays_where_it_stopped(self):
         t = {"state": "cancelled", "history": [{"from": "new", "to": "planning"}, {"from": "planning", "to": "cancelled"}]}
