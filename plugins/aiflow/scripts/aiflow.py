@@ -295,6 +295,11 @@ DEFAULT_CONFIG = {
     "wait_workflows": True,
     "reviewer_model": "",
     "review_identity": "self",  # self — ревью и мерж от вашего gh; bot — от бота с токеном REVIEW_BOT_TOKEN
+    # Ревью плана другой моделью (тем же ревьюером opencode) до того, как план увидите вы: advisory — ревьюер
+    # пишет замечания, планировщик один раз отвечает на них, и план идёт к вам в любом случае; off — выключено
+    "plan_check": "advisory",
+    "plan_check_rounds": 1,  # сколько раз ревьюер смотрит план одной задачи
+    "plan_check_wait_minutes": 20,  # сколько ждать ответа планировщика на замечания, прежде чем показать план вам
     "max_rounds": 5,
     "nit_rounds": 1,  # в скольких первых раундах nit блокирует одобрение; дальше одобряется, если blocking нет
     "reviewer_idle_minutes": 5,  # ревьюер opencode не присылает событий дольше этого — завис: остановить
@@ -792,6 +797,10 @@ class Store:
     def task_path(self, tid: str) -> Path:
         return self.runs / tid / "task.json"
 
+    def plan_review_path(self, tid: str) -> Path:
+        """Итог ревью плана (`aiflow review-plan`): замечания ревьюера или причина сбоя."""
+        return self.runs / tid / "plan-review.json"
+
     def notes_path(self, tid: str) -> Path:
         """Заметки планировщика о коде для исполнителя (отчёт plan_ready с --details-file)."""
         return self.runs / tid / "notes.md"
@@ -867,14 +876,19 @@ class Store:
         return cmds
 
 
-def spawn_review_process(store: "Store", t: dict, cwd: str) -> int | None:
+def spawn_plan_check_process(store: "Store", t: dict, cwd: str) -> int | None:
+    """Запустить `aiflow review-plan --pr N` отдельным процессом. → pid или None."""
+    return spawn_review_process(store, t, cwd, command="review-plan")
+
+
+def spawn_review_process(store: "Store", t: dict, cwd: str, command: str = "review") -> int | None:
     """Запустить `aiflow review --pr N` отдельным процессом в рабочей копии задачи. → pid или None."""
     log = store.runs / t["id"] / "auto-review.log"
     try:
         out = open(log, "ab")
         flags = {"creationflags": 0x08000000 | 0x00000200} if os.name == "nt" else {"start_new_session": True}
         env = dict(os.environ, PYTHONUTF8="1")
-        proc = subprocess.Popen([sys.executable, "-X", "utf8", str(Path(__file__).resolve()), "review", "--pr", str(t["pr"])],
+        proc = subprocess.Popen([sys.executable, "-X", "utf8", str(Path(__file__).resolve()), command, "--pr", str(t["pr"])],
                                 cwd=cwd, stdin=subprocess.DEVNULL, stdout=out, stderr=out, env=env, **flags)
         out.close()
         return proc.pid
@@ -1753,6 +1767,23 @@ def mark_delivered(t: dict, via: str) -> None:
             a["delivered_at"], a["via"] = iso(), via
 
 
+def plan_check_prompt(t: dict, result: dict) -> str:
+    """Замечания ревьюера плана — планировщику. Один ход: исправить или возразить, затем снова plan_ready."""
+    items = "\n".join(f"{i}. [{f.get('severity')}]" + (f" ({f['section']})" if f.get("section") else "")
+                      + f" {f.get('text', '')}" for i, f in enumerate(result.get("findings") or [], 1))
+    return (
+        f"Another model reviewed your plan in PR #{t['pr']} (task {t['id']}) before the user sees it. Its findings:\n\n"
+        f"{items}\n\n"
+        "Obey the section \"Plan check\" of the plan rules. For each finding: check it against the code, then fix "
+        "the plan, or disagree and say why. The reviewer can be wrong. A `question` is for the user: put it into "
+        "the plan where the user will see it, do not decide it yourself. Update the PR description "
+        "(gh pr edit --body-file), add a line to \"Plan change history\", and reply in the PR with one comment "
+        "whose first line is <!-- aiflow:planner -->: one line for each finding, \"fixed: how\" or \"disagree: why\". "
+        f"Then run aiflow report {t['id']} --role planner --status plan_ready --pr {t['pr']} "
+        "--summary \"<what changed>\" and end your turn. Do not wait for a second review."
+    )
+
+
 def revise_prompt(t: dict, comments: list[dict]) -> str:
     quoted = "\n\n".join(f"- {c.get('author', {}).get('login', '?')} ({c.get('createdAt', '')}):\n{c.get('body', '').strip()}"
                          for c in comments)
@@ -1916,9 +1947,10 @@ def resume_prompt(t: dict, state: str, why: str, base: str) -> str:
 # ---------------------------------------------------------------- dispatcher
 
 class Dispatcher:
-    def __init__(self, store: Store, claude=None, gh=None, spawn_review=None):
+    def __init__(self, store: Store, claude=None, gh=None, spawn_review=None, spawn_plan_check=None):
         """claude, gh и запуск фонового ревью можно подменить (тесты): по умолчанию — настоящие."""
         self.spawn_review = spawn_review or spawn_review_process
+        self.spawn_plan_check = spawn_plan_check or spawn_plan_check_process
         self.store = store
         self.root = store.root
         self.claude = claude or Claude(self.root)
@@ -2489,6 +2521,8 @@ class Dispatcher:
                     t["complexity"] = rep["complexity"]
                 self.save_notes(t, rep)
                 t["plan_seen_at"] = iso()
+                if self.start_plan_check(t):
+                    return
                 self.set_state(t, "plan_review", "обсуждение: договорились, план готов")
                 self.emit(t, "plan_ready", f"{t['id']}: обсуждение завершено, план готов — PR #{t['pr']}",
                           key=f"plan:{rep['rid']}")
@@ -2604,6 +2638,8 @@ class Dispatcher:
                 t["complexity"] = cx if cx in ("simple", "complex") else "simple"
                 self.save_notes(t, rep)
                 t["plan_seen_at"] = iso()
+                if self.start_plan_check(t):
+                    return
                 self.set_state(t, "plan_review")
                 self.emit(t, "plan_ready", f"{t['id']}: план готов к обсуждению — PR #{t['pr']}",
                           key=f"plan:{rep['rid']}")
@@ -2661,6 +2697,84 @@ class Dispatcher:
         elif failed:
             self.to_human(t, "; ".join(failed) + " — пакет мог не опубликоваться", "deps")
         return bool(gone or failed)
+
+    def start_plan_check(self, t: dict) -> bool:
+        """План готов: сначала его смотрит ревьюер (plan_check в конфиге), пользователь — после."""
+        if str(self.cfg.get("plan_check") or "off").lower() == "off":
+            return False
+        t["plan_check"] = {"phase": "queued", "runs": 0}
+        self.set_state(t, "plan_check", "план готов: ревью плана")
+        return True
+
+    def plan_checked(self, t: dict, note: str) -> None:
+        """Ревью плана закончено (или не удалось): план идёт к пользователю в любом случае."""
+        pc = t.setdefault("plan_check", {})
+        pc.update(phase="done", note=note)
+        pc.pop("pid", None)
+        self.set_state(t, "plan_review", f"ревью плана: {note}")
+        self.emit(t, "plan_ready", f"{t['id']}: план готов к обсуждению — PR #{t['pr']}. Ревью плана: {note}",
+                  key=f"plan:check:{pc.get('started_at') or iso()}")
+
+    def adv_plan_check(self, t: dict) -> None:
+        """Ревью плана до пользователя. queued → reviewing (ревьюер opencode) → answering (планировщик
+        отвечает на замечания, один ход) → plan_review. Советующее: любой сбой ведёт к plan_review."""
+        pc = t.setdefault("plan_check", {})
+        state = self.gh.pr(t["pr"], "state").get("state")
+        if state in ("CLOSED", "MERGED"):
+            self.set_state(t, "cancelled", "PR закрыт на стадии плана")
+            self.emit(t, "cancelled", f"{t['id']}: PR с планом закрыт, задача снята", key="cancelled")
+            return
+        e = self.cur(t, "planner")
+        path = self.store.plan_review_path(t["id"])
+        phase = pc.get("phase") or "queued"
+        if phase == "queued":
+            if self.sstate(e) == "working":
+                return  # планировщик ещё дописывает план: ревьюер прочитал бы незаконченный текст
+            path.unlink(missing_ok=True)
+            cwd = (e or {}).get("cwd") or (self.sess(e) or {}).get("cwd")
+            pid = self.spawn_plan_check(self.store, t, cwd if cwd and Path(cwd).is_dir() else str(self.root))
+            if not pid:
+                return self.plan_checked(t, "не удалось запустить ревьюера")
+            pc.update(phase="reviewing", pid=pid, started_at=iso(), runs=int(pc.get("runs") or 0) + 1)
+            return
+        if phase == "reviewing":
+            res = read_json(path, None)
+            if not isinstance(res, dict):
+                if pid_alive(int(pc.get("pid") or 0)) and age_minutes(pc.get("started_at")) < 60:
+                    return
+                return self.plan_checked(t, "ревьюер не дал ответа")
+            findings = [f for f in res.get("findings") or [] if isinstance(f, dict)]
+            if res.get("status") == "error":
+                return self.plan_checked(t, "не удалось — " + short_reason(res.get("message") or "ошибка ревьюера", 160))
+            if not findings:
+                return self.plan_checked(t, "замечаний нет")
+            pc["findings"] = len(findings)
+            if self.sstate(e) == "working":
+                return
+            self.new_report(t, "planner")  # отчёт, пришедший во время ревью (дополнение), — не ответ на замечания
+            if not self.wake(t, "planner", plan_check_prompt(t, res)):
+                return self.plan_checked(t, f"замечаний: {len(findings)}, планировщика разбудить не удалось — "
+                                         "они в комментарии к PR")
+            pc.update(phase="answering", asked_at=iso())
+            return
+        if phase == "answering":
+            n = pc.get("findings") or 0
+            rep = self.new_report(t, "planner")
+            if rep and rep.get("status") == "plan_ready":
+                if rep.get("complexity") in ("simple", "complex"):
+                    t["complexity"] = rep["complexity"]
+                self.save_notes(t, rep)
+                if int(pc.get("runs") or 0) < int(self.cfg.get("plan_check_rounds") or 1):
+                    pc["phase"] = "queued"  # ревьюер смотрит исправленный план ещё раз
+                    return
+                return self.plan_checked(t, f"замечаний: {n}, планировщик ответил на них в PR")
+            if rep and rep.get("status") in ("error", "blocked"):
+                return self.to_human(t, rep.get("summary") or "планировщик сообщил о проблеме", "asks")
+            wait = float(self.cfg.get("plan_check_wait_minutes") or 20)
+            if self.sstate(e) != "working" and not self.fresh(e) and age_minutes(pc.get("asked_at")) > wait:
+                return self.plan_checked(t, f"замечаний: {n}, планировщик не ответил — они в комментарии к PR")
+            return
+        self.plan_checked(t, pc.get("note") or "завершено")
 
     def adv_plan_review(self, t: dict) -> None:
         pr = self.gh.pr(t["pr"], "state,labels,comments")
@@ -3333,8 +3447,16 @@ def cmd_intake_rules(args, root: Path | None) -> int:
 
 # ---------------------------------------------------------------- status / state for UI
 
+def plan_check_activity(t: dict) -> str:
+    """Чем занято ревью плана — строка под названием задачи в панели."""
+    pc = t.get("plan_check") or {}
+    return {"reviewing": "ревьюер проверяет план",
+            "answering": f"планировщик отвечает на замечания ревьюера ({pc.get('findings') or 0})",
+            }.get(pc.get("phase") or "", "план ждёт ревьюера")
+
+
 STAGE_LABEL = {
-    "new": "в очереди", "discussing": "обсуждение идеи", "answered": "ответ дан", "planning": "планирование", "plan_review": "обсуждение плана",
+    "new": "в очереди", "discussing": "обсуждение идеи", "answered": "ответ дан", "planning": "планирование", "plan_check": "ревью плана", "plan_review": "обсуждение плана",
     "approved": "ждёт исполнителя", "in_progress": "реализация", "ready": "ждёт ревью", "in_review": "ревью",
     "merged": "смержено", "done": "выполнено", "needs_human": "нужен человек", "cancelled": "снята",
 }
@@ -3384,7 +3506,7 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
                     last_stage = STAGES.index(h["from"])
                     break
         doing_self = st == "planning" and t.get("route") == "self"
-        stage = STAGES.index("in_progress") if doing_self else STAGES.index("planning") if st in ("discussing", "answered") else STAGES.index("plan_review") if st == "approved" else STAGES.index("merged") if st == "done" else STAGES.index(st) if st in STAGES else last_stage
+        stage = STAGES.index("in_progress") if doing_self else STAGES.index("planning") if st in ("discussing", "answered", "plan_check") else STAGES.index("plan_review") if st == "approved" else STAGES.index("merged") if st == "done" else STAGES.index(st) if st in STAGES else last_stage
         # Вопрос или обсуждение без PR дальше «плана» не идёт: остальные шаги доски к нему не относятся,
         # и панель их не рисует. Появился PR — задача идёт обычным путём, и шаги показываются все.
         last_station = STAGES.index("planning") if t.get("kind") in TALK_KINDS and not pr else None
@@ -3405,6 +3527,7 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
             "activity": ("планировщик делает сам, PR появится по готовности"
                          + (f". Что делает: {t['route_note']}" if t.get("route_note") else "")) if doing_self
                         else ("ждёт задачу: " + ", ".join(waits_for)) if waits_for
+                        else plan_check_activity(t) if st == "plan_check"
                         else review_activity(store, t, cur.get("state"), int(cfg["max_rounds"])),
             "waits_for": waits_for,
             "ci": t.get("ci") if st in ("ready", "in_review") else None,
@@ -3999,7 +4122,7 @@ def cmd_amend(args, root: Path) -> int:
     queue_or_apply(store, {"cmd": "amend", "id": args.id, "text": text, "source": "cli"})
     print(f"{args.id}: дополнение принято — его получит "
           + ("сессия вопроса или обсуждения" if t.get("state") in ("discussing", "answered") else
-             "планировщик" if t.get("state") in ("new", "planning", "plan_review") and not t.get("plan_approved")
+             "планировщик" if t.get("state") in ("new", "planning", "plan_check", "plan_review") and not t.get("plan_approved")
              else "исполнитель") + ".")
     return 0
 
@@ -4436,6 +4559,11 @@ def cmd_review(args, root: Path) -> int:
     return review.main(["--pr", str(args.pr)])
 
 
+def cmd_review_plan(args, root: Path) -> int:
+    import review
+    return review.plan_main(["--pr", str(args.pr)])
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
@@ -4520,6 +4648,8 @@ def main(argv: list[str] | None = None) -> int:
     rp.add_argument("--body-file", required=True)
     rv = sub.add_parser("review", help="один раунд ревью PR")
     rv.add_argument("--pr", type=int, required=True)
+    rp = sub.add_parser("review-plan", help=argparse.SUPPRESS)  # ревью плана: запускает очередь
+    rp.add_argument("--pr", type=int, required=True)
     sub.add_parser("intake-rules", help=argparse.SUPPRESS)
     sub.add_parser("chat", help="чат с координатором проекта в этом терминале; вкладка названа именем проекта")
     u = sub.add_parser("ui", help="панель в браузере")
@@ -4545,7 +4675,7 @@ def main(argv: list[str] | None = None) -> int:
         handlers = {
             "init": cmd_init, "enqueue": cmd_enqueue, "report": cmd_report, "status": cmd_status,
             "tick": cmd_tick, "run": cmd_run, "pause": cmd_pause, "resume": cmd_resume,
-            "retry": cmd_retry, "cancel": cmd_cancel, "allow-path": cmd_allow_path, "after": cmd_after, "model": cmd_model, "approve": cmd_approve, "amend": cmd_amend, "reply": cmd_reply, "review": cmd_review,
+            "retry": cmd_retry, "cancel": cmd_cancel, "allow-path": cmd_allow_path, "after": cmd_after, "model": cmd_model, "approve": cmd_approve, "amend": cmd_amend, "reply": cmd_reply, "review": cmd_review, "review-plan": cmd_review_plan,
             "ui": cmd_ui, "chat": cmd_chat, "stop": cmd_stop,
         }
         return handlers[args.cmd](args, root)

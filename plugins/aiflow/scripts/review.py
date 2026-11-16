@@ -355,11 +355,11 @@ REVIEWER_PERMISSION = {
 }
 
 
-def reviewer_prompt(root: Path) -> str:
+def reviewer_prompt(root: Path, name: str = "reviewer") -> str:
     """Инструкции ревьюера: своя версия проекта (.opencode/aiflow-reviewer.md), иначе шаблон
     плагина. Старая копия .opencode/agent/reviewer.md от aiflow init не используется: в ней
-    устаревший формат ответа. Frontmatter отбрасывается."""
-    for p in (root / ".opencode" / "aiflow-reviewer.md", aiflow.TEMPLATES / "reviewer.md"):
+    устаревший формат ответа. Frontmatter отбрасывается. name — reviewer (код) или plan-reviewer (план)."""
+    for p in (root / ".opencode" / f"aiflow-{name}.md", aiflow.TEMPLATES / f"{name}.md"):
         try:
             text = p.read_text(encoding="utf-8")
         except OSError:
@@ -370,11 +370,12 @@ def reviewer_prompt(root: Path) -> str:
     raise RuntimeError("нет инструкций ревьюера: шаблон плагина не найден")
 
 
-def reviewer_config(r: Runner, tmp: Path) -> dict:
+def reviewer_config(r: Runner, tmp: Path, name: str = "reviewer") -> dict:
     """Окружение opencode с агентом aiflow-reviewer из отдельного конфига: в репозиторий ничего
     не пишется, и агент не путается с собственным reviewer проекта (.opencode/agent(s)/reviewer.md)."""
-    prompt = tmp / "aiflow-reviewer.md"
-    prompt.write_text(reviewer_prompt(r.cwd), encoding="utf-8")
+    agent = f"aiflow-{name}"
+    prompt = tmp / f"{agent}.md"
+    prompt.write_text(reviewer_prompt(r.cwd, name), encoding="utf-8")
     cfg: dict = {}
     user_cfg = r.plain_env.get("OPENCODE_CONFIG")
     if user_cfg:
@@ -382,7 +383,7 @@ def reviewer_config(r: Runner, tmp: Path) -> dict:
             cfg = json.loads(Path(user_cfg).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             cfg = {}
-    cfg.setdefault("agent", {})[AGENT] = {
+    cfg.setdefault("agent", {})[agent] = {
         "description": "Read-only ревьюер pull request'ов aiflow. Возвращает только JSON.",
         "mode": "primary",
         "prompt": "{file:" + prompt.as_posix() + "}",
@@ -545,15 +546,20 @@ def record_reviewer(root: Path | None, task: dict | None, entry: dict) -> None:
 
 
 def call_reviewer(r: Runner, pr: int, rnd: int, max_rounds: int, model: str, brief: str, tmp: Path,
-                  idle_minutes: float = 5, timeout_minutes: float = 45) -> dict:
+                  idle_minutes: float = 5, timeout_minutes: float = 45, plan: bool = False) -> dict:
+    """plan — ревью плана, а не кода: свой агент и инструкции (plan-reviewer), в ответе ключ findings."""
     # Задание — через stdin: история ревью бывает длиннее лимита командной строки Windows (~32k),
     # а файл во временной папке лежит вне проекта, и opencode отклоняет его чтение (external_directory).
     message = (f"Review pull request #{pr}, round {rnd} of {max_rounds}. The brief follows this message: read the "
                "plan and the diff yourself as it says. Reply with exactly one JSON object following your instructions.")
+    if plan:
+        message = (f"Review the plan in pull request #{pr}. The brief follows this message: read the plan and the "
+                   "repository yourself as it says. Reply with exactly one JSON object following your instructions.")
     materials = brief
-    env = reviewer_config(r, tmp)
-    cmd = [r.opencode, "run", message, "--agent", AGENT, "--format", "json",
-           "--title", f"aiflow: ревью PR #{pr}, раунд {rnd}"]
+    name, key = ("plan-reviewer", "findings") if plan else ("reviewer", "comments")
+    env = reviewer_config(r, tmp, name)
+    cmd = [r.opencode, "run", message, "--agent", f"aiflow-{name}", "--format", "json",
+           "--title", f"aiflow: ревью плана PR #{pr}" if plan else f"aiflow: ревью PR #{pr}, раунд {rnd}"]
     if model:
         cmd += ["--model", model]
     last = err = ""
@@ -567,7 +573,7 @@ def call_reviewer(r: Runner, pr: int, rnd: int, max_rounds: int, model: str, bri
             doing = tool_note(part) if ev.get("type") == "tool_use" else None
             if doing or ev.get("type") == "step_finish":
                 u = events_usage(seen)
-                set_phase("reviewer", round=rnd, session=ev.get("sessionID"), steps=u["steps"],
+                set_phase("plan_reviewer" if plan else "reviewer", round=rnd, session=ev.get("sessionID"), steps=u["steps"],
                           tokens=u["input"] + u["output"] + u["cache_write"],
                           doing=doing or (CTX.get("phase") or (None, {}))[1].get("doing"))
 
@@ -581,11 +587,11 @@ def call_reviewer(r: Runner, pr: int, rnd: int, max_rounds: int, model: str, bri
             if usage["steps"] or session:
                 record_reviewer(CTX["root"], CTX["task"], {
                     "session": session, "round": rnd, "attempt": attempt, "at": started, "pr": pr,
-                    "model": model or "opencode", "dir": str(r.cwd), **usage})
+                    "model": model or "opencode", "dir": str(r.cwd), **({"kind": "plan"} if plan else {}), **usage})
                 CTX["reviewer_session"] = session
         last = events_text(events) or other
         data = extract_json(last)
-        if data is not None and "comments" in data:
+        if data is not None and key in data:
             return data
         if code != 0 and not last.strip() and "--pure" not in cmd:
             # opencode упал до ответа модели. Бывает, что в каталоге проекта ломается один из
@@ -833,6 +839,114 @@ def pause_message(reasons: list[str]) -> str:
 
 
 # ------------------------------------------------------------------ main
+
+PLAN_REVIEW_MARKER = "<!-- aiflow:plan-review -->"  # начинается с «<!-- aiflow»: очередь не считает его комментарием человека
+PLAN_SEVERITIES = ("blocking", "question", "nit")
+
+
+def plan_brief(n: int, pr: dict, base: str, task: dict | None, others: list[dict]) -> str:
+    """Задание ревьюеру плана: план и код он читает сам, здесь — текст задачи и соседние задачи."""
+    out = (f"# Plan in PR #{n}: {pr.get('title', '')}\n\nBase branch: {base}. The current directory is the repository. "
+           f"The PR has no code changes yet: it carries only the plan. Read the plan: `gh pr view {n}`. Then read "
+           "the repository files that the plan names, to check its statements about the code.\n")
+    text = str((task or {}).get("text") or "").strip()
+    if text:
+        out += "\n# Task text (what the user asked for)\n\n" + text + "\n"
+    amend = format_amendments(task)
+    if amend:
+        out += "\n" + amend
+    if others:
+        out += ("\n# Other tasks in work\n\nA plan that changes the same area as one of them needs a note in "
+                "\"Risks and overlaps\".\n\n" + "\n".join(f"- {o['id']}: {o.get('title', '')}" for o in others) + "\n")
+    return out
+
+
+def normalize_plan(data: dict) -> tuple[list[dict], str]:
+    """Замечания ревьюера плана. Неизвестная серьёзность считается blocking: планировщик на неё ответит."""
+    findings = []
+    for f in data.get("findings") or []:
+        if not isinstance(f, dict) or not str(f.get("text") or "").strip():
+            continue
+        sev = str(f.get("severity") or "").strip().lower()
+        findings.append({"severity": sev if sev in PLAN_SEVERITIES else "blocking",
+                         "section": str(f.get("section") or "").strip(), "text": str(f["text"]).strip()})
+    return findings, str(data.get("summary") or "").strip()
+
+
+def format_plan_findings(findings: list[dict]) -> str:
+    return "\n".join(f"{i}. [{f['severity']}]" + (f" ({f['section']})" if f["section"] else "") + f" {f['text']}"
+                     for i, f in enumerate(findings, 1))
+
+
+def format_plan_body(findings: list[dict], summary: str) -> str:
+    head = "замечаний нет" if not findings else f"замечаний: {len(findings)}"
+    parts = [PLAN_REVIEW_MARKER, f"**AI-ревью плана**: {head}", ""]
+    if summary:
+        parts += [summary, ""]
+    if findings:
+        parts += [format_plan_findings(findings), "",
+                  "Замечания советующие: планировщик ответит на каждое, решение об одобрении плана — за вами."]
+    return "\n".join(parts)
+
+
+def plan_main(argv: list[str] | None = None) -> int:
+    """Ревью плана до того, как его увидит пользователь (`aiflow review-plan --pr N`, запускает очередь).
+    Итог — в .aiflow/<id>/plan-review.json и комментарием в PR. Ничего не блокирует: сбой — тоже итог."""
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    ap = argparse.ArgumentParser(description="AI-ревью плана в pull request'е")
+    ap.add_argument("--pr", type=int, required=True)
+    args = ap.parse_args(argv)
+    CTX["pr"] = args.pr
+    try:
+        root = aiflow.repo_root()
+    except aiflow.AiflowError as e:
+        sys.stdout.write(json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False) + "\n")
+        return 1
+    CTX["root"] = root
+    store = aiflow.Store(root)
+    cfg = store.config()
+    CTX["task"] = task = find_task(root, args.pr)
+
+    def done(status: str, **data) -> int:
+        out = {"at": aiflow.iso(), "pr": args.pr, "status": status, **data}
+        set_phase(None)
+        if task:
+            try:
+                aiflow.write_json(store.plan_review_path(task["id"]), out)
+            except OSError as e:
+                out["write_error"] = str(e)
+        sys.stdout.write(json.dumps(out, ensure_ascii=False, indent=2) + "\n")
+        return 0 if status != "error" else 1
+
+    gh, oc = shutil.which("gh"), shutil.which("opencode")
+    if not gh or not oc:
+        return done("error", message="нужны gh и opencode в PATH")
+    r = Runner(gh, oc, None, Path.cwd())
+    tmp = Path(tempfile.mkdtemp(prefix="aiflow-plan-review-"))
+    try:
+        pr = r.gh_json("pr", "view", str(args.pr), "--json", "state,title")
+        if pr.get("state") != "OPEN":
+            return done("error", message=f"PR #{args.pr} не открыт: {pr.get('state')}")
+        tid = task["id"] if task else None
+        others = [o for o in store.tasks() if o["id"] != tid and o.get("state") not in aiflow.TERMINAL
+                  and o.get("kind") not in aiflow.TALK_KINDS]
+        brief = plan_brief(args.pr, pr, cfg["base_branch"], task, others)
+        data = call_reviewer(r, args.pr, 1, 1, cfg.get("reviewer_model") or "", brief, tmp,
+                             idle_minutes=float(cfg.get("reviewer_idle_minutes") or 5), plan=True)
+        findings, summary = normalize_plan(data)
+        body = tmp / "plan-review.md"
+        body.write_text(format_plan_body(findings, summary), encoding="utf-8")
+        posted = r.gh_run("pr", "comment", str(args.pr), "--body-file", str(body), check=False).returncode == 0
+        return done("findings" if findings else "ok", summary=summary, findings=findings, posted=posted,
+                    session=CTX.get("reviewer_session"))
+    except Exception as e:  # сбой ревью плана не должен держать задачу: очередь покажет план пользователю
+        return done("error", message=str(e)[:600])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
 
 def main(argv: list[str] | None = None) -> int:
     try:

@@ -661,6 +661,157 @@ class NeedsHuman(ProjectCase):
         self.assertEqual(aiflow.short_reason(None), "")
 
 
+class PlanCheck(ProjectCase):
+    """Ревью плана другой моделью до того, как план увидит пользователь."""
+
+    config = {"plan_check": "advisory"}
+
+    def plan(self, tid: str = "a", pr: int = 7) -> None:
+        self.add(tid)
+        self.tick()
+        self.gh.add_pr(pr, tid, body=PLAN)
+        self.report(tid, "planner", "plan_ready", pr, complexity="complex")
+        self.claude.finish_turn(self.sid(tid, "planner"))
+
+    def result(self, tid: str = "a", **data) -> None:
+        aiflow.write_json(self.store.plan_review_path(tid), {"at": aiflow.iso(), "pr": 7, **data})
+
+    def finding(self, text: str = "функции parse_x нет в src/a.py", severity: str = "blocking") -> dict:
+        return {"severity": severity, "section": "Files", "text": text}
+
+    def test_plan_goes_to_the_reviewer_before_the_user(self):
+        self.plan()
+        events = self.tick()
+        self.assertEqual(self.state("a"), "plan_check")
+        self.assertNotIn("plan_ready", self.kinds(events))  # пользователю о плане ещё не сообщали
+        self.tick()
+        self.assertEqual([c["task"] for c in self.plan_checks], ["a"])
+        row = aiflow.build_state(self.store)["tasks"][0]
+        self.assertEqual((row["label"], row["activity"], row["needs"]), ("ревью плана", "ревьюер проверяет план", None))
+
+    def test_clean_plan_goes_to_the_user_with_the_verdict(self):
+        self.plan()
+        self.tick()
+        self.tick()
+        self.result(status="ok", summary="план в порядке", findings=[])
+        events = self.tick()
+        self.assertEqual(self.state("a"), "plan_review")
+        ready = [e for e in events if e["kind"] == "plan_ready"]
+        self.assertEqual(len(ready), 1)
+        self.assertIn("замечаний нет", ready[0]["text"])
+        self.assertEqual(self.claude.resumed, [])  # планировщика не будили
+
+    def test_findings_wake_the_planner_once_then_the_plan_goes_to_the_user(self):
+        self.plan()
+        self.tick()
+        self.tick()
+        self.result(status="findings", summary="есть ошибка", findings=[self.finding(), self.finding("а так?", "question")])
+        events = self.tick()
+        self.assertEqual(self.state("a"), "plan_check")
+        self.assertNotIn("plan_ready", self.kinds(events))
+        prompt = self.claude.resumed[-1]["prompt"]
+        self.assertIn("функции parse_x нет", prompt)
+        self.assertIn("[question]", prompt)
+        self.assertEqual(aiflow.build_state(self.store)["tasks"][0]["activity"],
+                         "планировщик отвечает на замечания ревьюера (2)")
+        self.report("a", "planner", "plan_ready", 7, summary="исправил файл")
+        self.claude.finish_turn(self.sid("a", "planner"))
+        events = self.tick()
+        self.assertEqual(self.state("a"), "plan_review")
+        text = next(e["text"] for e in events if e["kind"] == "plan_ready")
+        self.assertIn("замечаний: 2, планировщик ответил", text)
+        self.assertEqual(len(self.plan_checks), 1)  # второй раз ревьюер план не смотрит
+        self.assertEqual(len(self.claude.resumed), 1)
+
+    def test_second_round_when_configured(self):
+        cfg = aiflow.read_json(self.root / ".aiflow" / "config.json")
+        aiflow.write_json(self.root / ".aiflow" / "config.json", {**cfg, "plan_check_rounds": 2})
+        self.plan()
+        self.tick()
+        self.tick()
+        self.result(status="findings", findings=[self.finding()])
+        self.tick()
+        self.report("a", "planner", "plan_ready", 7, summary="исправил")
+        self.claude.finish_turn(self.sid("a", "planner"))
+        self.tick()
+        self.assertEqual(self.state("a"), "plan_check")
+        self.tick()
+        self.assertEqual(len(self.plan_checks), 2)
+        self.assertFalse(self.store.plan_review_path("a").exists())  # прежний итог убран перед новым прогоном
+        self.result(status="ok", findings=[])
+        self.tick()
+        self.assertEqual(self.state("a"), "plan_review")
+
+    def test_reviewer_failure_does_not_hold_the_plan(self):
+        self.plan()
+        self.tick()
+        self.tick()
+        self.result(status="error", message="нужны gh и opencode в PATH")
+        events = self.tick()
+        self.assertEqual(self.state("a"), "plan_review")
+        self.assertIn("не удалось", next(e["text"] for e in events if e["kind"] == "plan_ready"))
+
+    def test_reviewer_that_died_without_a_result_does_not_hold_the_plan(self):
+        self.spawn_pid = 2 ** 22 + 12345  # такого процесса нет
+        self.plan()
+        self.tick()
+        self.tick()
+        self.tick()
+        self.assertEqual(self.state("a"), "plan_review")
+
+    def test_reviewer_that_cannot_start_does_not_hold_the_plan(self):
+        self.spawn_pid = None
+        self.plan()
+        self.tick()
+        self.tick()
+        self.assertEqual(self.state("a"), "plan_review")
+
+    def test_silent_planner_does_not_hold_the_plan(self):
+        self.plan()
+        self.tick()
+        self.tick()
+        self.result(status="findings", findings=[self.finding()])
+        self.tick()
+        self.claude.finish_turn(self.sid("a", "planner"))  # закончил ход без отчёта
+        self.tick()
+        self.assertEqual(self.state("a"), "plan_check")  # ещё ждём
+        t = self.task("a")
+        t["plan_check"]["asked_at"] = ago(30)
+        for e in t["sessions"]["planner"]:
+            e.pop("resumed_at", None)
+        self.store.save_task(t)
+        events = self.tick()
+        self.assertEqual(self.state("a"), "plan_review")
+        self.assertIn("планировщик не ответил", next(e["text"] for e in events if e["kind"] == "plan_ready"))
+
+    def test_closed_pr_cancels_the_task(self):
+        self.plan()
+        self.tick()
+        self.gh.prs[7]["state"] = "CLOSED"
+        self.tick()
+        self.assertEqual(self.state("a"), "cancelled")
+
+    def test_off_skips_the_check(self):
+        cfg = aiflow.read_json(self.root / ".aiflow" / "config.json")
+        aiflow.write_json(self.root / ".aiflow" / "config.json", {**cfg, "plan_check": "off"})
+        self.plan()
+        events = self.tick()
+        self.assertEqual(self.state("a"), "plan_review")
+        self.assertIn("plan_ready", self.kinds(events))
+        self.assertEqual(self.plan_checks, [])
+
+    def test_approval_after_the_check_starts_the_worker(self):
+        self.plan()
+        self.tick()
+        self.tick()
+        self.result(status="ok", findings=[])
+        self.tick()
+        self.gh.add_label(7, "plan-approved")
+        self.tick()
+        self.assertEqual(self.state("a"), "in_progress")
+        self.assertEqual(self.claude.launched[-1]["agent"], "aiflow:worker")
+
+
 class TaskDates(ProjectCase):
     def test_state_gives_the_creation_time_and_the_last_change(self):
         self.add("a")

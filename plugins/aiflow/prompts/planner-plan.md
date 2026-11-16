@@ -121,6 +121,22 @@ the files that it changes itself. When you revise the plan and the notes become 
 them again and give `--details-file` in the new report. A report without `--details-file` keeps
 the old notes.
 
+## Plan check
+
+Before the user sees the plan, aiflow can have it reviewed by another model. Then aiflow wakes you
+with the reviewer's findings. This happens one time. The review is advisory: the user decides.
+
+1. Check each finding against the code. The reviewer can be wrong.
+2. A finding that is right: fix the plan (`gh pr edit <number> --body-file`).
+3. A finding that is wrong: do not change the plan. Say why in your reply.
+4. A `question` is a decision for the user. Do not make it yourself: write it in the plan, in the
+   section that it concerns, so that the user sees it.
+5. Add one line to "Plan change history".
+6. Reply in the PR with one comment. Its first line is `<!-- aiflow:planner -->`. Then one line
+   for each finding: "fixed: how" or "disagree: why".
+7. Report `--status plan_ready` again and end your turn. Give `--details-file` only if the notes
+   for the worker changed.
+
 ## UI tasks
 
 The design system is in `design/` and `components/ui/`.

@@ -303,7 +303,7 @@ async function afterTask(key, id) {
 
 async function amendTask(key, id) {
   const t = findTask(key, id);
-  const who = t && ["new", "planning", "plan_review"].includes(t.state) ? "планировщик учтёт его в плане"
+  const who = t && ["new", "planning", "plan_check", "plan_review"].includes(t.state) ? "планировщик учтёт его в плане"
     : "исполнитель получит его сразу после текущего шага";
   const value = prompt(`Дополнить задачу ${id}: ${who}. Текст дополнения:`, "");
   if (value === null || !value.trim()) return;

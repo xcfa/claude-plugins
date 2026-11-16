@@ -479,7 +479,7 @@ class Reviewer(ProjectCase):
             real_phase(phase, **detail)
 
         # вместо «opencode run …» запускаем подделку, остальное (каналы, окружение) — как в жизни
-        with mock.patch.object(review, "reviewer_config", lambda r, tmp: None), mock.patch.object(review, "set_phase", spy), \
+        with mock.patch.object(review, "reviewer_config", lambda r, tmp, name="reviewer": None), mock.patch.object(review, "set_phase", spy), \
                 mock.patch.object(review.subprocess, "Popen", lambda c, **kw: real_popen(cmd, **kw)):
             data = review.call_reviewer(r, 7, 1, 5, "opencode-go/deepseek", "brief", self.tmp)
         self.assertEqual(data["summary"], "ок")
@@ -518,3 +518,97 @@ class Streak(ProjectCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PlanReviewMain(ProjectCase):
+    """aiflow review-plan: ревьюер плана на подделках gh и opencode."""
+
+    def setUp(self):
+        super().setUp()
+        t = self.add("a")
+        t.update(state="plan_check", pr=1, text="сделать экспорт в CSV")
+        self.store.save_task(t)
+        other = self.add("b")
+        other.update(state="in_progress", title="Импорт")
+        self.store.save_task(other)
+        done = self.add("c")
+        done.update(state="merged")
+        self.store.save_task(done)
+        self.r = FakeRunner(self)
+        self.comments: list[str] = []
+        real = self.r.gh_run
+
+        def gh_run(*args, **kw):
+            a = [str(x) for x in args]
+            if a[:2] == ["pr", "comment"]:
+                self.comments.append(review.Path(a[a.index("--body-file") + 1]).read_text(encoding="utf-8"))
+                return out()
+            return real(*args, **kw)
+
+        self.r.gh_run = gh_run
+        self.answer: dict | Exception = {"summary": "ок", "findings": []}
+        self.calls: list[dict] = []
+
+        def reviewer(r, pr, rnd, max_rounds, model, brief, tmp, **kw):
+            self.calls.append({"brief": brief, **kw})
+            if isinstance(self.answer, Exception):
+                raise self.answer
+            return self.answer
+
+        for p in (mock.patch.object(review, "Runner", lambda *a, **k: self.r),
+                  mock.patch.object(review, "call_reviewer", reviewer),
+                  mock.patch.object(review.shutil, "which", lambda name: name),
+                  mock.patch.object(aiflow, "repo_root", lambda *a, **k: self.root)):
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(lambda: review.CTX.update(root=None, task=None, pr=None, round=None, phase=None))
+
+    def run_plan(self) -> tuple[int, dict]:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = review.plan_main(["--pr", "1"])
+        return code, json.loads(buf.getvalue())
+
+    def test_clean_plan(self):
+        code, res = self.run_plan()
+        self.assertEqual((code, res["status"], res["findings"]), (0, "ok", []))
+        self.assertEqual(aiflow.read_json(self.store.plan_review_path("a"))["status"], "ok")
+        self.assertTrue(self.calls[0]["plan"])
+        brief = self.calls[0]["brief"]
+        self.assertIn("сделать экспорт в CSV", brief)  # текст задачи: с ним ревьюер сверяет план
+        self.assertIn("- b: Импорт", brief)  # задачи в работе — для пересечений
+        self.assertNotIn("- c:", brief)  # законченные не мешают
+        self.assertTrue(self.comments[0].startswith(review.PLAN_REVIEW_MARKER))
+        self.assertTrue(any(m in self.comments[0] for m in aiflow.MARKERS))  # очередь не примет его за комментарий человека
+
+    def test_findings_are_written_and_posted(self):
+        self.answer = {"summary": "есть ошибка", "findings": [
+            {"severity": "blocking", "section": "Files", "text": "нет src/x.py"},
+            {"severity": "странное", "text": "без раздела"}, {"severity": "nit", "text": "  "}, "мусор"]}
+        code, res = self.run_plan()
+        self.assertEqual((code, res["status"]), (0, "findings"))
+        saved = aiflow.read_json(self.store.plan_review_path("a"))["findings"]
+        self.assertEqual([f["severity"] for f in saved], ["blocking", "blocking"])  # неизвестная серьёзность — blocking
+        self.assertIn("1. [blocking] (Files) нет src/x.py", self.comments[0])
+        self.assertIn("замечаний: 2", self.comments[0])
+
+    def test_reviewer_error_is_a_result_too(self):
+        self.answer = RuntimeError("ревьюер не вернул валидный JSON")
+        code, res = self.run_plan()
+        self.assertEqual((code, res["status"]), (1, "error"))
+        self.assertIn("валидный JSON", aiflow.read_json(self.store.plan_review_path("a"))["message"])
+        self.assertEqual(self.comments, [])
+
+    def test_closed_pr_is_an_error(self):
+        self.r.pr["state"] = "CLOSED"
+        code, res = self.run_plan()
+        self.assertEqual(res["status"], "error")
+        self.assertEqual(self.calls, [])
+
+
+class PlanReviewerFiles(unittest.TestCase):
+    def test_the_plan_reviewer_has_its_own_instructions_and_agent(self):
+        text = review.reviewer_prompt(review.Path("/nonexistent"), "plan-reviewer")
+        self.assertIn("findings", text)
+        self.assertNotIn("permission:", text)  # frontmatter отброшен
+        self.assertNotEqual(text, review.reviewer_prompt(review.Path("/nonexistent")))
