@@ -41,6 +41,9 @@ button.link { background: none; border: 0; padding: 0; font-size: 12.5px; margin
 header { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; flex-wrap: wrap; margin-bottom: 28px; }
 header h1 { font-size: 26px; font-weight: 650; letter-spacing: -0.01em; margin: 0; }
 header .sub { color: var(--muted); margin-top: 2px; }
+header .tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+header .tools label { color: var(--muted); font-size: 13px; }
+header .tools select { font: inherit; font-size: 13px; color: var(--ink); background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 4px 8px; }
 header .sub b { font-weight: 600; color: var(--ink); }
 .queue { display: flex; align-items: center; gap: 12px; }
 .queue .state { color: var(--muted); }
@@ -188,7 +191,19 @@ button:disabled:hover { border-color: var(--rule); }
     <h1 id="title">aiflow</h1>
     <div class="sub" id="sub">загрузка…</div>
   </div>
+  <div class="tools">
+    <label for="sortby">Порядок задач</label>
+    <select id="sortby" title="Порядок задач на доске и в расходе токенов">
+      <option value="auto">обычный</option>
+      <option value="updated">по времени обновления</option>
+      <option value="created">по дате создания</option>
+      <option value="title">по названию</option>
+      <option value="tokens">по токенам</option>
+      <option value="cost">по цене, $</option>
+    </select>
+    <button type="button" id="sortdir" hidden></button>
   <button type="button" id="install" hidden title="Панель станет отдельным приложением: своё окно, значок на панели задач и в меню «Пуск», счётчик задач, которые ждут вас">Установить приложение</button>
+  </div>
 </header>
 
 <section id="waiting" hidden>
@@ -429,6 +444,43 @@ function newestCreatedFirst(a, b) {
   return String(b.created_at || b.updated_at || "").localeCompare(String(a.created_at || a.updated_at || ""));
 }
 
+// порядок задач, выбранный в шапке; «обычный» — у каждого списка свой (fallback), он же разрешает равенство
+const SORT_KEYS = {
+  updated: t => String(t.updated_at || t.created_at || ""),
+  created: t => String(t.created_at || t.updated_at || ""),
+  title: t => String(t.title || t.id || "").toLowerCase(),
+  tokens: t => t.tokens || 0,
+  cost: t => t.cost || 0,
+};
+let sortBy = "auto", sortDesc = true;
+try {
+  const saved = JSON.parse(localStorage.getItem("aiflow.sort") || "{}");
+  if (SORT_KEYS[saved.by]) { sortBy = saved.by; sortDesc = saved.desc !== false; }
+} catch (e) {}
+function taskOrder(fallback) {
+  const key = SORT_KEYS[sortBy];
+  if (!key) return fallback;
+  const dir = sortDesc ? -1 : 1;
+  return (a, b) => {
+    const x = key(a), y = key(b);
+    const c = typeof x === "number" ? x - y : x.localeCompare(y, "ru");
+    return c ? c * dir : fallback(a, b);
+  };
+}
+function syncSort() {
+  $("sortby").value = sortBy;
+  const dirBtn = $("sortdir");
+  dirBtn.hidden = sortBy === "auto";
+  dirBtn.textContent = sortBy === "title" ? (sortDesc ? "↓ Я–А" : "↑ А–Я") : (sortDesc ? "↓ по убыванию" : "↑ по возрастанию");
+  dirBtn.title = "Сменить направление";
+}
+function setSort(by, desc) {
+  sortBy = by; sortDesc = desc;
+  try { localStorage.setItem("aiflow.sort", JSON.stringify({ by, desc })); } catch (e) {}
+  syncSort();
+  if (last) render(last);
+}
+
 function modelRows(first, models, cls, attrs = "") {
   return byOutput(models).map(([m, u], i) =>
     `<tr class="${cls}"${attrs}><td>${i === 0 ? first : ""}</td><td>${esc(shortModel(m))}</td>${usageCells(u)}<td class="cost">${money(u.cost)}</td></tr>`).join("");
@@ -438,7 +490,7 @@ function renderUsage() {
   const rows = [], total = {}, unpriced = new Set();
   let grand = 0, shown = 0;
   for (const p of last.projects) {
-    const tasks = (p.tasks || []).filter(t => Object.keys(t.usage || {}).length).sort(newestFirst);
+    const tasks = (p.tasks || []).filter(t => Object.keys(t.usage || {}).length).sort(taskOrder(newestFirst));
     const coord = (p.coordinator && p.coordinator.usage) || {};
     if (!tasks.length && !Object.keys(coord).length) continue;
     shown++;
@@ -504,7 +556,7 @@ function renderBoard(p) {
   const isClosed = t => t.state === "merged" || t.state === "done" || t.state === "cancelled";
   // вопрос с ответом ничего не ждёт: он сворачивается вместе с завершёнными, но его ещё можно дополнить
   const isEnded = t => isClosed(t) || t.state === "answered";
-  const active = p.tasks.filter(t => !isEnded(t)).sort(newestCreatedFirst), ended = p.tasks.filter(isEnded).sort(newestFirst);
+  const active = p.tasks.filter(t => !isEnded(t)).sort(taskOrder(newestCreatedFirst)), ended = p.tasks.filter(isEnded).sort(taskOrder(newestFirst));
   if (!p.tasks.length) {
     html += `<div class="empty" style="grid-column: 1 / -1">Задач нет. Нажмите «Дать задачу» и напишите в открывшемся чате, что сделать.</div>`;
   } else if (!active.length) {
@@ -693,6 +745,10 @@ async function loadSettings(refresh) {
 }
 
 $("settings").addEventListener("toggle", () => { if ($("settings").open && settingsFor !== $("rmproj").value) loadSettings(false); });
+// новое поле — в привычную сторону: названия по алфавиту, остальное от большего и нового
+$("sortby").addEventListener("change", () => setSort($("sortby").value, $("sortby").value !== "title"));
+$("sortdir").addEventListener("click", () => setSort(sortBy, !sortDesc));
+syncSort();
 $("rmproj").addEventListener("change", () => loadSettings(false));
 $("rmrefresh").addEventListener("click", () => loadSettings(true));
 $("rmform").addEventListener("submit", async (e) => {
