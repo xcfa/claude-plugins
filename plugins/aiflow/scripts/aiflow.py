@@ -2917,6 +2917,9 @@ class Dispatcher:
     def adv_in_review(self, t: dict) -> None:
         pr = self.gh.pr(t["pr"], "state,labels,headRefOid,statusCheckRollup")
         t["ci"] = ci_summary(pr.get("statusCheckRollup"), pr.get("headRefOid"))
+        # Шаг доски «Мерж»: ревьюер одобрил ровно этот коммит, и его CI не красный. approved_sha для этого мало:
+        # он остаётся и тогда, когда после одобрения упал CI и исполнитель снова правит код.
+        t.pop("awaiting_merge", None)
         if pr.get("state") == "MERGED":
             return self.finish_merged(t)
         if pr.get("state") == "CLOSED":
@@ -2961,6 +2964,8 @@ class Dispatcher:
         if t.get("approved_sha") and t["approved_sha"] == pr.get("headRefOid"):
             failed = [c.get("name") or c.get("context") for c in pr.get("statusCheckRollup") or []
                       if (c.get("conclusion") or c.get("state") or "").upper() in ("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED")]
+            if not failed:
+                t["awaiting_merge"] = True
             if failed and t.get("ci_wake") != pr.get("headRefOid"):
                 t["ci_wake"] = pr.get("headRefOid")
                 if not self.wake(t, "worker", ci_fix_prompt(t, failed)):
@@ -3485,8 +3490,8 @@ def board_position(t: dict, has_pr: bool) -> tuple[int | None, list[int]]:
         stage = final
     elif st == "planning" and t.get("route") == "self":
         stage = STATION["in_progress"]
-    elif st == "in_review" and t.get("approved_sha"):
-        stage = STATION["merged"]  # ревьюер одобрил: PR ждёт зелёный CI и мерж — шаг «Мерж»
+    elif st == "in_review" and t.get("awaiting_merge"):
+        stage = STATION["merged"]  # ревьюер одобрил этот коммит, CI не красный: PR ждёт мержа — шаг «Мерж»
     elif st in STATION:
         stage = STATION[st]
     else:  # нужен человек, снята: шаг, на котором задача остановилась
