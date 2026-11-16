@@ -358,6 +358,27 @@ class InReview(ProjectCase):
         self.tick()
         self.assertEqual(self.state("a"), "merged")
 
+    def test_board_step_follows_the_approval_the_ci_and_the_head_commit(self):
+        review, merge = aiflow.STAGES.index("in_review"), aiflow.STAGES.index("merged")
+        stage = lambda: next(r for r in aiflow.build_state(self.store)["tasks"] if r["id"] == "a")["stage"]
+        self.start()
+        self.tick()
+        self.assertEqual(stage(), review)
+        self.report("a", "worker", "approved", 1)
+        self.claude.finish_turn("w-a")
+        self.tick()
+        self.assertEqual(stage(), merge)  # одобрен, ждёт мержа
+        self.gh.prs[1]["statusCheckRollup"] = [{"name": "build", "conclusion": "FAILURE"}]
+        self.tick()
+        self.assertEqual(stage(), review)  # после одобрения упал CI: исполнитель снова правит
+        self.gh.prs[1]["statusCheckRollup"] = []
+        self.gh.prs[1]["headRefOid"] = "new-commit"
+        self.tick()
+        self.assertEqual(stage(), review)  # новый коммит ревьюер ещё не одобрял
+        self.report("a", "worker", "approved", 1)
+        self.tick()
+        self.assertEqual(stage(), merge)
+
     def test_failed_ci_after_approval_wakes_the_worker_once(self):
         self.start()
         self.report("a", "worker", "approved", 1)
@@ -1525,7 +1546,9 @@ class BoardSteps(ProjectCase):
         review, merge = aiflow.STAGES.index("in_review"), aiflow.STAGES.index("merged")
         t = {"state": "in_review", "stations": [0, 1, 2, 3, 4, 5]}
         self.assertEqual(aiflow.board_position(t, True), (review, []))
-        t["approved_sha"] = "abc"
+        t["approved_sha"] = "abc"  # одобрение само по себе шаг не двигает: коммит мог смениться, CI — упасть
+        self.assertEqual(aiflow.board_position(t, True), (review, []))
+        t["awaiting_merge"] = True
         self.assertEqual(aiflow.board_position(t, True), (merge, []))  # ревью пройдено, шаг «Ревью» — позади
 
     def test_cancelled_task_stays_where_it_stopped(self):
