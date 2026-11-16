@@ -54,7 +54,10 @@ flowchart TD
 stateDiagram-v2
     [*] --> new: /aiflow:intake
     new --> planning: слот + зависимости
-    planning --> plan_review: draft PR
+    planning --> plan_check: draft PR
+    plan_check --> plan_check: замечания ревьюера → planner
+    plan_check --> plan_review: ревью плана закончено или не удалось
+    plan_check --> cancelled: PR закрыт
     plan_review --> plan_review: комментарий → planner
     plan_review --> approved: plan-approved
     approved --> in_progress: свободный слот
@@ -76,7 +79,10 @@ stateDiagram-v2
 | Из | В | Сигнал | Действие aiflow |
 | --- | --- | --- | --- |
 | `new` | `planning` | свободный слот, все `depends_on` в `merged`, очередь не на паузе | запустить planner, записать id сессии |
-| `planning` | `plan_review` | отчёт planner'а `plan_ready` с номером PR (сложная задача) | проверить PR (открыт, ветка `ai/<id>`, в описании маркер плана) и записать его; неверный отчёт возвращается сессии |
+| `planning` | `plan_check` | отчёт planner'а `plan_ready` с номером PR, `plan_check` не `off` | запустить `aiflow review-plan`: ревьюер opencode проверяет план по репозиторию и тексту задачи, замечания — комментарием в PR |
+| `plan_check` | `plan_check` | ревьюер нашёл замечания | один раз разбудить planner'а: исправить план или возразить, снова `plan_ready` |
+| `plan_check` | `plan_review` | замечаний нет; planner ответил; ревьюер не запустился или упал; planner молчит дольше `plan_check_wait_minutes` | событие «план готов» с итогом ревью плана: ревью советующее и план не держит |
+| `planning` | `plan_review` | отчёт planner'а `plan_ready` с номером PR (сложная задача), `plan_check: off` | проверить PR (открыт, ветка `ai/<id>`, в описании маркер плана) и записать его; неверный отчёт возвращается сессии |
 | `planning` | `in_progress` | отчёт planner'а `delegate` (простая задача) | запустить worker'а без плана, с указаниями planner'а; модель — по оценке planner'а: `trivial` (Haiku) или `simple` (Sonnet) |
 | `planning` | `planning` | отчёт planner'а `self_execute` (простая, делает сам) | стадия та же, но панель и `aiflow status` показывают «планировщик делает сам» на шаге реализации |
 | `planning` | `ready` | отчёт planner'а `ready_for_review` (простая, сделал сам) | его сессия становится сессией исполнителя: в очередь ревью |

@@ -146,12 +146,13 @@ class ProjectCase(unittest.TestCase):
         os.environ["CLAUDE_CONFIG_DIR"] = str(self.tmp / "claude")
         self.addCleanup(self._restore_env)
         self.store = aiflow.Store(self.root)
-        aiflow.write_json(self.root / ".aiflow" / "config.json", {"watch_integration": True, **self.config})
+        aiflow.write_json(self.root / ".aiflow" / "config.json", {"watch_integration": True, "plan_check": "off", **self.config})
         aiflow._BASE_SEEN[(str(self.root), "master")] = (time.time(), True)  # без git ls-remote
         self.claude = FakeClaude()
         self.gh = FakeGH()
         self.spawned: list[dict] = []  # запуски aiflow review самим aiflow
         self.spawn_pid: int | None = os.getpid()
+        self.plan_checks: list[dict] = []  # запуски aiflow review-plan
 
     def _restore_env(self):
         for k, v in self._env.items():
@@ -172,8 +173,13 @@ class ProjectCase(unittest.TestCase):
         self.spawned.append({"task": t["id"], "pr": t["pr"], "cwd": cwd})
         return self.spawn_pid
 
+    def spawn_plan(self, store, t, cwd):
+        self.plan_checks.append({"task": t["id"], "pr": t["pr"], "cwd": cwd})
+        return self.spawn_pid
+
     def tick(self) -> list[dict]:
-        return aiflow.Dispatcher(self.store, self.claude, self.gh, spawn_review=self.spawn).tick()
+        return aiflow.Dispatcher(self.store, self.claude, self.gh, spawn_review=self.spawn,
+                                 spawn_plan_check=self.spawn_plan).tick()
 
     def report(self, tid: str, role: str, status: str, pr: int | None = None, **kw) -> None:
         aiflow.write_report(self.root, tid, role, status, pr, kw.get("summary", ""), kw.get("details", ""),
