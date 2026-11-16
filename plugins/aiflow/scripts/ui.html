@@ -71,7 +71,7 @@ button:disabled:hover { border-color: var(--rule); }
 .wait-item.fail { border-left-color: var(--fail); }
 
 #usage { margin-bottom: 36px; }
-.grid { display: grid; grid-template-columns: minmax(200px, 280px) repeat(7, minmax(64px, 1fr)) minmax(150px, 190px); }
+.grid { display: grid; grid-template-columns: minmax(200px, 280px) repeat(8, minmax(60px, 1fr)) minmax(150px, 190px); }
 .grid > div { min-width: 0; }
 .head { color: var(--muted); font-size: 12.5px; padding: 0 4px 8px; text-align: center; border-bottom: 1px solid var(--rule); hyphens: auto; overflow-wrap: anywhere; }
 .head.left { text-align: left; padding-left: 0; }
@@ -83,8 +83,9 @@ button:disabled:hover { border-color: var(--rule); }
 .cell.passed::before { background: var(--ink); opacity: .55; }
 .cell.half::before { background: linear-gradient(to right, color-mix(in srgb, var(--ink) 55%, transparent) 50%, var(--track) 50%); opacity: 1; }
 .cell.first.half::before { background: var(--track); }
-.cell.none::before { display: none; }
-.cell.passed-end::before { background: var(--ink); opacity: .55; }
+/* шаг, который задача пропустила (вопрос не идёт на ревью, простая задача — без обсуждения плана): бледный пунктир и пустая точка */
+.cell.skipped::before { background: repeating-linear-gradient(to right, var(--track) 0 4px, transparent 4px 8px); opacity: 1; }
+.dot.skipped { background: var(--surface); box-shadow: inset 0 0 0 1.5px var(--track); opacity: 1; }
 .dot { position: absolute; left: 50%; top: 50%; width: 9px; height: 9px; border-radius: 50%; transform: translate(-50%, -50%); background: var(--track); }
 .dot.passed { background: var(--ink); opacity: .55; }
 .dot.here { width: 18px; height: 18px; border: 3px solid var(--surface); box-shadow: 0 0 0 2px currentColor; background: currentColor; opacity: 1; }
@@ -254,7 +255,7 @@ button:disabled:hover { border-color: var(--rule); }
 
 <script>
 const TOKEN = document.querySelector('meta[name="aiflow-token"]').content;
-const STATIONS = ["В очереди", "План", "Обсуждение", "Реализация", "Ждёт ревью", "Ревью", "Смержено"];
+const STATIONS = ["В очереди", "План", "Обсуждение", "Реализация", "Ждёт ревью", "Ревью", "Смержено", "Готово"];
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 let last = null;
@@ -513,6 +514,7 @@ function renderBoard(p) {
     let html = "";
     const tn = tone(t), id = esc(t.id);
     const stage = t.stage ?? 0;
+    const skipped = new Set(t.skipped || []);
     const phase = t.activity ? `<div class="phase" title="${esc(t.activity)}">${esc(t.activity)}</div>` : "";
     // у задачи из очень старой версии даты создания может не быть: тогда только обновление
     const upd = t.updated_at || t.created_at;
@@ -525,12 +527,11 @@ function renderBoard(p) {
       : name;
     html += `<div class="task">${head}<div class="state-label here ${tn}">${esc(t.label)}${t.needs ? " — " + esc(t.needs) : ""}</div>${t.answer ? `<div class="why" title="${esc(t.answer)}">${esc(t.answer)}</div>` : ""}</div>`;
     STATIONS.forEach((_, i) => {
-      // вопрос или обсуждение: шагов после последнего своего у задачи нет — ни точек, ни линии
-      const end = t.last_station;
-      if (end != null && i > end) { html += `<div class="cell none"></div>`; return; }
-      const pos = i < stage ? "passed" : i === stage ? (i === end ? "passed-end" : "half") : "";
-      const edge = i === 0 ? "first" : (i === STATIONS.length - 1 || i === end) ? "last" : "";
-      let dot = `<span class="dot ${i < stage ? "passed" : ""}"></span>`;
+      // пропущенный шаг (t.skipped): задача через него не шла — рисуется бледным
+      const skip = skipped.has(i);
+      const pos = skip ? "skipped" : i < stage ? "passed" : i === stage ? "half" : "";
+      const edge = i === 0 ? "first" : i === STATIONS.length - 1 ? "last" : "";
+      let dot = skip ? `<span class="dot skipped" title="Шаг пропущен"></span>` : `<span class="dot ${i < stage ? "passed" : ""}"></span>`;
       if (i === stage && t.state !== "cancelled") {
         const live = t.session && t.session.state === "working" ? "live" : "";
         dot = (live && tn === "moving" ? `<span class="halo"></span>` : "") + `<span class="dot here ${tn} ${live}" title="${esc(t.label)}${t.needs ? ": " + esc(t.needs) : ""}"></span>`;

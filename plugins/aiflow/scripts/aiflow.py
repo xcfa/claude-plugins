@@ -43,7 +43,11 @@ def _plugin_version() -> str:
 
 VERSION = _plugin_version()
 
-STAGES = ["new", "planning", "plan_review", "in_progress", "ready", "in_review", "merged"]
+STAGES = ["new", "planning", "plan_review", "in_progress", "ready", "in_review", "merged", "done"]
+# шаг доски для каждого состояния задачи; done — последний шаг «Готово»: на нём стоит всякая законченная задача
+STATION = {"new": 0, "planning": 1, "plan_check": 1, "discussing": 1, "answered": 1, "plan_review": 2, "approved": 2,
+           "in_progress": 3, "ready": 4, "in_review": 5, "merged": 6, "done": 7}
+HISTORY_KEEP = 60  # столько последних переходов хранит задача
 # approved — план одобрен (или повтор с готовым PR), задача ждёт слот исполнителя
 SIDE_STATES = ["needs_human", "cancelled", "discussing", "answered", "approved"]
 TALK_KINDS = ("discuss", "ask")  # разговор в сессии планировщика: PR только по договорённости
@@ -1975,7 +1979,7 @@ class Dispatcher:
     def set_state(self, t: dict, state: str, note: str = "") -> None:
         if t.get("state") != state:
             t.setdefault("history", []).append({"at": iso(), "from": t.get("state"), "to": state, "note": note})
-            del t["history"][:-60]
+            del t["history"][:-HISTORY_KEEP]
             t["state"] = state
             t["state_at"] = iso()
 
@@ -3447,6 +3451,41 @@ def cmd_intake_rules(args, root: Path | None) -> int:
 
 # ---------------------------------------------------------------- status / state for UI
 
+def board_position(t: dict, has_pr: bool) -> tuple[int | None, list[int]]:
+    """Где задача на доске и какие шаги она пропустила. → (шаг, пропущенные шаги).
+    Законченная задача (смержено, выполнено, ответ дан) стоит на последнем шаге «Готово»; шаги, через
+    которые она не проходила, панель рисует бледными. Вопрос или обсуждение без PR идёт «план → готово»:
+    шаги между ними бледные заранее; появился PR — задача идёт обычным путём."""
+    st = t.get("state", "new")
+    final = STATION["done"]
+    history = t.get("history") or []
+    visited = {0}
+    for h in history:
+        for key in ("from", "to"):
+            if h.get(key) in STATION and h[key] != "done":
+                visited.add(STATION[h[key]])
+    if t.get("route") == "self" or t.get("self_executed"):
+        visited.add(STATION["in_progress"])  # планировщик делал сам: состояние было planning, шаг — реализация
+    if len(history) >= HISTORY_KEEP:
+        visited |= set(range(max(visited) + 1))  # начало истории обрезано: пропуски в нём уже не узнать
+    if st in ("merged", "done", "answered"):
+        stage = final
+    elif st == "planning" and t.get("route") == "self":
+        stage = STATION["in_progress"]
+    elif st in STATION:
+        stage = STATION[st]
+    else:  # нужен человек, снята: шаг, на котором задача остановилась
+        stage = next((STATION[h["from"]] for h in reversed(history) if h.get("from") in STATION), None)
+    if stage is None:
+        return None, []
+    if stage != final:
+        visited.add(stage)
+    skipped = [i for i in range(1, stage) if i not in visited]
+    if t.get("kind") in TALK_KINDS and not has_pr and stage != final:
+        skipped += [i for i in range(max(stage, STATION["planning"]) + 1, final) if i not in skipped]
+    return stage, skipped
+
+
 def plan_check_activity(t: dict) -> str:
     """Чем занято ревью плана — строка под названием задачи в панели."""
     pc = t.get("plan_check") or {}
@@ -3499,25 +3538,14 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
             # у завершённой задачи сессия хранится, но её вопрос уже никого не ждёт
             said = (t.get("waits") or {}).get("text") if (t.get("waits") or {}).get("sid") == cur.get("id") else ""
             needs = f"сессия ждёт ответа: {said}" if said else f"сессия ждёт ответа ({cur.get('waiting') or 'вопрос'})"
-        last_stage = None
-        if st not in STAGES:
-            for h in reversed(t.get("history") or []):
-                if h.get("from") in STAGES:
-                    last_stage = STAGES.index(h["from"])
-                    break
         doing_self = st == "planning" and t.get("route") == "self"
-        stage = STAGES.index("in_progress") if doing_self else STAGES.index("planning") if st in ("discussing", "answered", "plan_check") else STAGES.index("plan_review") if st == "approved" else STAGES.index("merged") if st == "done" else STAGES.index(st) if st in STAGES else last_stage
-        # Вопрос или обсуждение без PR дальше «плана» не идёт: остальные шаги доски к нему не относятся,
-        # и панель их не рисует. Появился PR — задача идёт обычным путём, и шаги показываются все.
-        last_station = STAGES.index("planning") if t.get("kind") in TALK_KINDS and not pr else None
-        if last_station is not None and stage is not None:
-            stage = min(stage, last_station)
+        stage, skipped = board_position(t, bool(pr))
         out.append({
             "id": t["id"], "title": t.get("title", ""), "state": st,
             "label": "планировщик делает сам" if doing_self else
                      "вопрос" if st == "discussing" and t.get("kind") == "ask" else STAGE_LABEL.get(st, st),
             "kind": t.get("kind") or "task", "answer": (t.get("answer") or {}).get("summary") if st == "answered" else done_note(t) if st == "done" else None,
-            "stage": stage, "last_station": last_station,
+            "stage": stage, "skipped": skipped,
             "complexity": t.get("complexity"), "pr": pr,
             "pr_url": f"{repo_url}/pull/{pr}" if pr and repo_url else None,
             "rounds": review.get("round"), "max_rounds": cfg["max_rounds"],
