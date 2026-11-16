@@ -412,8 +412,10 @@ class InReview(ProjectCase):
 
     def phase(self, kind: str, minutes_ago: float = 0, **detail) -> None:
         import os
+        # как пишет aiflow review: at — когда файл записан (сейчас), since — когда началась фаза.
+        # at в прошлом раньше старта процесса-владельца означало бы чужой pid, и фаза не показывалась бы
         aiflow.write_json(self.root / ".aiflow" / "a" / "phase.json",
-                          {"pid": os.getpid(), "at": ago(minutes_ago), "phase": kind, **detail})
+                          {"pid": os.getpid(), "at": aiflow.iso(), "since": ago(minutes_ago), "phase": kind, **detail})
 
     def test_activity_tells_ci_from_the_reviewer(self):
         self.to_ready("a", 1, files=["a.py"])
