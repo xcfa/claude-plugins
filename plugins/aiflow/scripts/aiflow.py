@@ -4575,7 +4575,7 @@ def cmd_statusline(args, root: Path | None) -> int:
         return 0
     tasks = store.tasks()
     q = store.queue()
-    working = sum(1 for t in tasks if t.get("state") in ("planning", "in_progress", "in_review"))
+    working = sum(1 for t in tasks if t.get("state") in ("planning", "plan_check", "in_progress", "in_review"))
     waiting = sum(1 for t in tasks if t.get("state") == "needs_human"
                   or (t.get("state") == "plan_review" and not t.get("plan_approved")))
     queued = sum(1 for t in tasks if t.get("state") in ("new", "approved", "ready"))
