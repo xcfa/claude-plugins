@@ -1521,6 +1521,13 @@ class BoardSteps(ProjectCase):
         t = {"state": "in_progress", "history": [{"from": "ready", "to": "in_progress"}] * aiflow.HISTORY_KEEP}
         self.assertEqual(aiflow.board_position(t, True), (aiflow.STAGES.index("in_progress"), []))
 
+    def test_approved_pr_that_waits_for_the_merge_stands_on_the_merge_step(self):
+        review, merge = aiflow.STAGES.index("in_review"), aiflow.STAGES.index("merged")
+        t = {"state": "in_review", "stations": [0, 1, 2, 3, 4, 5]}
+        self.assertEqual(aiflow.board_position(t, True), (review, []))
+        t["approved_sha"] = "abc"
+        self.assertEqual(aiflow.board_position(t, True), (merge, []))  # ревью пройдено, шаг «Ревью» — позади
+
     def test_cancelled_task_stays_where_it_stopped(self):
         t = {"state": "cancelled", "history": [{"from": "new", "to": "planning"}, {"from": "planning", "to": "cancelled"}]}
         self.assertEqual(aiflow.board_position(t, False), (aiflow.STAGES.index("planning"), []))

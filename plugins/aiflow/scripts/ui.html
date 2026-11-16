@@ -255,7 +255,7 @@ button:disabled:hover { border-color: var(--rule); }
 
 <script>
 const TOKEN = document.querySelector('meta[name="aiflow-token"]').content;
-const STATIONS = ["В очереди", "План", "Обсуждение", "Реализация", "Ждёт ревью", "Ревью", "Смержено", "Готово"];
+const STATIONS = ["В очереди", "План", "Обсуждение", "Реализация", "Ждёт ревью", "Ревью", "Мерж", "Готово"];
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 let last = null;

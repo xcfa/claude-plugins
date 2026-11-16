@@ -3485,6 +3485,8 @@ def board_position(t: dict, has_pr: bool) -> tuple[int | None, list[int]]:
         stage = final
     elif st == "planning" and t.get("route") == "self":
         stage = STATION["in_progress"]
+    elif st == "in_review" and t.get("approved_sha"):
+        stage = STATION["merged"]  # ревьюер одобрил: PR ждёт зелёный CI и мерж — шаг «Мерж»
     elif st in STATION:
         stage = STATION[st]
     else:  # нужен человек, снята: шаг, на котором задача остановилась
