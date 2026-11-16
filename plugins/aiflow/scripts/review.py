@@ -522,7 +522,8 @@ def tool_note(part: dict) -> str:
     tool = str(part.get("tool") or "")
     args = ((part.get("state") or {}).get("input") or {})
     if tool == "read" and args.get("filePath"):
-        return "читает " + Path(str(args["filePath"])).name
+        # имя файла при любом разделителе: Path на Linux не делит Windows-путь по обратной косой черте
+        return "читает " + re.split(r"[\\/]", str(args["filePath"]).rstrip("\\/"))[-1]
     if tool == "bash" and args.get("command"):
         return "выполняет " + " ".join(str(args["command"]).split())[:48]
     if tool in ("grep", "glob") and args.get("pattern"):
