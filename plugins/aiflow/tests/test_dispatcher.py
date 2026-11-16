@@ -1435,22 +1435,25 @@ class SearchRule(ProjectCase):
 
 
 class BoardSteps(ProjectCase):
-    """У вопроса и обсуждения нет шагов после «плана» — панель их не рисует."""
+    """Последний шаг доски — «Готово»: на нём стоит всякая законченная задача, пропущенные шаги бледные."""
+
+    FINAL = aiflow.STAGES.index("done")
 
     def row(self, tid: str = "a") -> dict:
         return next(t for t in aiflow.build_state(self.store)["tasks"] if t["id"] == tid)
 
-    def test_question_stops_at_its_own_last_step(self):
+    def test_question_goes_from_the_plan_step_to_done(self):
         plan = aiflow.STAGES.index("planning")
+        between = list(range(plan + 1, self.FINAL))
         self.add("a", kind="ask")
-        self.assertEqual(self.row()["last_station"], plan)
+        self.assertEqual((self.row()["stage"], self.row()["skipped"]), (0, between))  # шаги после плана бледные заранее
         self.tick()
-        self.assertEqual((self.row()["stage"], self.row()["last_station"]), (plan, plan))
+        self.assertEqual((self.row()["stage"], self.row()["skipped"]), (plan, between))
         self.report("a", "planner", "answered", summary="вот ответ")
         self.tick()
-        self.assertEqual((self.row()["state"], self.row()["stage"], self.row()["last_station"]), ("answered", plan, plan))
+        self.assertEqual((self.row()["state"], self.row()["stage"], self.row()["skipped"]), ("answered", self.FINAL, between))
         self.patch("a", state="done")
-        self.assertEqual((self.row()["stage"], self.row()["last_station"]), (plan, plan))  # не «смержено»
+        self.assertEqual((self.row()["stage"], self.row()["skipped"]), (self.FINAL, between))
 
     def test_question_that_became_a_plan_shows_the_whole_path(self):
         self.add("a", kind="ask")
@@ -1459,13 +1462,50 @@ class BoardSteps(ProjectCase):
         self.report("a", "planner", "plan_ready", 7, complexity="complex")
         self.tick()
         self.assertEqual(self.state("a"), "plan_review")
-        self.assertIsNone(self.row()["last_station"])
+        self.assertEqual((self.row()["stage"], self.row()["skipped"]), (aiflow.STAGES.index("plan_review"), []))
 
-    def test_ordinary_task_always_shows_every_step(self):
+    def test_ordinary_task_has_no_skipped_steps_until_it_skips_one(self):
         self.add("a")
-        self.assertIsNone(self.row()["last_station"])
-        self.patch("a", state="done")
-        self.assertEqual(self.row()["stage"], aiflow.STAGES.index("merged"))
+        self.assertEqual(self.row()["skipped"], [])
+        self.tick()
+        self.assertEqual(self.row()["skipped"], [])
+
+    def test_merged_task_stands_on_done_with_every_step_passed(self):
+        self.to_plan_review("a", 7)
+        self.gh.add_label(7, "plan-approved")
+        self.tick()
+        t = self.task("a")
+        for st in ("ready", "in_review", "merged"):
+            t["history"].append({"at": aiflow.iso(), "from": t["state"], "to": st})
+            t["state"] = st
+        self.store.save_task(t)
+        self.assertEqual((self.row()["stage"], self.row()["skipped"]), (self.FINAL, []))
+
+    def test_delegated_task_skips_the_plan_discussion(self):
+        self.add("a")
+        self.tick()
+        self.report("a", "planner", "delegate", summary="мелочь", details="указания")
+        self.tick()
+        self.assertEqual(self.state("a"), "in_progress")
+        self.assertEqual(self.row()["skipped"], [aiflow.STAGES.index("plan_review")])
+
+    def test_task_done_without_a_pr_skips_review_and_merge(self):
+        self.add("a")
+        self.tick()
+        self.report("a", "planner", "done", summary="контейнер поднят")
+        self.tick()
+        self.assertEqual(self.state("a"), "done")
+        self.assertEqual((self.row()["stage"], self.row()["skipped"]), (self.FINAL, [2, 3, 4, 5, 6]))
+
+    def test_planner_that_did_the_task_itself_passed_the_implementation_step(self):
+        t = {"state": "merged", "route": "self", "history": [
+            {"from": None, "to": "new"}, {"from": "new", "to": "planning"}, {"from": "planning", "to": "ready"},
+            {"from": "ready", "to": "in_review"}, {"from": "in_review", "to": "merged"}]}
+        self.assertEqual(aiflow.board_position(t, True), (self.FINAL, [aiflow.STAGES.index("plan_review")]))
+
+    def test_cancelled_task_stays_where_it_stopped(self):
+        t = {"state": "cancelled", "history": [{"from": "new", "to": "planning"}, {"from": "planning", "to": "cancelled"}]}
+        self.assertEqual(aiflow.board_position(t, False), (aiflow.STAGES.index("planning"), []))
 
 
 class Models(ProjectCase):
