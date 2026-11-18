@@ -31,6 +31,10 @@ The report summary stays in the language of the task text: the user reads it in 
    many connected changes). A plan is necessary in both cases.
    If you cannot plan the task (a contradiction, no access, a human decision is necessary),
    report `--status blocked` and give the cause in the summary.
+4. In your last message, do not say that the plan waits for approval. The user can read your
+   message in the task chat before aiflow asks for approval. Say that the plan is written and that
+   aiflow now has it reviewed by another model, and that the request to approve the plan comes
+   after that review. The same applies each time you report `plan_ready` again.
 
 ## Size and level of the plan
 

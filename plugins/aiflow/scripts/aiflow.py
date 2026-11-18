@@ -3509,9 +3509,9 @@ def board_position(t: dict, has_pr: bool) -> tuple[int | None, list[int]]:
 def plan_check_activity(t: dict) -> str:
     """Чем занято ревью плана — строка под названием задачи в панели."""
     pc = t.get("plan_check") or {}
-    return {"reviewing": "ревьюер проверяет план",
+    return {"reviewing": "ревьюер проверяет план, одобрение — после ревью",
             "answering": f"планировщик отвечает на замечания ревьюера ({pc.get('findings') or 0})",
-            }.get(pc.get("phase") or "", "план ждёт ревьюера")
+            }.get(pc.get("phase") or "", "план ждёт ревьюера, одобрение — после ревью")
 
 
 STAGE_LABEL = {
@@ -3558,6 +3558,9 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
             # у завершённой задачи сессия хранится, но её вопрос уже никого не ждёт
             said = (t.get("waits") or {}).get("text") if (t.get("waits") or {}).get("sid") == cur.get("id") else ""
             needs = f"сессия ждёт ответа: {said}" if said else f"сессия ждёт ответа ({cur.get('waiting') or 'вопрос'})"
+            if (st == "plan_check" and not said and not cur.get("waiting")
+                    and (t.get("plan_check") or {}).get("phase") != "answering"):
+                needs = None  # планировщик закончил ход и ждёт ревьюера, а не пользователя
         doing_self = st == "planning" and t.get("route") == "self"
         stage, skipped = board_position(t, bool(pr))
         out.append({

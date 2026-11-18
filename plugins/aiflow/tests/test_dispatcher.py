@@ -710,7 +710,14 @@ class PlanCheck(ProjectCase):
         self.tick()
         self.assertEqual([c["task"] for c in self.plan_checks], ["a"])
         row = aiflow.build_state(self.store)["tasks"][0]
-        self.assertEqual((row["label"], row["activity"], row["needs"]), ("ревью плана", "ревьюер проверяет план", None))
+        self.assertEqual((row["label"], row["activity"], row["needs"]),
+                         ("ревью плана", "ревьюер проверяет план, одобрение — после ревью", None))
+        # планировщик закончил ход и простаивает: это не вопрос к пользователю
+        sid = self.sid("a", "planner")
+        row = aiflow.build_state(self.store, {sid: {"state": "blocked"}})["tasks"][0]
+        self.assertIsNone(row["needs"])
+        row = aiflow.build_state(self.store, {sid: {"state": "blocked", "waitingFor": "разрешение на команду"}})["tasks"][0]
+        self.assertIn("ждёт ответа", row["needs"])
 
     def test_clean_plan_goes_to_the_user_with_the_verdict(self):
         self.plan()
