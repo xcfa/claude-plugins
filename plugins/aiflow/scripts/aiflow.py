@@ -897,6 +897,15 @@ class Store:
         return cmds
 
 
+def settled_session(e: dict) -> dict:
+    """Сессия закончила ход, но сама назвала своё состояние «working»: так она пишет, когда ждёт чего-то
+    внешнего («план на ревью, жду»). Ход при этом окончен — status "idle", — и очередь ждала бы такую сессию
+    вечно. Для очереди это законченный ход."""
+    if e.get("state") == "working" and e.get("status") == "idle":
+        return {**e, "state": "done", "said_working": True}
+    return e
+
+
 def spawn_plan_check_process(store: "Store", t: dict, cwd: str) -> int | None:
     """Запустить `aiflow review-plan --pr N` отдельным процессом. → pid или None."""
     return spawn_review_process(store, t, cwd, command="review-plan")
@@ -1019,7 +1028,7 @@ class Claude:
         text = p.stdout.strip()
         start = text.find("[")
         data = json.loads(text[start:]) if start != -1 else []
-        return {e["id"]: e for e in data if isinstance(e, dict) and e.get("id")}
+        return {e["id"]: settled_session(e) for e in data if isinstance(e, dict) and e.get("id")}
 
     @staticmethod
     def _short_id(out: str) -> str | None:

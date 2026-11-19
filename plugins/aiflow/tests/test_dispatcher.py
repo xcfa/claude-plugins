@@ -1051,6 +1051,13 @@ class Dependencies(ProjectCase):
         with contextlib.redirect_stdout(io.StringIO()):
             aiflow.cmd_enqueue(argparse.Namespace(file=str(path), separate=separate, **more), self.root)
 
+    def test_idle_session_that_calls_itself_working_has_ended_its_turn(self):
+        idle = aiflow.settled_session({"id": "s", "state": "working", "status": "idle"})
+        self.assertEqual(idle["state"], "done")
+        for live in ({"id": "s", "state": "working"}, {"id": "s", "state": "working", "status": "busy"},
+                     {"id": "s", "state": "blocked", "status": "idle"}):
+            self.assertEqual(aiflow.settled_session(live), live)
+
     def test_split_queues_the_other_parts_of_a_task(self):
         parts = [{"id": "p2", "text": "вторая часть", "depends_on": ["big"]},
                  {"id": "p3", "text": "третья часть", "depends_on": ["p2"]}]
