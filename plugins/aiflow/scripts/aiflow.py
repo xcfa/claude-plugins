@@ -3525,9 +3525,21 @@ def board_position(t: dict, has_pr: bool) -> tuple[int | None, list[int]]:
     return stage, skipped
 
 
-def plan_check_activity(t: dict) -> str:
+def plan_check_activity(t: dict, store: "Store | None" = None) -> str:
     """Чем занято ревью плана — строка под названием задачи в панели."""
     pc = t.get("plan_check") or {}
+    if pc.get("phase") == "reviewing" and store:
+        # ревью плана идёт десятки минут: без шагов и минут в панели оно выглядит зависшим
+        ph = read_json(store.runs / t["id"] / "phase.json", {}) or {}
+        more = [str(ph["doing"])] if ph.get("doing") else []
+        if ph.get("steps"):
+            more.append(f"шаг {ph['steps']}")
+        if ph.get("tokens"):
+            more.append(f"{fmt_tokens(int(ph['tokens']))} токенов")
+        mins = int(age_minutes(ph.get("since") or pc.get("started_at")))
+        if ph.get("phase") == "plan_reviewer" and more:
+            return ("ревьюер проверяет план: " + ", ".join(more) + (f" ({mins} мин)" if mins >= 1 else "")
+                    + "; одобрение — после ревью")
     return {"reviewing": "ревьюер проверяет план, одобрение — после ревью",
             "answering": f"планировщик отвечает на замечания ревьюера ({pc.get('findings') or 0})",
             }.get(pc.get("phase") or "", "план ждёт ревьюера, одобрение — после ревью")
@@ -3601,7 +3613,7 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
             "activity": ("планировщик делает сам, PR появится по готовности"
                          + (f". Что делает: {t['route_note']}" if t.get("route_note") else "")) if doing_self
                         else ("ждёт задачу: " + ", ".join(waits_for)) if waits_for
-                        else plan_check_activity(t) if st == "plan_check"
+                        else plan_check_activity(t, store) if st == "plan_check"
                         else review_activity(store, t, cur.get("state"), int(cfg["max_rounds"])),
             "waits_for": waits_for,
             "ci": t.get("ci") if st in ("ready", "in_review") else None,

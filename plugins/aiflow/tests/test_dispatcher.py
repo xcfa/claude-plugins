@@ -712,6 +712,11 @@ class PlanCheck(ProjectCase):
         row = aiflow.build_state(self.store)["tasks"][0]
         self.assertEqual((row["label"], row["activity"], row["needs"]),
                          ("ревью плана", "ревьюер проверяет план, одобрение — после ревью", None))
+        aiflow.write_json(self.store.runs / "a" / "phase.json", {
+            "phase": "plan_reviewer", "since": aiflow.iso(), "steps": 12, "tokens": 150000, "doing": "ищет parse_x"})
+        self.assertRegex(aiflow.build_state(self.store)["tasks"][0]["activity"],
+                         r"^ревьюер проверяет план: ищет parse_x, шаг 12, .* токенов; одобрение — после ревью$")
+        (self.store.runs / "a" / "phase.json").unlink()
         # планировщик закончил ход и простаивает: это не вопрос к пользователю
         sid = self.sid("a", "planner")
         row = aiflow.build_state(self.store, {sid: {"state": "blocked"}})["tasks"][0]
