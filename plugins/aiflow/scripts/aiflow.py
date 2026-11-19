@@ -177,6 +177,11 @@ def review_activity(store: "Store", t: dict, session_state: str | None, max_roun
     if t.get("auto_review"):
         return "aiflow запускает ревью"
     if session_state == "working":
+        rv = store.review(t["id"]) or {}
+        if rv.get("status") == "ci_failed":
+            return "CI упал" + (": " + ", ".join(map(str, rv["failed"])) if rv.get("failed") else "") + " — исполнитель чинит"
+        if rv.get("status") == "changes_requested":
+            return f"исполнитель правит замечания ревьюера (раунд {rv.get('round') or '?'}/{max_rounds})"
         return "исполнитель: слияние с базой, тесты или правки"
     return None
 
@@ -4536,12 +4541,13 @@ def _port_busy(port: int) -> bool:
         return sock.connect_ex(("127.0.0.1", port)) == 0
 
 
-def _kill(pid: int) -> bool:
+def _kill(pid: int, tree: bool = True) -> bool:
+    """tree=False — только сам процесс: его потомки (ревьюеры, запущенные службой) доработают без него."""
     if not pid_alive(pid):
         return False
     try:
         if os.name == "nt":
-            run(["taskkill", "/PID", str(pid), "/T", "/F"], timeout=30)
+            run(["taskkill", "/PID", str(pid)] + (["/T"] if tree else []) + ["/F"], timeout=30)
         else:
             import signal
             os.kill(pid, signal.SIGTERM)

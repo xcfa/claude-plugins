@@ -251,7 +251,9 @@ def stop(mark_down: bool = True) -> bool:
     if not data:
         return False
     pid = int(data["pid"])
-    ok = aiflow._kill(pid)
+    # Замена службы новой версией не должна убивать ревьюеров, которых запустила старая: ревью плана идёт
+    # десятки минут, и его результат пропадал при каждом обновлении. Потомков гасит только остановка человеком.
+    ok = aiflow._kill(pid, tree=mark_down)
     if ok:
         for name in ("service.json", "service.lock"):
             path = home() / name
