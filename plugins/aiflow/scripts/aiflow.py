@@ -3559,6 +3559,10 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
             needs = None  # одобрено: ждём, пока планировщик закончит доработку
         elif st == "plan_review" and not t.get("plan_approved"):
             needs = "обсудить и одобрить план"
+            if t.get("split_into"):  # задачу разбили: одобряется план только её части
+                needs += f" первой части (всего частей: {len(t['split_into']) + 1}; остальные: {', '.join(t['split_into'])})"
+            elif t.get("split_of"):
+                needs += f" этой части задачи {t['split_of']}"
         elif st == "needs_human":
             needs = short_reason(t.get("human_reason")) or "нужен человек"
         elif st == "discussing" and cur.get("state") != "working":
@@ -3964,6 +3968,9 @@ def cmd_enqueue(args, root: Path) -> int:
                         + (f" ({t['complexity']})" if t.get("complexity") else ""))
         if parent:
             parent["split_into"] = list(dict.fromkeys((parent.get("split_into") or []) + ids))
+            first_title = str(getattr(args, "title", None) or "").strip()
+            if first_title:  # задача стала первой частью: прежнее название описывает всю работу
+                parent["title"] = first_title
             parent.setdefault("history", []).append({"at": iso(), "event": "split", "into": ids})
             store.save_task(parent)
             store.event("split", split_of, f"{split_of}: задача разбита — она остаётся первой частью, "
@@ -4665,6 +4672,7 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("--then", metavar="ID", help="задача этого проекта, которая подождёт поставленные")
     e.add_argument("--split-of", metavar="ID", dest="split_of",
                    help="поставленные задачи — остальные части задачи ID, которую пользователь решил разбить")
+    e.add_argument("--title", help="с --split-of: новое название задачи ID — того, что осталось в ней как первая часть")
     af = sub.add_parser("after", help="поставить задачу после другой: id или проект/id")
     af.add_argument("id")
     af.add_argument("dep")

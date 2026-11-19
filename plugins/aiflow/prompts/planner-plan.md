@@ -160,7 +160,7 @@ message in the chat). Do this in one turn:
 2. Rewrite the plan in this PR to the first part only. In "Goal and scope", list the other parts
    as non-goals and name their task ids.
 3. Put the other parts into the queue with one command, a JSON list on stdin:
-   `aiflow enqueue --split-of <this task id>`
+   `aiflow enqueue --split-of <this task id> --title "<what stays in this task, in the user's language>"`
    `[{"id": "<new id>", "title": "…", "text": "…", "depends_on": ["<id>"]}, …]`
    - `text`, in the user's language: what this part must do, then the decisions of your plan that
      concern this part (contracts, names, behaviour, files). The planner of that part starts
@@ -169,9 +169,12 @@ message in the chat). Do this in one turn:
      first part, the id of another part if it needs that one, and an empty list if the part is
      independent. A part starts when all the tasks in its `depends_on` are merged.
    - Do not give `ui` or the model fields: aiflow copies them from this task.
+   - `--title` renames this task: its old title names the whole work, and the user must see in
+     the queue which part this plan covers. Change the PR title in the same way.
 4. Add a line to "Plan change history": the split and the ids of the parts.
 5. Report `--status plan_ready` again. Name the ids of the parts in the summary. In your last
    message, tell the user the parts, their order, and that each part gets its own plan and PR.
+   Say plainly that the plan to approve now is the plan of the first part only, and what it covers.
 
 If the user decides to keep one PR, record that in "Plan change history" and change nothing else.
 

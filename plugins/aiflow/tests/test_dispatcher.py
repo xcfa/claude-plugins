@@ -1059,11 +1059,16 @@ class Dependencies(ProjectCase):
         self.assertEqual(self.store.tasks(), [])
         self.add("big")
         self.patch("big", ui="docs/design", worker_model="opus", pr=7)
-        self.enqueue(parts, separate=False, split_of="big")  # флаг --separate частям не нужен
+        self.enqueue(parts, separate=False, split_of="big", title="Первая часть")  # флаг --separate частям не нужен
         p2, p3, big = self.store.task("p2"), self.store.task("p3"), self.store.task("big")
         self.assertEqual((p2["split_of"], p2["ui"], p2["worker_model"], p2["depends_on"]), ("big", "docs/design", "opus", ["big"]))
         self.assertEqual((p3["split_of"], p3["depends_on"]), ("big", ["p2"]))
-        self.assertEqual(big["split_into"], ["p2", "p3"])
+        self.assertEqual((big["split_into"], big["title"]), (["p2", "p3"], "Первая часть"))
+        self.patch("big", state="plan_review")
+        self.patch("p2", state="plan_review", pr=8)
+        needs = {r["id"]: r["needs"] for r in aiflow.build_state(self.store)["tasks"]}
+        self.assertEqual(needs["big"], "обсудить и одобрить план первой части (всего частей: 3; остальные: p2, p3)")
+        self.assertEqual(needs["p2"], "обсудить и одобрить план этой части задачи big")
         self.assertIn("part of task big", aiflow.planner_prompt(self.store, p2, self.store.config()))
         self.assertIn("PR #7", aiflow.split_note(self.store, p2))
         self.assertEqual(aiflow.split_note(self.store, big), "")
