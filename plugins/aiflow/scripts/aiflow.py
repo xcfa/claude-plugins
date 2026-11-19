@@ -1700,13 +1700,23 @@ def set_after(store: Store, tid: str, dep: str, remove: bool = False) -> dict:
     return t
 
 
+def split_note(store: Store, t: dict) -> str:
+    """Задача — часть другой, разбитой по решению пользователя: откуда она и где исходный план."""
+    first = store.task(t.get("split_of") or "") if t.get("split_of") else None
+    if not first:
+        return ""
+    return (f"This task is a part of task {first['id']}: the user decided to split it into several PRs"
+            + (f" (its plan is PR #{first['pr']})" if first.get("pr") else "") + ". The task text already carries "
+            "the decisions of that plan for this part: keep them, and do not plan the other parts again.\n")
+
+
 def planner_prompt(store: Store, t: dict, cfg: dict) -> str:
     tid = t["id"]
     return with_search_rule((
         f"aiflow task {tid}: {t.get('title', '')}\n"
         f"Task file: {store.task_path(tid)}. Read it in full.\n"
         f"Base branch: {cfg['base_branch']}. Task branch: ai/{tid}.\n"
-        + deps_note(store, t) + neighbours_note(store, tid) +
+        + deps_note(store, t) + split_note(store, t) + neighbours_note(store, tid) +
         "First assess the task (section \"Task assessment\" of your instructions) and select one route:\n"
         f"- complex: read the plan rules ({PLANNER_PLAN_MD}) and make a draft PR with a plan. Then run "
         f"aiflow report {tid} --role planner --status plan_ready "
@@ -3585,6 +3595,7 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
             "models": {f: t[f] for f in MODEL_FIELDS if t.get(f)},
             "reviewer_session": next((r.get("session") for r in reversed(reviewer_runs(store, t["id"])) if r.get("session")), None),
             "depends_on": t.get("depends_on") or [], "state_at": t.get("state_at"),
+            "split_of": t.get("split_of"), "split_into": t.get("split_into") or [],
             "created_at": t.get("created_at"), "updated_at": task_updated_at(t),
             "launching": bool(t.get("launching")), "review_lock": t["id"] in (q.get("review_locks") or []),
             "amendments": len(t.get("amendments") or []),
@@ -3872,6 +3883,9 @@ def dependency_cycle(tasks: list[dict]) -> list[str]:
 
 def cmd_enqueue(args, root: Path) -> int:
     home_root, project, then = root, getattr(args, "project", None), getattr(args, "then", None)
+    split_of = getattr(args, "split_of", None)
+    if split_of and project and project != root.name:
+        raise AiflowError("--split-of: the parts stay in the project of the task that is split, do not give --project")
     if project and project != root.name:
         others = neighbours(root)
         if project not in others:
@@ -3898,7 +3912,7 @@ def cmd_enqueue(args, root: Path) -> int:
     ids = [t["id"] for t in tasks]
     if len(ids) != len(set(ids)):
         raise AiflowError("в пачке повторяются id задач")
-    if len(tasks) > 1 and not getattr(args, "separate", False):
+    if len(tasks) > 1 and not getattr(args, "separate", False) and not split_of:
         # Сессия координатора живёт днями и ставит задачи по памяти о старых правилах: правило «одно
         # сообщение — одна задача» держит сама команда, а не только текст инструкции.
         raise AiflowError(
@@ -3914,6 +3928,15 @@ def cmd_enqueue(args, root: Path) -> int:
         raise AiflowError("очередь занята дольше 2 минут, повторите позже")
     try:
         existing = {t["id"]: t for t in store.tasks()}
+        parent = existing.get(split_of) if split_of else None
+        if split_of:
+            if not parent or parent.get("state") in TERMINAL:
+                raise AiflowError(f"--split-of: no task {split_of} in work, nothing is queued")
+            for t in tasks:  # часть — та же задача пользователя: дизайн и выбор моделей переходят к ней
+                t["split_of"] = split_of
+                for f in ("ui",) + MODEL_FIELDS:
+                    if not t.get(f) and parent.get(f):
+                        t[f] = parent[f]
         for t in tasks:
             if t["id"] in existing and existing[t["id"]].get("state") not in TERMINAL:
                 raise AiflowError(f"задача {t['id']} уже есть в очереди")
@@ -3939,6 +3962,12 @@ def cmd_enqueue(args, root: Path) -> int:
             store.save_task(t)
             store.event("enqueued", t["id"], f"{t['id']}: поставлена в очередь"
                         + (f" ({t['complexity']})" if t.get("complexity") else ""))
+        if parent:
+            parent["split_into"] = list(dict.fromkeys((parent.get("split_into") or []) + ids))
+            parent.setdefault("history", []).append({"at": iso(), "event": "split", "into": ids})
+            store.save_task(parent)
+            store.event("split", split_of, f"{split_of}: задача разбита — она остаётся первой частью, "
+                        "остальные части: " + ", ".join(ids))
     finally:
         lock.release()
     print(f"В очереди{' проекта ' + project if project else ''}: {len(tasks)} — " + ", ".join(ids))
@@ -4634,6 +4663,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="несколько задач за один вызов: пользователь просил раздельно или это отдельные фичи")
     e.add_argument("--project", help="поставить в другой проект службы (имя папки репозитория)")
     e.add_argument("--then", metavar="ID", help="задача этого проекта, которая подождёт поставленные")
+    e.add_argument("--split-of", metavar="ID", dest="split_of",
+                   help="поставленные задачи — остальные части задачи ID, которую пользователь решил разбить")
     af = sub.add_parser("after", help="поставить задачу после другой: id или проект/id")
     af.add_argument("id")
     af.add_argument("dep")

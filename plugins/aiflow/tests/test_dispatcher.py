@@ -1045,11 +1045,33 @@ class Dependencies(ProjectCase):
         self.assertEqual(cycle[0], cycle[-1])
         self.assertEqual(set(cycle), {"a", "b", "c"})
 
-    def enqueue(self, items, separate=True) -> None:
+    def enqueue(self, items, separate=True, **more) -> None:
         path = self.tmp / "tasks.json"
         path.write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
         with contextlib.redirect_stdout(io.StringIO()):
-            aiflow.cmd_enqueue(argparse.Namespace(file=str(path), separate=separate), self.root)
+            aiflow.cmd_enqueue(argparse.Namespace(file=str(path), separate=separate, **more), self.root)
+
+    def test_split_queues_the_other_parts_of_a_task(self):
+        parts = [{"id": "p2", "text": "вторая часть", "depends_on": ["big"]},
+                 {"id": "p3", "text": "третья часть", "depends_on": ["p2"]}]
+        with self.assertRaisesRegex(aiflow.AiflowError, "no task big"):
+            self.enqueue(parts, separate=False, split_of="big")
+        self.assertEqual(self.store.tasks(), [])
+        self.add("big")
+        self.patch("big", ui="docs/design", worker_model="opus", pr=7)
+        self.enqueue(parts, separate=False, split_of="big")  # флаг --separate частям не нужен
+        p2, p3, big = self.store.task("p2"), self.store.task("p3"), self.store.task("big")
+        self.assertEqual((p2["split_of"], p2["ui"], p2["worker_model"], p2["depends_on"]), ("big", "docs/design", "opus", ["big"]))
+        self.assertEqual((p3["split_of"], p3["depends_on"]), ("big", ["p2"]))
+        self.assertEqual(big["split_into"], ["p2", "p3"])
+        self.assertIn("part of task big", aiflow.planner_prompt(self.store, p2, self.store.config()))
+        self.assertIn("PR #7", aiflow.split_note(self.store, p2))
+        self.assertEqual(aiflow.split_note(self.store, big), "")
+        row = {r["id"]: r for r in aiflow.build_state(self.store)["tasks"]}
+        self.assertEqual((row["p2"]["split_of"], row["big"]["split_into"]), ("big", ["p2", "p3"]))
+        self.patch("big", state="merged")
+        with self.assertRaisesRegex(aiflow.AiflowError, "no task big"):
+            self.enqueue([{"id": "p4", "text": "ещё"}], split_of="big")
 
     def test_several_tasks_in_one_call_need_the_separate_flag(self):
         two = [{"id": "x1", "text": "one"}, {"id": "x2", "text": "two"}]

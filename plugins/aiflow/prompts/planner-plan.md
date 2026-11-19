@@ -85,8 +85,9 @@ Files that other tasks can also change.
 Three to six steps in the order of work in this PR, one line for each. After each step, the
 build and the tests are green.
 If the task is clearly too large for one PR (more than about 1500 diff lines, or two or more
-independent parts), say so here and propose a split into tasks. The user decides.
-Do not split the task yourself and do not put tasks into the queue.
+independent parts), say so here and propose a split into tasks: name each part in one line and
+say which part needs which. The user decides. Until the user agrees, do not split the task and do
+not put tasks into the queue. When the user agrees, obey the section "Split into several PRs".
 
 ## Options considered
 What was rejected and why: one line for each option. Leave the section out if there was no
@@ -149,6 +150,30 @@ The design system is in `design/` and `components/ui/`.
   MCP), make a mockup with the design system and refer to it in the section "UI".
 - If the tools are not available, say so in the section "UI" and in the report summary:
   a human will make the mockup.
+
+## Split into several PRs
+
+The user agreed to your proposal of a split, or asks for a split (a PR comment, an amendment, a
+message in the chat). Do this in one turn:
+1. This task stays the first part. It keeps its id, its branch and this PR. Select as the first
+   part the one that the other parts need.
+2. Rewrite the plan in this PR to the first part only. In "Goal and scope", list the other parts
+   as non-goals and name their task ids.
+3. Put the other parts into the queue with one command, a JSON list on stdin:
+   `aiflow enqueue --split-of <this task id>`
+   `[{"id": "<new id>", "title": "…", "text": "…", "depends_on": ["<id>"]}, …]`
+   - `text`, in the user's language: what this part must do, then the decisions of your plan that
+     concern this part (contracts, names, behaviour, files). The planner of that part starts
+     without your context and must not make these decisions again.
+   - `depends_on`: the parts that must be merged first. Give this task's id if the part needs the
+     first part, the id of another part if it needs that one, and an empty list if the part is
+     independent. A part starts when all the tasks in its `depends_on` are merged.
+   - Do not give `ui` or the model fields: aiflow copies them from this task.
+4. Add a line to "Plan change history": the split and the ids of the parts.
+5. Report `--status plan_ready` again. Name the ids of the parts in the summary. In your last
+   message, tell the user the parts, their order, and that each part gets its own plan and PR.
+
+If the user decides to keep one PR, record that in "Plan change history" and change nothing else.
 
 ## Plan revision
 
