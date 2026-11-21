@@ -546,6 +546,45 @@ def record_reviewer(root: Path | None, task: dict | None, entry: dict) -> None:
         pass
 
 
+# Ключи, которыми модели называют список замечаний вместо положенного, и текст замечания вместо "text".
+LIST_ALIASES = ("comments", "findings", "issues", "problems")
+TEXT_ALIASES = ("text", "issue", "message", "comment", "description", "body", "problem")
+
+
+def coerce_reply(data: dict | None, key: str) -> dict | None:
+    """Привести ответ ревьюера к схеме, если он отличается только названиями ключей: список замечаний под
+    другим именем (findings вместо comments), текст замечания в issue или message. Содержательный ответ
+    с такой опиской раньше отбрасывался целиком, и ревью шло заново. Серьёзность не трогаем: незнакомая
+    считается блокирующей (normalize). Ответ без списка замечаний не принимается: это не «замечаний нет»."""
+    if not isinstance(data, dict):
+        return None
+    if not isinstance(data.get(key), list):
+        other = next((k for k in LIST_ALIASES if k != key and isinstance(data.get(k), list)), None)
+        if other is None:
+            return None
+        data = {**data, key: data[other]}
+    items = []
+    for c in data[key]:
+        if isinstance(c, dict) and not str(c.get("text") or "").strip():
+            alt = next((str(c[k]).strip() for k in TEXT_ALIASES if isinstance(c.get(k), str) and c[k].strip()), "")
+            if alt:
+                c = {**c, "text": alt}
+        items.append(c)
+    return {**data, key: items}
+
+
+def repair_message(key: str, had_text: bool) -> str:
+    """Просьба той же сессии ревьюера дослать ответ по схеме. Ревью при этом не начинается заново:
+    всё прочитанное уже в её контексте."""
+    what = ("Your last reply was not accepted: it is not one JSON object in the form your instructions give."
+            if had_text else
+            "Your turn ended without the reply. If a tool call was rejected, do not repeat it: work only inside "
+            "this repository, with the tools you are allowed.")
+    return (f"{what} Do not start the review again. Complete it if it is not complete, then reply with exactly one "
+            f"JSON object and nothing else. It must have the key \"{key}\" (a list, empty if you have none) and the "
+            "other keys from your instructions.")
+
+
 def call_reviewer(r: Runner, pr: int, rnd: int, max_rounds: int, model: str, brief: str, tmp: Path,
                   idle_minutes: float = 5, timeout_minutes: float = 45, plan: bool = False) -> dict:
     """plan — ревью плана, а не кода: свой агент и инструкции (plan-reviewer), в ответе ключ findings."""
@@ -556,15 +595,17 @@ def call_reviewer(r: Runner, pr: int, rnd: int, max_rounds: int, model: str, bri
     if plan:
         message = (f"Review the plan in pull request #{pr}. The brief follows this message: read the plan and the "
                    "repository yourself as it says. Reply with exactly one JSON object following your instructions.")
-    materials = brief
     name, key = ("plan-reviewer", "findings") if plan else ("reviewer", "comments")
     env = reviewer_config(r, tmp, name)
-    cmd = [r.opencode, "run", message, "--agent", f"aiflow-{name}", "--format", "json",
-           "--title", f"aiflow: ревью плана PR #{pr}" if plan else f"aiflow: ревью PR #{pr}, раунд {rnd}"]
-    if model:
-        cmd += ["--model", model]
+    tail = ["--agent", f"aiflow-{name}", "--format", "json"] + (["--model", model] if model else [])
+    title = ["--title", f"aiflow: ревью плана PR #{pr}" if plan else f"aiflow: ревью PR #{pr}, раунд {rnd}"]
+    pure: list[str] = []
     last = err = ""
-    for attempt in range(1, PARSE_ATTEMPTS + 1):
+    events: list[dict] = []
+
+    def one_run(cmd: list[str], text: str, attempt: int, repair: bool) -> tuple[int, str, str | None, int]:
+        """Один прогон opencode. → (код выхода, ответ модели, id сессии, шагов модели)."""
+        nonlocal events, err
         seen: list[dict] = []
         started = aiflow.iso()
 
@@ -578,8 +619,10 @@ def call_reviewer(r: Runner, pr: int, rnd: int, max_rounds: int, model: str, bri
                           tokens=u["input"] + u["output"] + u["cache_write"],
                           doing=doing or (CTX.get("phase") or (None, {}))[1].get("doing"))
 
+        session = None
+        usage = events_usage(seen)
         try:
-            code, events, other, err = stream_events(cmd, env=env, cwd=r.cwd, input=materials, timeout=timeout_minutes * 60,
+            code, events, other, err = stream_events(cmd, env=env, cwd=r.cwd, input=text, timeout=timeout_minutes * 60,
                                                     idle=idle_minutes * 60, on_event=progress)
         finally:
             # расход записывается и за неудавшийся прогон: токены на него потрачены
@@ -588,21 +631,34 @@ def call_reviewer(r: Runner, pr: int, rnd: int, max_rounds: int, model: str, bri
             if usage["steps"] or session:
                 record_reviewer(CTX["root"], CTX["task"], {
                     "session": session, "round": rnd, "attempt": attempt, "at": started, "pr": pr,
-                    "model": model or "opencode", "dir": str(r.cwd), **({"kind": "plan"} if plan else {}), **usage})
+                    "model": model or "opencode", "dir": str(r.cwd), **({"kind": "plan"} if plan else {}),
+                    **({"repair": True} if repair else {}), **usage})
                 CTX["reviewer_session"] = session
-        last = events_text(events) or other
-        data = extract_json(last)
-        if data is not None and key in data:
+        return code, events_text(events) or other, session, usage["steps"]
+
+    for attempt in range(1, PARSE_ATTEMPTS + 1):
+        code, last, session, steps = one_run([r.opencode, "run", *pure, message, *tail, *title], brief, attempt, False)
+        data = coerce_reply(extract_json(last), key)
+        if data is not None:
             return data
-        if code != 0 and not last.strip() and "--pure" not in cmd:
+        if session and (steps or last.strip()):
+            # Модель отработала, но ответа по схеме нет: ход кончился отклонённым вызовом инструмента или
+            # текстом не в том виде. Просим ту же сессию дослать ответ — это минута, а не новое ревью.
+            code, fixed, _, _ = one_run([r.opencode, "run", *pure, repair_message(key, bool(last.strip())),
+                                         "--session", session, *tail], "", attempt, True)
+            data = coerce_reply(extract_json(fixed), key)
+            if data is not None:
+                return data
+            last = fixed if fixed.strip() else last
+        elif code != 0 and not last.strip() and not pure:
             # opencode упал до ответа модели. Бывает, что в каталоге проекта ломается один из
             # встроенных плагинов opencode; ревьюеру они не нужны — повторяем без них.
-            cmd = cmd[:2] + ["--pure"] + cmd[2:]
+            pure = ["--pure"]
     why = reviewer_failure(r, model, events)
     if why:
         raise RuntimeError(why)
-    tail = last[-2000:] if last.strip() else "(пусто)"
-    raise RuntimeError("ревьюер не вернул валидный JSON. Конец вывода:\n" + tail
+    end = last[-2000:] if last.strip() else "(пусто)"
+    raise RuntimeError("ревьюер не вернул валидный JSON. Конец вывода:\n" + end
                        + (f"\nstderr opencode: {err[-800:]}" if err else ""))
 
 

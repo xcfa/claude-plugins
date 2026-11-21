@@ -495,6 +495,79 @@ class Reviewer(ProjectCase):
         self.assertAlmostEqual(usage["models"]["opencode-go/deepseek"]["reported_cost"], 0.002)
 
 
+    # -- ответ не по схеме: починка в той же сессии вместо нового ревью
+    def scripted(self, replies: list[list[dict]]):
+        """Вместо opencode — заготовленные прогоны: каждый вызов stream_events отдаёт следующий."""
+        t = self.add("a")
+        t.update(state="in_review", pr=7)
+        self.store.save_task(t)
+        review.CTX.update(root=self.root, task=t, pr=7, round=1, phase=None)
+        self.addCleanup(lambda: review.CTX.update(root=None, task=None, pr=None, round=None, phase=None))
+        calls: list[dict] = []
+
+        def fake(cmd, *, env, cwd, input, timeout, idle, on_event=None):
+            events = replies[len(calls)]
+            calls.append({"cmd": cmd, "input": input})
+            for e in events:
+                on_event(e)
+            return 0, events, "", ""
+
+        r = SimpleNamespace(opencode="opencode", cwd=self.tmp, plain_env={},
+                            run=lambda *a, **k: SimpleNamespace(stdout=""))
+        patches = [mock.patch.object(review, "reviewer_config", lambda r, tmp, name="reviewer": None),
+                   mock.patch.object(review, "stream_events", fake)]
+        for x in patches:
+            x.start()
+            self.addCleanup(x.stop)
+        return r, calls
+
+    def test_turn_that_ended_on_a_rejected_tool_is_repaired_in_the_same_session(self):
+        # так было в жизни: модель отработала несколько шагов, последний вызов инструмента отклонён, текста нет
+        r, calls = self.scripted([PROBE[:3], PROBE[3:]])
+        data = review.call_reviewer(r, 7, 1, 5, "m/x", "brief", self.tmp)
+        self.assertEqual(data["summary"], "ок")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["input"], "brief")
+        second = calls[1]["cmd"]
+        self.assertEqual(second[second.index("--session") + 1], "ses_test1")
+        self.assertEqual(calls[1]["input"], "")  # задание второй раз не отправляется: оно уже в сессии
+        self.assertIn("Do not start the review again", second[2])
+        self.assertIn("rejected", second[2])
+        runs = aiflow.reviewer_runs(self.store, "a")
+        self.assertEqual([bool(x.get("repair")) for x in runs], [False, True])  # расход починки тоже записан
+
+    def test_reply_in_the_wrong_form_is_repaired_too(self):
+        prose = [PROBE[0], ev("text", type="text", text="Замечаний нет, всё хорошо."), PROBE[5]]
+        r, calls = self.scripted([prose, PROBE[3:]])
+        self.assertEqual(review.call_reviewer(r, 7, 1, 5, "m/x", "brief", self.tmp)["comments"], [])
+        self.assertIn("not one JSON object", calls[1]["cmd"][2])
+
+    def test_failed_repair_starts_a_new_attempt_and_the_limit_holds(self):
+        prose = [PROBE[0], ev("text", type="text", text="не JSON"), PROBE[5]]
+        r, calls = self.scripted([prose] * (2 * review.PARSE_ATTEMPTS))
+        with self.assertRaises(RuntimeError) as cm:
+            review.call_reviewer(r, 7, 1, 5, "", "brief", self.tmp)
+        self.assertIn("не вернул валидный JSON", str(cm.exception))
+        self.assertEqual(len(calls), 2 * review.PARSE_ATTEMPTS)
+        self.assertEqual(["--session" in c["cmd"] for c in calls], [False, True] * review.PARSE_ATTEMPTS)
+
+    def test_other_names_of_the_same_keys_are_accepted(self):
+        # ответ из жизни: findings вместо comments, issue вместо text, своя серьёзность
+        reply = {"summary": "s", "findings": [{"severity": "must", "file": "a.sh", "line": 3, "issue": "сломано"}]}
+        data = review.coerce_reply(reply, "comments")
+        verdict, comments, _ = review.normalize(data, False)
+        self.assertEqual(verdict, "changes")
+        self.assertEqual(comments, [{"severity": "blocking", "file": "a.sh", "line": 3, "text": "сломано"}])
+        plan = review.coerce_reply({"comments": [{"severity": "advice", "message": "уточнить"}]}, "findings")
+        self.assertEqual(review.normalize_plan(plan)[0][0]["text"], "уточнить")
+
+    def test_reply_without_a_list_of_comments_is_not_an_approval(self):
+        self.assertIsNone(review.coerce_reply({"summary": "всё хорошо"}, "comments"))
+        self.assertIsNone(review.coerce_reply({"comments": "нет"}, "comments"))
+        self.assertIsNone(review.coerce_reply(None, "comments"))
+        self.assertEqual(review.coerce_reply({"comments": []}, "comments"), {"comments": []})
+
+
 class Streak(ProjectCase):
     def test_streak_counts_only_repeats(self):
         (self.root / ".aiflow" / "a").mkdir()
