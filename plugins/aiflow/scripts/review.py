@@ -417,8 +417,32 @@ def stream_events(cmd, *, env, cwd, input: str, timeout: float, idle: float, on_
         finally:
             sink(None)
 
-    threading.Thread(target=pump, args=(proc.stdout, lines.put), daemon=True).start()
-    threading.Thread(target=pump, args=(proc.stderr, lambda x: err.append(x) if x is not None else None), daemon=True).start()
+    pumps = [threading.Thread(target=pump, args=(proc.stdout, lines.put), daemon=True),
+             threading.Thread(target=pump, args=(proc.stderr, lambda x: err.append(x) if x is not None else None), daemon=True)]
+    for th in pumps:
+        th.start()
+
+    def close() -> None:
+        """Закрыть каналы процесса. Только когда оба потока чтения закончили: закрытие канала, который ещё
+        читается (уцелевший потомок держит его открытым), само ждало бы конца чтения."""
+        for th in pumps:
+            th.join(timeout=5)
+        if any(th.is_alive() for th in pumps):
+            return
+        for stream in (proc.stdout, proc.stderr):
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+
+    def stop() -> None:
+        aiflow.kill_tree(proc)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+        close()
+
     try:
         proc.stdin.write(input)
         proc.stdin.close()
@@ -429,10 +453,10 @@ def stream_events(cmd, *, env, cwd, input: str, timeout: float, idle: float, on_
     while True:
         now = time.time()
         if now - started > timeout:  # проверяется на каждом шаге: поток событий может не умолкать
-            aiflow.kill_tree(proc)
+            stop()
             raise subprocess.TimeoutExpired(cmd, timeout)
         if idle and now - last > idle:
-            aiflow.kill_tree(proc)
+            stop()
             raise ReviewerStalled(f"ревьюер opencode молчит {int(idle // 60)} мин и был остановлен")
         try:
             line = lines.get(timeout=1)
@@ -459,11 +483,7 @@ def stream_events(cmd, *, env, cwd, input: str, timeout: float, idle: float, on_
     except subprocess.TimeoutExpired:
         aiflow.kill_tree(proc)
         code = -1
-    for stream in (proc.stdout, proc.stderr):
-        try:
-            stream.close()
-        except (OSError, ValueError):
-            pass
+    close()
     return code, events, "\n".join(other), ANSI_RE.sub("", "".join(err)).strip()
 
 

@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from helpers import PLAN, ProjectCase, ago, aiflow
@@ -360,7 +361,10 @@ class InReview(ProjectCase):
 
     def test_board_step_follows_the_approval_the_ci_and_the_head_commit(self):
         review, merge = aiflow.STAGES.index("in_review"), aiflow.STAGES.index("merged")
-        stage = lambda: next(r for r in aiflow.build_state(self.store)["tasks"] if r["id"] == "a")["stage"]
+
+        def stage():
+            return next(r for r in aiflow.build_state(self.store)["tasks"] if r["id"] == "a")["stage"]
+
         self.start()
         self.tick()
         self.assertEqual(stage(), review)
@@ -2251,8 +2255,10 @@ class TrayAndApp(ProjectCase):
         self.add("b", state="in_progress")
         self.add("c", state="merged")
         srv, url = aiflow_ui.start_server(lambda: [self.store], 0, threading.Event())
+        self.addCleanup(srv.server_close)
         self.addCleanup(srv.shutdown)
-        data = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{srv.server_address[1]}/api/tray", timeout=10).read().decode("utf-8"))
+        with urllib.request.urlopen(f"http://127.0.0.1:{srv.server_address[1]}/api/tray", timeout=10) as r:
+            data = json.loads(r.read().decode("utf-8"))
         self.assertEqual([w["id"] for w in data["waiting"]], ["a"])
         self.assertEqual(data["active"], 1)
         self.assertEqual(data["projects"][0]["name"], "repo")
@@ -2306,9 +2312,10 @@ class InstallableApp(ProjectCase):
         import aiflow_ui
         if not hasattr(self, "srv"):
             self.srv, _ = aiflow_ui.start_server(lambda: [self.store], 0, threading.Event())
+            self.addCleanup(self.srv.server_close)
             self.addCleanup(self.srv.shutdown)
-        r = urllib.request.urlopen(f"http://127.0.0.1:{self.srv.server_address[1]}{path}", timeout=10)
-        return r.headers.get("Content-Type"), r.read()
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.srv.server_address[1]}{path}", timeout=10) as r:
+            return r.headers.get("Content-Type"), r.read()
 
     def test_panel_serves_what_a_browser_needs_to_install_it(self):
         ctype, body = self.get("/manifest.webmanifest")

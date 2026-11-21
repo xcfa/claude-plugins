@@ -15,7 +15,6 @@ import json
 import math
 import os
 import re
-import secrets
 import shutil
 import subprocess
 import sys
@@ -525,9 +524,9 @@ def run(cmd: list[str], *, cwd=None, timeout: int = 120, env=None, input: str | 
     try:
         return run_tree(cmd, cwd=cwd, timeout=timeout, env=env, input=input)
     except FileNotFoundError:
-        raise AiflowError(f"не найдено: {cmd[0]}")
+        raise AiflowError(f"не найдено: {cmd[0]}") from None
     except subprocess.TimeoutExpired:
-        raise AiflowError(f"таймаут {timeout} с: {' '.join(cmd[:3])}")
+        raise AiflowError(f"таймаут {timeout} с: {' '.join(cmd[:3])}") from None
 
 
 # Сбой сети до отправки запроса: повторять безопасно всегда.
@@ -4808,6 +4807,7 @@ def cmd_ui(args, root: Path) -> int:
             time.sleep(3600)
     except KeyboardInterrupt:
         srv.shutdown()
+        srv.server_close()
     finally:
         (store.runs / "ui.pid").unlink(missing_ok=True)
     return 0

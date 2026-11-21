@@ -1,0 +1,8 @@
+# Линтер для кода плагинов: python -m ruff check plugins
+target-version = "py39"  # README обещает Python 3.9+: синтаксис новее — ошибка
+line-length = 140
+
+[lint]
+select = ["E", "F", "W", "B"]
+# E501: длинные строки с русским текстом сообщений и промптов не переносятся ради числа
+ignore = ["E501"]

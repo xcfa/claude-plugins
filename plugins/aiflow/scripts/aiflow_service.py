@@ -317,6 +317,7 @@ class _Panel:
     def shutdown(self) -> None:
         if self.srv:
             self.srv.shutdown()
+            self.srv.server_close()
 
 
 def _start_tray(panel: _Panel) -> bool:
