@@ -12,6 +12,7 @@ import argparse
 import datetime as dt
 import glob
 import json
+import math
 import os
 import re
 import secrets
@@ -119,6 +120,41 @@ WHAT_TO_DO = {
 }
 REVIEW_ACTIONS = {"error": "tool", "no_ci": "noci", "limit_reached": "rounds", "already_closed": "closed",
                   "blocked": "asks"}
+# Те же ключи — коды причины в истории задачи (history[].code) и строки статистики: что сломалось.
+HUMAN_CODES = {
+    "tool": "сбой инструмента: ревьюер, opencode, сеть",
+    "rounds": "ревьюер и исполнитель не договорились за отведённые раунды",
+    "ci": "CI не удалось починить",
+    "noci": "проверки CI не появились",
+    "paths": "защищённые пути",
+    "session": "сессия остановилась и не продолжила",
+    "silent": "сессия закончила ход без отчёта",
+    "asks": "сессия просит решения",
+    "stall": "ревью зависло",
+    "merge": "одобренный PR не мержится",
+    "report": "отчёт сессии не принят",
+    "deps": "сломана зависимость",
+    "label": "метка needs-human на PR",
+    "closed": "PR закрыт",
+    "other": "прочее",
+}
+assert set(WHAT_TO_DO) <= set(HUMAN_CODES)
+# У переходов, записанных до появления кодов, причина — только текст: код узнаётся по словам, первое совпадение.
+HUMAN_CODE_WORDS = (
+    ("paths", ("защищ", "protected")),
+    ("noci", ("ни одной проверки", "проверки ci так и не")),
+    ("rounds", ("лимит раундов",)),
+    ("ci", ("ci красный", "упал ci", "ci не ")),
+    ("tool", ("json", "opencode", "ревьюер", "таймаут", "tls", "http ", "gh pr ", "gh api", "не ответил")),
+    ("merge", ("не смержен",)),
+    ("label", ("needs-human",)),
+    ("deps", ("зависим",)),
+    ("report", ("отчёт", "без номера pr")),
+    ("stall", ("не двигается",)),
+    ("silent", ("закончил ход", "не доведя")),
+    ("session", ("сесси",)),
+    ("closed", ("закрыт",)),
+)
 
 
 CI_PASS = {"SUCCESS", "NEUTRAL", "SKIPPED"}
@@ -2017,9 +2053,11 @@ class Dispatcher:
         ev = self.store.event(kind, t["id"] if t else None, text)
         self.events.append(ev)
 
-    def set_state(self, t: dict, state: str, note: str = "") -> None:
+    def set_state(self, t: dict, state: str, note: str = "", code: str = "") -> None:
+        """code — код причины перехода (ключ HUMAN_CODES): по нему считает статистика, note — текст для человека."""
         if t.get("state") != state:
-            t.setdefault("history", []).append({"at": iso(), "from": t.get("state"), "to": state, "note": note})
+            t.setdefault("history", []).append({"at": iso(), "from": t.get("state"), "to": state, "note": note,
+                                                **({"code": code} if code else {})})
             seen = visited_stations(t) | {STATION[s] for s in (t.get("state"), state) if s in STATION and s != "done"}
             t["stations"] = sorted(seen)
             del t["history"][:-HISTORY_KEEP]
@@ -2231,7 +2269,7 @@ class Dispatcher:
         # снова заработает, задача вернётся в свою стадию (см. adv_needs_human).
         t["human_watch"] = {"role": role, "seen": self.sstate(self.cur(t, role)) if role else None,
                             "report": t.get("report_seen")}
-        self.set_state(t, "needs_human", reason)
+        self.set_state(t, "needs_human", reason, code=action if action in HUMAN_CODES else "other")
         if t.get("pr"):
             self.gh.add_label(t["pr"], self.cfg["labels"]["needs_human"])
         todo = f" Что сделать: {t['human_action']}" if t["human_action"] else ""
@@ -3645,6 +3683,7 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
         "usage": total_usage, "cost": round(total_cost, 4), "unpriced": unpriced,
         "coordinator": coordinator,  # чаты «Дать задачу»: входят в итог проекта, но не относятся ни к одной задаче
         "tasks": out, "events": list(reversed(store.events(40))), "now": iso(),
+        "stats": build_stats(store, STATS_DAYS, tasks),
     }
 
 
@@ -3707,6 +3746,158 @@ def print_status(state: dict) -> None:
             print(f"  {t['id']}: {t['needs']}" + (f" — {t['pr_url']}" if t["pr_url"] else ""))
             if t.get("action"):
                 print(f"    что сделать: {t['action']}")
+
+
+# ---------------------------------------------------------------- статистика
+
+STATS_DAYS = 30
+# стадии, время в которых показывает статистика, в порядке конвейера
+STATS_STAGES = ("planning", "plan_check", "plan_review", "approved", "in_progress", "ready", "in_review", "needs_human")
+
+
+def human_code(h: dict) -> str:
+    """Код причины перехода в «нужен человек» (ключ HUMAN_CODES)."""
+    if h.get("code") in HUMAN_CODES:
+        return h["code"]
+    note = str(h.get("note") or "").lower()
+    return next((code for code, words in HUMAN_CODE_WORDS if any(w in note for w in words)), "other")
+
+
+def median(values: list[float]) -> float | None:
+    v = sorted(values)
+    if not v:
+        return None
+    mid = len(v) // 2
+    return v[mid] if len(v) % 2 else (v[mid - 1] + v[mid]) / 2
+
+
+def percentile(values: list[float], q: float) -> float | None:
+    """Значение, не больше которого доля q значений (ближайший ранг)."""
+    v = sorted(values)
+    return v[max(0, min(len(v) - 1, math.ceil(q * len(v)) - 1))] if v else None
+
+
+def stage_hours(t: dict) -> dict[str, float]:
+    """Сколько часов задача провела в каждой стадии — по истории переходов. Незаконченная стадия идущей
+    задачи считается до текущего момента. История хранит последние HISTORY_KEEP переходов: у задачи,
+    которая ходила по кругу дольше, начало не учитывается."""
+    out: dict[str, float] = {}
+    hist = sorted((h for h in t.get("history") or [] if parse_iso(h.get("at"))), key=lambda h: parse_iso(h["at"]))
+    for i, h in enumerate(hist):
+        start = parse_iso(h["at"])
+        if i + 1 < len(hist):
+            end = parse_iso(hist[i + 1]["at"])
+        elif h.get("to") in TERMINAL:
+            continue
+        else:
+            end = now()
+        if h.get("to"):
+            out[h["to"]] = out.get(h["to"], 0.0) + max(0.0, (end - start).total_seconds() / 3600)
+    return out
+
+
+def build_stats(store: Store, days: int = STATS_DAYS, tasks: list[dict] | None = None) -> dict:
+    """Сводка по задачам проекта, созданным за последние days дней (0 — за всё время): сколько раз и почему
+    задачи уходили к человеку, сколько раундов ревью, время по стадиям, цена. Вопросы и обсуждения
+    (kind ask, discuss) не считаются: у них нет ни ревью, ни мержа."""
+    since = now() - dt.timedelta(days=days) if days else None
+    picked = []
+    for t in tasks if tasks is not None else store.tasks():
+        created = parse_iso(t.get("created_at"))
+        if t.get("kind") in TALK_KINDS or (since and created and created < since):
+            continue
+        picked.append(t)
+    prices = price_table()
+    codes: dict[str, int] = {}
+    asked, rounds, lead, costs = 0, {}, [], []
+    stages: dict[str, list[float]] = {}
+    for t in picked:
+        to_human = [h for h in t.get("history") or [] if h.get("to") == "needs_human"]
+        asked += bool(to_human)
+        for h in to_human:
+            code = human_code(h)
+            codes[code] = codes.get(code, 0) + 1
+        for st, hours in stage_hours(t).items():
+            if st in STATS_STAGES:
+                stages.setdefault(st, []).append(hours)
+        if t.get("state") not in FINISHED:
+            continue
+        rnd = (store.review(t["id"]) or {}).get("round")
+        if t.get("state") == "merged" and isinstance(rnd, int) and rnd > 0:
+            rounds[rnd] = rounds.get(rnd, 0) + 1
+        done = [h.get("at") for h in t.get("history") or [] if h.get("to") in FINISHED] or [t.get("state_at")]
+        a, b = parse_iso(t.get("created_at")), parse_iso(done[-1])
+        if a and b:
+            lead.append(max(0.0, (b - a).total_seconds() / 3600))
+        cost = priced(task_usage(t), prices)[1]
+        if cost:
+            costs.append(cost)
+    reviewed = sum(rounds.values())
+
+    def r1(x: float | None) -> float | None:
+        return None if x is None else round(x, 1)
+
+    return {
+        "days": days, "tasks": len(picked),
+        "finished": sum(1 for t in picked if t.get("state") in FINISHED),
+        "cancelled": sum(1 for t in picked if t.get("state") == "cancelled"),
+        "active": sum(1 for t in picked if t.get("state") not in TERMINAL),
+        "human": {"tasks": asked, "times": sum(codes.values()),
+                  "codes": [{"code": c, "label": HUMAN_CODES[c], "n": n}
+                            for c, n in sorted(codes.items(), key=lambda x: (-x[1], x[0]))]},
+        "rounds": {"by_round": {str(k): rounds[k] for k in sorted(rounds)}, "reviewed": reviewed,
+                   "average": r1(sum(k * n for k, n in rounds.items()) / reviewed) if reviewed else None},
+        "hours": {"median": r1(median(lead)), "p90": r1(percentile(lead, 0.9)), "tasks": len(lead)},
+        "stages": [{"state": st, "label": STAGE_LABEL.get(st, st), "tasks": len(stages[st]),
+                    "median": round(median(stages[st]) or 0.0, 2), "total": r1(sum(stages[st]))}
+                   for st in STATS_STAGES if stages.get(st)],
+        "cost": {"total": round(sum(costs), 2), "median": None if not costs else round(median(costs) or 0.0, 2),
+                 "tasks": len(costs)},
+    }
+
+
+def fmt_hours(h: float | None) -> str:
+    if h is None:
+        return "—"
+    return f"{h * 60:.0f} мин" if h < 1 else f"{h:.1f} ч" if h < 48 else f"{h / 24:.1f} дн"
+
+
+def print_stats(name: str, s: dict) -> None:
+    span = f"за {s['days']} дн" if s["days"] else "за всё время"
+    print(f"aiflow · {name} · статистика {span}")
+    if not s["tasks"]:
+        print("Задач за это время нет.")
+        return
+    print(f"Задач: {s['tasks']} — выполнено {s['finished']}, снято {s['cancelled']}, идут {s['active']}")
+    h = s["human"]
+    print(f"Уходили к человеку: {h['tasks']} из {s['tasks']} ({h['tasks'] * 100 // s['tasks']}%), всего {h['times']} раз")
+    for c in h["codes"]:
+        print(f"  {c['n']:3d}  {c['label']}")
+    r = s["rounds"]
+    if r["reviewed"]:
+        print("Раундов ревью до одобрения: " + ", ".join(f"{k} — {n}" for k, n in r["by_round"].items())
+              + f" (в среднем {r['average']})")
+    if s["hours"]["tasks"]:
+        print(f"От постановки до готовности: медиана {fmt_hours(s['hours']['median'])}, "
+              f"90% задач — до {fmt_hours(s['hours']['p90'])}")
+    if s["stages"]:
+        print("Время в стадии (медиана по задачам, которые в ней были):")
+        for st in s["stages"]:
+            print(f"  {fmt_hours(st['median']):>8}  {st['label']} ({st['tasks']})")
+    if s["cost"]["tasks"]:
+        print(f"Цена выполненной задачи по тарифам API: медиана ${s['cost']['median']:.2f}, всего ${s['cost']['total']:.2f}")
+
+
+def cmd_stats(args, root: Path) -> int:
+    store = Store(root)
+    if not store.initialized:
+        raise AiflowError("репозиторий не инициализирован: aiflow init")
+    stats = build_stats(store, max(0, int(args.days)))
+    if args.json:
+        print(json.dumps(stats, ensure_ascii=False, indent=2))
+    else:
+        print_stats(store.root.name, stats)
+    return 0
 
 
 # ---------------------------------------------------------------- commands
@@ -4717,6 +4908,9 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("status", help="состояние очереди")
     s.add_argument("--json", action="store_true")
     s.add_argument("--intake-rules", action="store_true", help=argparse.SUPPRESS)
+    sts = sub.add_parser("stats", help="статистика: причины ухода к человеку, раунды ревью, время по стадиям, цена")
+    sts.add_argument("--days", type=int, default=STATS_DAYS, help="задачи, созданные за столько дней; 0 — за всё время")
+    sts.add_argument("--json", action="store_true")
     sub.add_parser("tick", help="один проход")
     rn = sub.add_parser("run", help="монитор плагина: поднять службу и пересказывать события проекта")
     rn.add_argument("--events", action="store_true")
@@ -4790,7 +4984,7 @@ def main(argv: list[str] | None = None) -> int:
         if root is None:
             raise AiflowError("запустите aiflow внутри git-репозитория")
         handlers = {
-            "init": cmd_init, "enqueue": cmd_enqueue, "report": cmd_report, "status": cmd_status,
+            "init": cmd_init, "enqueue": cmd_enqueue, "report": cmd_report, "status": cmd_status, "stats": cmd_stats,
             "tick": cmd_tick, "run": cmd_run, "pause": cmd_pause, "resume": cmd_resume,
             "retry": cmd_retry, "cancel": cmd_cancel, "allow-path": cmd_allow_path, "after": cmd_after, "model": cmd_model, "approve": cmd_approve, "amend": cmd_amend, "reply": cmd_reply, "review": cmd_review, "review-plan": cmd_review_plan,
             "ui": cmd_ui, "chat": cmd_chat, "stop": cmd_stop,

@@ -50,7 +50,7 @@ header .sub b { font-weight: 600; color: var(--ink); }
 .queue .state.paused { color: var(--wait); font-weight: 600; }
 
 #waiting { margin-bottom: 32px; }
-#waiting h2, #usage h2, #events h2 { font-size: 15px; font-weight: 650; margin: 0 0 10px; }
+#waiting h2, #usage h2, #stats h2, #events h2 { font-size: 15px; font-weight: 650; margin: 0 0 10px; }
 .project { margin-bottom: 40px; }
 .phead { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px 24px; flex-wrap: wrap; margin-bottom: 12px; }
 .phead h2 { font-size: 19px; font-weight: 650; margin: 0; letter-spacing: -0.005em; }
@@ -74,6 +74,16 @@ button:disabled:hover { border-color: var(--rule); }
 .wait-item.fail { border-left-color: var(--fail); }
 
 #usage { margin-bottom: 36px; }
+#stats { margin-bottom: 36px; font-size: 13.5px; }
+#stats .st { max-width: 980px; margin-bottom: 16px; }
+#stats .st h3 { font-size: 14px; font-weight: 650; margin: 0 0 4px; }
+#stats .st p { margin: 2px 0 8px; }
+#stats .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 10px 32px; }
+#stats .cols h4 { font-size: 13px; font-weight: 500; color: var(--muted); margin: 0 0 4px; }
+#stats table { border-collapse: collapse; font-variant-numeric: tabular-nums; }
+#stats td { padding: 2px 10px 2px 0; vertical-align: top; }
+#stats td.n { text-align: right; font-weight: 600; white-space: nowrap; }
+#stats .note { color: var(--muted); font-size: 13px; max-width: 760px; }
 .grid { display: grid; grid-template-columns: minmax(200px, 280px) repeat(8, minmax(60px, 1fr)) minmax(150px, 190px); }
 .grid > div { min-width: 0; }
 .head { color: var(--muted); font-size: 12.5px; padding: 0 4px 8px; text-align: center; border-bottom: 1px solid var(--rule); hyphens: auto; overflow-wrap: anywhere; }
@@ -220,6 +230,12 @@ button:disabled:hover { border-color: var(--rule); }
     <tbody id="usagebody"></tbody>
   </table></div>
   <div class="note">Учитываются сессии задачи и их сабагенты; ревьюер opencode сюда не входит. «Токены» на доске — вход + выход + запись в кэш. Цена — оценка по тарифам API Anthropic с учётом модели и кэша (чтение из кэша дешевле входа, запись дороже): на подписке вы платите не за токены. Свои тарифы — <code>prices</code> в <code>~/.aiflow/config.json</code>.<span id="unpriced"></span></div>
+</section>
+
+<section id="stats" hidden>
+  <h2>Статистика за 30 дней</h2>
+  <div id="statsbody"></div>
+  <div class="note">Задачи, созданные за последние 30 дней, без вопросов и обсуждений. Время в стадии — медиана по задачам, которые в ней были. За другой срок — <code>aiflow stats --days N</code> в каталоге проекта.</div>
 </section>
 
 <section id="events">
@@ -519,6 +535,37 @@ function renderUsage() {
   $("unpriced").textContent = unpriced.size ? " Без цены (не вошли в сумму): " + [...unpriced].map(shortModel).join(", ") + "." : "";
 }
 
+function hours(h) {
+  return h == null ? "—" : h < 1 ? Math.round(h * 60) + " мин" : h < 48 ? h.toFixed(1) + " ч" : (h / 24).toFixed(1) + " дн";
+}
+
+function statRows(rows) {
+  return `<table>${rows.map(([n, text]) => `<tr><td class="n">${n}</td><td>${text}</td></tr>`).join("")}</table>`;
+}
+
+function renderStats() {
+  const blocks = [];
+  for (const p of last.projects) {
+    const s = p.stats;
+    if (!s || !s.tasks) continue;
+    const h = s.human, r = s.rounds, cols = [];
+    cols.push(`<div><h4>Уходили к человеку: ${h.tasks} из ${s.tasks} задач (${Math.floor(h.tasks * 100 / s.tasks)}%), всего ${h.times} раз</h4>`
+      + (h.codes.length ? statRows(h.codes.map(c => [c.n, esc(c.label)])) : "ни разу") + `</div>`);
+    if (s.stages.length) cols.push(`<div><h4>Время в стадии</h4>${statRows(s.stages.map(x => [hours(x.median), esc(x.label)]))}</div>`);
+    const sum = [];
+    if (r.reviewed) sum.push([r.average, "раунда ревью до одобрения в среднем: "
+      + Object.entries(r.by_round).map(([k, n]) => `${k} — ${n}`).join(", ")]);
+    if (s.hours.tasks) sum.push([hours(s.hours.median), `от постановки до готовности (90% задач — до ${hours(s.hours.p90)})`]);
+    if (s.cost.tasks) sum.push([money(s.cost.median), `цена выполненной задачи, всего ${money(s.cost.total)}`]);
+    if (sum.length) cols.push(`<div><h4>Ревью, срок, цена</h4>${statRows(sum)}</div>`);
+    blocks.push(`<div class="st">${many() ? `<h3>${esc(p.name)}</h3>` : ""}`
+      + `<p>Задач: ${s.tasks} — выполнено ${s.finished}, снято ${s.cancelled}, идут ${s.active}</p>`
+      + `<div class="cols">${cols.join("")}</div></div>`);
+  }
+  $("stats").hidden = blocks.length === 0;
+  setHTML($("statsbody"), blocks.join(""));
+}
+
 function tone(t) {
   if (t.state === "merged" || t.state === "done" || t.state === "answered") return "done";
   if (t.state === "needs_human") return "fail";
@@ -695,6 +742,7 @@ function render(s) {
   setBadge(s.projects.reduce((sum, p) => sum + (p.tasks || []).filter(t => t.needs).length, 0));
   setHTML($("projects"), s.projects.map(renderProject).join(""));
   renderUsage();
+  renderStats();
   renderEvents();
   renderSettingsProjects();
 }

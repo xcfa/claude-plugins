@@ -2334,3 +2334,105 @@ class InstallableApp(ProjectCase):
         home.mkdir(exist_ok=True)
         (home / "aiflow.ico").write_bytes(b"x")
         self.assertIsNone(aiflow_tray.installed_app(home))
+
+
+class Stats(ProjectCase):
+    """Статистика: причины ухода к человеку, раунды ревью, время по стадиям."""
+
+    def dispatcher(self):
+        d = aiflow.Dispatcher(self.store, self.claude, self.gh)
+        d.cfg, d.q = self.store.config(), self.store.queue()
+        return d
+
+    def history(self, *steps) -> list[dict]:
+        """steps — (сколько минут назад, из какой стадии, в какую[, текст[, код]])."""
+        out = []
+        for minutes, src, dst, *rest in steps:
+            h = {"at": ago(minutes), "from": src, "to": dst, "note": rest[0] if rest else ""}
+            if len(rest) > 1:
+                h["code"] = rest[1]
+            out.append(h)
+        return out
+
+    def test_the_reason_code_is_written_to_the_history(self):
+        d = self.dispatcher()
+        t = self.add("a", state="in_review")
+        d.to_human(t, "ревьюер не вернул валидный JSON", "tool")
+        self.assertEqual(t["history"][-1]["code"], "tool")
+        t = self.add("b", state="in_progress")
+        d.to_human(t, "Blocked: src/x.ts is a protected path", "asks")
+        self.assertEqual(t["history"][-1]["code"], "paths")  # защищённый путь важнее того, кто о нём сказал
+        t = self.add("c", state="in_progress")
+        d.to_human(t, "что-то ещё")
+        self.assertEqual(t["history"][-1]["code"], "other")
+
+    def test_every_advice_has_a_statistics_label(self):
+        self.assertLessEqual(set(aiflow.WHAT_TO_DO), set(aiflow.HUMAN_CODES))
+        self.assertLessEqual({c for c, _ in aiflow.HUMAN_CODE_WORDS}, set(aiflow.HUMAN_CODES))
+
+    def test_old_records_without_a_code_are_read_by_their_text(self):
+        for note, code in (("ревьюер не вернул валидный JSON. Конец вывода:", "tool"),
+                           ("opencode не ответил за 900 с и был остановлен", "tool"),
+                           ("на PR нет ни одной проверки CI, а без неё мержить нельзя", "noci"),
+                           ("CI красный 5 раз подряд: починить не удаётся", "ci"),
+                           ("лимит раундов исчерпан, PR помечен needs-human", "rounds"),
+                           ("Изменение защищённого пути без разрешения", "paths"),
+                           ("PR помечен needs-human", "label"),
+                           ("сессия worker'а завершилась до готовности PR", "session"),
+                           ("совсем другое", "other")):
+            self.assertEqual(aiflow.human_code({"note": note}), code, note)
+        self.assertEqual(aiflow.human_code({"note": "ревьюер", "code": "merge"}), "merge")
+
+    def test_time_in_a_stage_comes_from_the_history(self):
+        t = {"history": self.history((180, "new", "planning"), (120, "planning", "in_progress"),
+                                     (90, "in_progress", "needs_human"), (60, "needs_human", "in_progress"),
+                                     (30, "in_progress", "merged"))}
+        hours = aiflow.stage_hours(t)
+        self.assertAlmostEqual(hours["planning"], 1.0, places=2)
+        self.assertAlmostEqual(hours["in_progress"], 1.0, places=2)  # два захода по полчаса
+        self.assertAlmostEqual(hours["needs_human"], 0.5, places=2)
+        self.assertNotIn("merged", hours)
+        going = aiflow.stage_hours({"history": self.history((60, "new", "planning"))})
+        self.assertAlmostEqual(going["planning"], 1.0, places=1)  # идущая стадия — до текущего момента
+
+    def test_summary(self):
+        self.add("m1", state="merged", created_at=ago(300), history=self.history(
+            (290, "new", "planning"), (280, "planning", "in_review"),
+            (270, "in_review", "needs_human", "ревьюер не вернул валидный JSON", "tool"),
+            (260, "needs_human", "in_review"), (250, "in_review", "needs_human", "PR помечен needs-human"),
+            (240, "needs_human", "in_review"), (180, "in_review", "merged")))
+        aiflow.write_json(self.root / ".aiflow" / "m1" / "review.json", {"round": 3, "status": "approved"})
+        self.add("m2", state="merged", created_at=ago(120), history=self.history((60, "in_review", "merged")))
+        aiflow.write_json(self.root / ".aiflow" / "m2" / "review.json", {"round": 1, "status": "approved"})
+        self.add("going", state="in_progress", created_at=ago(10))
+        self.add("gone", state="cancelled", created_at=ago(10))
+        self.add("question", kind="ask", state="done", created_at=ago(10))  # вопросы не считаются
+        self.add("old", state="merged", created_at=ago(40 * 24 * 60))
+        s = aiflow.build_stats(self.store, 30)
+        self.assertEqual((s["tasks"], s["finished"], s["cancelled"], s["active"]), (4, 2, 1, 1))
+        self.assertEqual((s["human"]["tasks"], s["human"]["times"]), (1, 2))
+        self.assertEqual({c["code"]: c["n"] for c in s["human"]["codes"]}, {"tool": 1, "label": 1})
+        self.assertEqual(s["rounds"], {"by_round": {"1": 1, "3": 1}, "reviewed": 2, "average": 2.0})
+        self.assertEqual((s["hours"]["tasks"], s["hours"]["median"], s["hours"]["p90"]), (2, 1.5, 2.0))
+        self.assertEqual(aiflow.build_stats(self.store, 0)["tasks"], 5)  # 0 — за всё время
+        self.assertEqual(aiflow.build_state(self.store)["stats"]["tasks"], 4)  # панель получает ту же сводку
+
+    def test_command_prints_the_summary(self):
+        self.add("m1", state="merged", created_at=ago(90), history=self.history(
+            (80, "new", "in_review"), (70, "in_review", "needs_human", "x", "ci"), (60, "needs_human", "in_review"),
+            (30, "in_review", "merged")))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(aiflow.cmd_stats(argparse.Namespace(days=30, json=False), self.root), 0)
+        text = out.getvalue()
+        self.assertIn("Уходили к человеку: 1 из 1 (100%), всего 1 раз", text)
+        self.assertIn("CI не удалось починить", text)
+        self.assertIn("От постановки до готовности: медиана 1.0 ч", text)
+        self.assertIn("40 мин  ревью (1)", text)
+
+    def test_median_and_percentile(self):
+        self.assertEqual(aiflow.median([3, 1, 2]), 2)
+        self.assertEqual(aiflow.median([1, 2, 3, 4]), 2.5)
+        self.assertIsNone(aiflow.median([]))
+        self.assertEqual(aiflow.percentile(list(range(1, 11)), 0.9), 9)
+        self.assertEqual(aiflow.percentile([5], 0.9), 5)
