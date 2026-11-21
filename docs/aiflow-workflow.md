@@ -252,7 +252,7 @@ stateDiagram-v2
 
 ## 11. Плагин и подготовка репозитория
 
-**Состав плагина:** агенты `orchestrator`, `planner`, `worker`, `explorer`, `researcher`; skills `intake`, `resume`, `discuss`, `ui`; монитор; хук проверки среды; `bin/aiflow`; `scripts/aiflow.py`, `review.py`, `aiflow_ui.py`, `ui.html`; шаблоны для репозитория.
+**Состав плагина:** агенты `orchestrator`, `planner`, `worker`, `explorer`, `researcher`; skills `intake`, `resume`, `discuss`, `ui`; монитор; хук проверки среды; `bin/aiflow`; `scripts/aiflow.py` (команды) и модули очереди `scripts/aiflow_*.py`, `review.py`, `aiflow_ui.py`, `ui.html`; шаблоны для репозитория.
 
 **Установка:**
 
@@ -312,7 +312,7 @@ aiflow не читает и не передаёт токены подписки 
 
 | Оговорка | Что это значит |
 | --- | --- |
-| Agent view в research preview | Флаги CLI могут меняться; все вызовы `claude` собраны в классе `Claude` в `scripts/aiflow.py` |
+| Agent view в research preview | Флаги CLI могут меняться; все вызовы `claude` собраны в классе `Claude` в `scripts/aiflow_tools.py` |
 | Мониторы плагинов работают только в интерактивных сессиях | Фоновая сессия интерактивна, но это первое, что нужно проверить |
 | Фоновые сессии локальные | Выключение машины их останавливает: после `/aiflow:resume` монитор возобновляет остановленные и пропавшие сессии (`auto_resume`, по умолчанию 1 раз подряд) |
 | Служба — обычный процесс пользователя | Выключение машины её останавливает: с `aiflow up --autostart` она поднимается при входе, без него — `aiflow up` или `/aiflow:resume`; всё состояние в `.aiflow/`, служба продолжает с того же места |

@@ -11,6 +11,9 @@ from unittest import mock
 
 from helpers import PLAN, ProjectCase, ago, aiflow
 
+import aiflow_core
+import aiflow_dispatcher
+
 
 class Planning(ProjectCase):
     def test_new_task_gets_a_planner_within_concurrency(self):
@@ -408,7 +411,7 @@ class InReview(ProjectCase):
     def activity(self, tid: str = "a") -> str | None:
         sessions = self.claude.agents()
         # фаза в тестах «записана» раньше, чем стартовал сам тест: не считаем её из-за этого чужой
-        with mock.patch.object(aiflow, "process_start", lambda pid: None):
+        with mock.patch.object(aiflow_core, "process_start", lambda pid: None):
             return self._activity(tid, sessions)
 
     def _activity(self, tid: str, sessions: dict) -> str | None:
@@ -1294,7 +1297,7 @@ class AutoReview(ProjectCase):
         self.tick()
         self.age("a", 30)  # сессия давно «закончила ход» — так и должно быть, ревью ведёт aiflow
         self.patch("a", auto_review={**self.task("a")["auto_review"], "at": aiflow.iso()})
-        with mock.patch.object(aiflow, "process_start", lambda pid: None):
+        with mock.patch.object(aiflow_core, "process_start", lambda pid: None):
             self.tick()
         self.assertEqual(self.state("a"), "in_review")
         self.assertEqual(self.claude.resumed, [])
@@ -2014,7 +2017,7 @@ class BlockedSessionSaysWhy(ProjectCase):
     def test_panel_shows_what_the_blocked_session_asks(self):
         sid = self.start()
         self.claude.sessions[sid].update(state="blocked", waitingFor="ответ")
-        with mock.patch.object(aiflow, "last_words", return_value="Разрешите защищённый путь .claude/skills/x"):
+        with mock.patch.object(aiflow_dispatcher, "last_words", return_value="Разрешите защищённый путь .claude/skills/x"):
             events = self.tick()
         self.assertIn("защищённый путь", " ".join(e["text"] for e in events))
         row = aiflow.build_state(self.store, self.claude.agents())["tasks"][0]
@@ -2023,13 +2026,13 @@ class BlockedSessionSaysWhy(ProjectCase):
     def test_path_request_stays_until_the_path_is_allowed(self):
         sid = self.start()
         self.claude.sessions[sid].update(state="blocked", waitingFor="ответ")
-        with mock.patch.object(aiflow, "last_words", return_value="Нужен защищённый путь `.claude/skills/x/SKILL.md`"):
+        with mock.patch.object(aiflow_dispatcher, "last_words", return_value="Нужен защищённый путь `.claude/skills/x/SKILL.md`"):
             self.tick()
         row = aiflow.build_state(self.store, self.claude.agents())["tasks"][0]
         self.assertEqual((row["asks_paths"], row["wants_paths"]), (True, [".claude/skills/x/SKILL.md"]))
         # пользователь ответил в чате: сессия работает, вопроса в панели больше нет, а путь всё ещё нужен
         self.claude.sessions[sid].update(state="working", waitingFor=None)
-        with mock.patch.object(aiflow, "last_words", return_value="Понял, жду"):
+        with mock.patch.object(aiflow_dispatcher, "last_words", return_value="Понял, жду"):
             self.tick()
         row = aiflow.build_state(self.store, self.claude.agents())["tasks"][0]
         self.assertIsNone(row["needs"])
@@ -2140,13 +2143,13 @@ class LinkedProjects(ProjectCase):
         self.other = aiflow.Store(self.lib)
         self.flows = ("ok", "")
         self.asked = 0
-        real = aiflow.merge_workflows
-        self.addCleanup(setattr, aiflow, "merge_workflows", real)
+        real = aiflow_dispatcher.merge_workflows  # подменяется там, где его вызывает очередь
+        self.addCleanup(setattr, aiflow_dispatcher, "merge_workflows", real)
 
         def fake(root, task):
             self.asked += 1
             return self.flows
-        aiflow.merge_workflows = fake
+        aiflow_dispatcher.merge_workflows = fake
 
     def lib_task(self, tid: str, state: str, pr=None) -> None:
         t = aiflow.normalize_task({"id": tid, "text": "x", "title": "Static covers"})
@@ -2475,3 +2478,48 @@ class OldSettings(ProjectCase):
         told = [e for e in self.store.events() if "настройка из прежней версии" in e["text"]]
         self.assertEqual(len(told), 1)
         self.assertIn("notify", told[0]["text"])
+
+
+class TaskSchema(unittest.TestCase):
+    """Опись ключей задачи (aiflow_task.Task) не расходится с кодом."""
+
+    SCRIPTS = Path(aiflow.__file__).resolve().parent
+    # модули, где переменная t или task — задача из task.json; в панели и MCP так же названа строка доски
+    MODULES = ("aiflow", "aiflow_core", "aiflow_store", "aiflow_usage", "aiflow_prompts", "aiflow_dispatcher")
+
+    def used_keys(self) -> dict[str, str]:
+        import ast
+        used = {}
+        for name in self.MODULES:
+            for node in ast.walk(ast.parse((self.SCRIPTS / f"{name}.py").read_text(encoding="utf-8"))):
+                key = None
+                if isinstance(node, ast.Subscript):
+                    owner, arg = node.value, node.slice
+                elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                      and node.func.attr in ("get", "pop", "setdefault") and node.args):
+                    owner, arg = node.func.value, node.args[0]
+                else:
+                    continue
+                if isinstance(owner, ast.Name) and owner.id in ("t", "task") and isinstance(arg, ast.Constant) \
+                        and isinstance(arg.value, str):
+                    key = arg.value
+                if key:
+                    used.setdefault(key, f"{name}.py:{node.lineno}")
+        return used
+
+    def test_every_key_the_code_touches_is_described(self):
+        import aiflow_task
+        described = set(aiflow_task.Task.__annotations__)
+        unknown = {k: where for k, where in self.used_keys().items() if k not in described}
+        self.assertEqual(unknown, {}, "ключ задачи не описан в aiflow_task.Task")
+
+    def test_every_described_key_is_in_the_code(self):
+        import aiflow_task
+        source = "".join(p.read_text(encoding="utf-8") for p in self.SCRIPTS.glob("*.py") if p.name != "aiflow_task.py")
+        stale = [k for k in aiflow_task.Task.__annotations__ if f'"{k}"' not in source]
+        self.assertEqual(stale, [], "ключ описан, но в коде его больше нет")
+
+    def test_a_new_task_has_only_described_keys(self):
+        import aiflow_task
+        t = aiflow.normalize_task({"id": "a", "text": "x"})
+        self.assertLessEqual(set(t), set(aiflow_task.Task.__annotations__))
