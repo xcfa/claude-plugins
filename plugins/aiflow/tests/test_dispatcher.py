@@ -2443,3 +2443,35 @@ class Stats(ProjectCase):
         self.assertIsNone(aiflow.median([]))
         self.assertEqual(aiflow.percentile(list(range(1, 11)), 0.9), 9)
         self.assertEqual(aiflow.percentile([5], 0.9), 5)
+
+
+class OldSettings(ProjectCase):
+    """Умолчания прежних версий в настройках проекта: aiflow о них говорит, но сам не меняет."""
+
+    def test_old_defaults_are_named(self):
+        self.assertEqual(aiflow.stale_settings(aiflow.DEFAULT_CONFIG), {})
+        notes = aiflow.stale_settings({"notify": "important", "worker_model": "sonnet",
+                                       "protected_paths": [".github/**", "**/auth/**"]})
+        self.assertEqual(set(notes), {"notify", "worker_model", "auth_path"})
+        self.assertIn("0.2.47", notes["notify"])
+        self.assertIn('"worker_model": "sonnet"', notes["worker_model"])
+
+    def test_each_advice_is_given_once_and_the_settings_stay(self):
+        path = self.root / ".aiflow" / "config.json"
+        aiflow.write_json(path, {"notify": "important"})
+        self.assertEqual(set(self.store.new_advice()), {"notify"})
+        self.assertEqual(self.store.new_advice(), {})
+        aiflow.write_json(path, {"notify": "important", "worker_model": "opus"})
+        self.assertEqual(set(self.store.new_advice()), {"worker_model"})  # новый совет — только он
+        self.assertEqual(set(self.store.advice()), {"notify", "worker_model"})  # doctor называет все
+        self.assertEqual(aiflow.read_json(path)["notify"], "important")  # значение не тронуто
+
+    def test_service_tells_about_them_in_the_panel_once(self):
+        import aiflow_service
+        aiflow.write_json(self.root / ".aiflow" / "config.json", {"notify": "important"})
+        with contextlib.redirect_stdout(io.StringIO()):
+            aiflow_service._migrate_config(self.root)
+            aiflow_service._migrate_config(self.root)
+        told = [e for e in self.store.events() if "настройка из прежней версии" in e["text"]]
+        self.assertEqual(len(told), 1)
+        self.assertIn("notify", told[0]["text"])

@@ -791,6 +791,26 @@ def migrate_state_dir(root: Path) -> str | None:
     return "runs/ → .aiflow/"
 
 
+def stale_settings(user: dict) -> dict[str, str]:
+    """Значения в .aiflow/config.json, которые были умолчаниями прежних версий: ключ совета → текст.
+    aiflow их не меняет — пользователь мог выбрать их сам, — а говорит о них: один раз событием в панели
+    (Store.new_advice) и в `aiflow doctor`."""
+    out = {}
+    if user.get("notify") == "important":
+        out["notify"] = ('"notify": "important" — умолчание до версии 0.2.47: монитор будит оркестратора на каждое '
+                         'событие, которое ждёт вас, а это токены. Теперь умолчание — "answers" (только ответы на '
+                         'вопросы): об остальном говорят системные уведомления и панель')
+    if isinstance(user.get("worker_model"), str):
+        out["worker_model"] = (f'"worker_model": "{user["worker_model"]}" — одна модель исполнителя на все задачи '
+                               '(умолчание до версии 0.2.57). Модель по сложности задачи: "worker_model": '
+                               '{"trivial": "haiku", "simple": "sonnet", "complex": "opus"} и "worker_effort": '
+                               '{"trivial": "high", "simple": "medium", "complex": "high"}')
+    if "**/auth/**" in (user.get("protected_paths") or []):
+        out["auth_path"] = ('"**/auth/**" в protected_paths — умолчание до версии 0.2.107: под него попадает и папка '
+                            'экрана входа во фронтенде. Если защищать нужно серверный код, замените на его путь')
+    return out
+
+
 class Store:
     def __init__(self, root: Path):
         self.root = root
@@ -830,6 +850,21 @@ class Store:
         if added:
             write_json(path, user)
         return added
+
+    def advice(self) -> dict[str, str]:
+        """Советы по настройкам проекта, оставшимся от умолчаний прежних версий: ключ → текст."""
+        user = read_json(self.runs / "config.json", None)
+        return stale_settings(user) if isinstance(user, dict) else {}
+
+    def new_advice(self) -> dict[str, str]:
+        """Советы, о которых проект ещё не слышал. Каждый отдаётся один раз: что уже сказано, помнит
+        .aiflow/advice.json."""
+        path = self.runs / "advice.json"
+        seen = (read_json(path, {}) or {}).get("seen") or []
+        fresh = {k: v for k, v in self.advice().items() if k not in seen}
+        if fresh:
+            write_json(path, {"seen": sorted({*seen, *fresh})})
+        return fresh
 
     def set_config(self, key: str, value) -> None:
         """Меняет один ключ в .aiflow/config.json, остальное содержимое файла сохраняет как есть."""
@@ -4028,6 +4063,8 @@ def doctor_checks(root: Path | None, quick: bool) -> list[tuple[bool, str]]:
         p = run(["git", "ls-remote", "--heads", "origin", base], cwd=root, timeout=30)
         res.append(check(f"ветка {base} на origin", p.returncode == 0 and bool(p.stdout.strip()),
                          f"git push origin {base} или поправьте base_branch в .aiflow/config.json"))
+        # не ошибки среды: настройки из прежних версий, которые стоит пересмотреть
+        res += [(True, "• .aiflow/config.json: " + text) for text in store.advice().values()]
     return res
 
 

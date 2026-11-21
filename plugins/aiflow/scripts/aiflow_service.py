@@ -471,6 +471,8 @@ def _migrate_config(root) -> None:
             st.event("config", None, f"aiflow {aiflow.VERSION}: в .aiflow/config.json добавлены настройки "
                                      + ", ".join(added))
             print(f"{iso()} {Path(root).name}: в .aiflow/config.json добавлено {', '.join(added)}", flush=True)
+        for text in st.new_advice().values():
+            st.event("config", None, "настройка из прежней версии — " + text + ". Поменять: .aiflow/config.json")
     except Exception as e:
         print(f"{iso()} {Path(root).name}: не удалось обновить .aiflow/config.json: {e}", flush=True)
 
