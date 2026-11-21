@@ -392,7 +392,10 @@ DEFAULT_CONFIG = {
         "**/migrations/**", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "poetry.lock",
         "pyproject.toml", "package.json", "tsconfig*.json", ".eslintrc*", "eslint.config.*",
         "jest.config*", "vitest.config*", "pytest.ini", "setup.cfg",
-        "**/auth/**", "**/payments/**", "infra/**", "**/*.env*",
+        # «**/auth/**» здесь нет намеренно: под него попадает и папка экрана входа во фронтенде (вёрстка, её
+        # тесты), и каждая такая правка уходила к человеку. Серверный код аутентификации защищается путём
+        # самого проекта, например "src/Server/Auth/**".
+        "**/payments/**", "infra/**", "**/*.env*",
     ],
 }
 
