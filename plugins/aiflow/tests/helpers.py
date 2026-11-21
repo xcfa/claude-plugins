@@ -85,6 +85,9 @@ class FakeGH:
         self.calls: list[tuple] = []
         self.down = False  # GitHub не отвечает
         self.behind_by: int | None = None  # на сколько ветки PR отстают от базовой; None — неизвестно
+        self.reruns: list = []  # сборки, упавшие задания которых перезапущены
+        self.rerun_ok = True
+        self.fail_log = "FAIL Tests.Login_is_limited"
 
     def add_pr(self, n: int, tid: str, *, body: str = PLAN, draft: bool = False, state: str = "OPEN",
                branch: str | None = None, files=()) -> dict:
@@ -124,6 +127,14 @@ class FakeGH:
     def last_push_run(self, branch):
         return self.push_run
 
+    def rerun_failed(self, run_id):
+        if self.rerun_ok:
+            self.reruns.append(run_id)
+        return self.rerun_ok
+
+    def failed_log(self, run_id, budget=3000):
+        return self.fail_log
+
     def repo_url(self):
         return "https://example.test/o/r"
 
@@ -146,7 +157,7 @@ class ProjectCase(unittest.TestCase):
         os.environ["CLAUDE_CONFIG_DIR"] = str(self.tmp / "claude")
         self.addCleanup(self._restore_env)
         self.store = aiflow.Store(self.root)
-        aiflow.write_json(self.root / ".aiflow" / "config.json", {"watch_integration": True, "plan_check": "off", **self.config})
+        aiflow.write_json(self.root / ".aiflow" / "config.json", {"watch_integration": True, "plan_check": "off", "base_fix": "off", **self.config})
         aiflow._BASE_SEEN[(str(self.root), "master")] = (time.time(), True)  # без git ls-remote
         self.claude = FakeClaude()
         self.gh = FakeGH()

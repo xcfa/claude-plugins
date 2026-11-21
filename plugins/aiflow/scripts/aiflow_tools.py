@@ -136,6 +136,11 @@ def pr_from_graphql(node: dict) -> dict:
     }
 
 
+# Строки лога сборки, по которым видно, что упало. С учётом регистра: «Passed! - Failed: 0» — не ошибка.
+FAILED_LOG_RE = re.compile(r"\[FAIL\]|\bFAIL\b|\bFAILED\b|Failed!|^\s*Failed \S|Error Message|[Ee]xception|[Aa]ssert|"
+                           r"##\[error\]|✗|✕|\b[Ee]rror\b")
+
+
 class GH:
     def __init__(self, root: Path):
         self.root = root
@@ -224,7 +229,7 @@ class GH:
         завершённый прогон, push или ручной перезапуск (workflow_dispatch). Красный, если красный хоть
         один такой workflow. Ручной зелёный перезапуск снимает паузу integration_red."""
         p = self.call("run", "list", "--branch", branch, "--limit", "40",
-                      "--json", "conclusion,status,url,headSha,event,workflowName,createdAt")
+                      "--json", "conclusion,status,url,headSha,event,workflowName,createdAt,databaseId,attempt,displayTitle")
         if p.returncode != 0:
             return None
         runs = json.loads(p.stdout or "[]")
@@ -240,6 +245,27 @@ class GH:
             return {"status": "in_progress"}
         red = [r for r in latest.values() if r.get("conclusion") in ("failure", "timed_out", "startup_failure")]
         return red[0] if red else max(latest.values(), key=lambda r: r.get("createdAt") or "")
+
+    def rerun_failed(self, run_id) -> bool:
+        """Перезапустить упавшие задания сборки. Нестабильный тест второй раз обычно проходит."""
+        return self.call("run", "rerun", str(run_id), "--failed").returncode == 0
+
+    def failed_log(self, run_id, budget: int = 3000) -> str:
+        """Конец лога упавших заданий сборки, без отметок времени: с ним начинает работу чинящая задача."""
+        p = self.call("run", "view", str(run_id), "--log-failed", timeout=120)
+        if p.returncode != 0:
+            return ""
+        # строка лога: «задание<TAB>шаг<TAB>время сообщение». Задание и шаг повторяются в каждой строке и съедают
+        # место, поэтому остаётся только сообщение.
+        rows = [re.sub(r"^[^\t]*\t[^\t]*\t(\d{4}-\d\d-\d\dT[\d:.]+Z ?)?", "", x).rstrip() for x in (p.stdout or "").splitlines()]
+        # Упавший тест бывает далеко от конца: после него идут итоги остальных. Берём строки с ошибками и по три
+        # следующие за каждой; если таких нет — просто конец лога.
+        keep: list[int] = []
+        for i, row in enumerate(rows):
+            if FAILED_LOG_RE.search(row):
+                keep += [j for j in range(i, min(i + 4, len(rows))) if j not in keep]
+        picked = [rows[i] for i in sorted(keep)]
+        return "\n".join(picked)[:budget] if picked else "\n".join(rows)[-budget:]
 
 
 def gh_repo(cwd, env=None) -> str:

@@ -66,6 +66,7 @@ class Task(TypedDict, total=False):
     self_executed: bool                  # планировщик сделал сам и ведёт ревью своего PR
     direct: bool                         # без плана: исполнитель работает по указаниям планировщика
     brief: str                           # эти указания
+    base_fix: bool                       # задачу поставила сама очередь: чинит красную базовую ветку, пауза её не держит
     answer: dict                         # ответ на вопрос (kind: ask): summary, details, at
 
     # -- сессии

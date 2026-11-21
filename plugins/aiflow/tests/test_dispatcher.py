@@ -2576,3 +2576,194 @@ class PauseTheButtonCannotLift(ProjectCase):
         with contextlib.redirect_stdout(out), mock.patch.object(aiflow, "queue_or_apply"):
             aiflow.cmd_resume(argparse.Namespace(), self.root)
         self.assertIn("Очередь возобновлена", out.getvalue())
+
+
+class BaseFix(ProjectCase):
+    """Базовая ветка покраснела после мержа: aiflow перезапускает упавшие задания, а если они падают снова —
+    сам ставит задачу на починку, и она идёт несмотря на паузу."""
+
+    config = {"base_fix": "auto"}
+    SHA = "abc1234def5678"
+
+    def red(self, attempt: int = 1) -> None:
+        self.gh.push_run = {"status": "completed", "conclusion": "failure", "url": "https://example.test/runs/7",
+                            "headSha": self.SHA, "databaseId": 7, "attempt": attempt, "displayTitle": "Merge ui"}
+
+    def fix(self) -> dict:
+        return self.store.queue().get("base_fix") or {}
+
+    def pauses(self) -> list[str]:
+        return sorted(self.store.queue().get("pauses") or {})
+
+    def test_failed_jobs_are_run_again_first(self):
+        self.red()
+        events = self.tick()
+        self.assertEqual(self.pauses(), ["integration_red"])
+        self.assertEqual(self.gh.reruns, [7])
+        self.assertIn("base_fix", self.kinds(events))
+        self.assertEqual(self.fix()["reruns"], 1)
+        self.assertNotIn("task", self.fix())
+        self.tick()  # GitHub ещё показывает прежнюю, упавшую попытку: не перезапускаем снова и задачу не ставим
+        self.assertEqual(self.gh.reruns, [7])
+        self.assertEqual([t["id"] for t in self.store.tasks()], [])
+
+    def test_green_rerun_resumes_the_queue_without_a_task(self):
+        self.red()
+        self.add("a")
+        self.tick()
+        self.gh.push_run = {"status": "in_progress"}
+        self.tick()
+        self.assertEqual(self.pauses(), ["integration_red"])
+        self.gh.push_run = {"status": "completed", "conclusion": "success", "headSha": self.SHA, "attempt": 2}
+        self.tick()
+        self.assertEqual(self.pauses(), [])
+        self.assertEqual(self.fix(), {})
+        self.assertEqual([t["id"] for t in self.store.tasks()], ["a"])
+        self.assertEqual(self.state("a"), "planning")
+
+    def test_second_failure_gives_a_task_that_runs_through_the_pause(self):
+        self.add("m1", state="merged", pr=11, title="UI kit", state_at=ago(20), cleaned=True)
+        self.add("a")
+        self.red()
+        self.tick()
+        self.red(attempt=2)
+        events = self.tick()
+        tid = "fix-base-abc1234"
+        self.assertEqual(self.fix()["task"], tid)
+        t = self.task(tid)
+        self.assertTrue(t["base_fix"] and t["direct"])
+        self.assertEqual(t["complexity"], "complex")
+        for part in ("https://example.test/runs/7", self.SHA, "FAIL Tests.Login_is_limited", "m1: UI kit, PR #11",
+                     "gh run view 7 --log-failed", "failed again"):
+            self.assertIn(part, t["text"])
+        self.assertIn(tid, " ".join(e["text"] for e in events if e["kind"] == "base_fix"))
+        # исполнитель запущен сразу, без плана, хотя очередь на паузе; обычная задача ждёт
+        self.assertEqual(self.pauses(), ["integration_red"])
+        self.assertEqual(t["state"], "in_progress")
+        self.assertEqual(self.claude.launched[-1]["agent"], "aiflow:worker")
+        self.assertEqual(self.state("a"), "new")
+        self.tick()
+        self.assertEqual(len([x for x in self.store.tasks() if x.get("base_fix")]), 1)  # одна сборка — одна задача
+        self.assertEqual(self.gh.reruns, [7])
+
+    def test_no_reruns_means_a_task_at_once(self):
+        aiflow.write_json(self.root / ".aiflow" / "config.json", {"base_fix": "auto", "base_fix_reruns": 0})
+        self.red()
+        self.tick()
+        self.assertEqual(self.gh.reruns, [])
+        self.assertEqual(self.fix()["task"], "fix-base-abc1234")
+        self.assertNotIn("failed again", self.task("fix-base-abc1234")["text"])
+
+    def test_rerun_that_github_refused_gives_a_task(self):
+        self.gh.rerun_ok = False
+        self.red()
+        self.tick()
+        self.assertEqual(self.fix()["task"], "fix-base-abc1234")
+
+    def test_rerun_that_never_started_gives_a_task_after_the_wait(self):
+        self.red()
+        self.tick()
+        q = self.store.queue()
+        q["base_fix"]["rerun_at"] = ago(aiflow_dispatcher.BASE_RERUN_WAIT + 1)
+        self.store.save_queue(q)
+        self.tick()
+        self.assertEqual(self.gh.reruns, [7])
+        self.assertEqual(self.fix()["task"], "fix-base-abc1234")
+
+    def test_another_red_commit_starts_over(self):
+        self.red()
+        self.tick()
+        self.gh.push_run = {**self.gh.push_run, "headSha": "fff0000aaa", "databaseId": 8, "url": "https://example.test/runs/8"}
+        self.tick()
+        self.assertEqual(self.gh.reruns, [7, 8])
+        self.assertEqual(self.fix()["sha"], "fff0000aaa")
+
+    def test_pr_of_the_fix_is_reviewed_through_the_pause(self):
+        self.to_ready("fix-base-abc1234", 5)
+        self.patch("fix-base-abc1234", base_fix=True, direct=True)
+        self.to_ready("b", 6)
+        q = self.store.queue()
+        q["pauses"]["integration_red"] = {"at": aiflow.iso(), "until": None, "note": ""}
+        q["base_fix"] = {"sha": self.SHA, "reruns": 1, "task": "fix-base-abc1234"}
+        self.store.save_queue(q)
+        self.red(attempt=2)
+        self.tick()
+        self.assertEqual(self.state("fix-base-abc1234"), "in_review")
+        self.assertEqual(self.state("b"), "ready")
+
+    def test_only_the_red_branch_pause_lets_the_fix_through(self):
+        fix, usual = {"base_fix": True}, {"id": "a"}
+        self.assertEqual(aiflow.blocking_pauses({"integration_red": {}}, fix), [])
+        self.assertEqual(aiflow.blocking_pauses({"integration_red": {}, "manual": {}}, fix), ["manual"])
+        self.assertEqual(aiflow.blocking_pauses({"integration_red": {}}, usual), ["integration_red"])
+        self.assertEqual(aiflow.blocking_pauses({"integration_red": {}}, None), ["integration_red"])
+        self.assertEqual(aiflow.blocking_pauses(None, fix), [])
+
+    def test_manual_pause_stops_the_fix_too(self):
+        self.store.command({"cmd": "pause"})
+        aiflow.write_json(self.root / ".aiflow" / "config.json", {"base_fix": "auto", "base_fix_reruns": 0})
+        self.red()
+        self.tick()
+        self.assertEqual(self.state("fix-base-abc1234"), "new")
+
+    def test_panel_says_what_aiflow_does(self):
+        def note() -> str:
+            return aiflow.build_state(self.store)["paused"]["kept"][0]["lifts"]
+
+        self.red()
+        self.tick()
+        self.assertIn("перезапустил упавшие задания", note())
+        self.red(attempt=2)
+        self.tick()
+        self.assertIn("чинит задача fix-base-abc1234", note())
+        self.patch("fix-base-abc1234", state="needs_human")
+        self.assertIn("ей нужны вы", note())
+        self.patch("fix-base-abc1234", state="cancelled")
+        self.assertIn("почините ветку", note())
+
+    def test_off_means_only_the_pause(self):
+        aiflow.write_json(self.root / ".aiflow" / "config.json", {"base_fix": "off"})
+        self.red()
+        events = self.tick()
+        self.assertEqual(self.pauses(), ["integration_red"])
+        self.assertEqual((self.gh.reruns, self.fix(), self.store.tasks()), ([], {}, []))
+        self.assertNotIn("Чиню сам", next(e["text"] for e in events if e["kind"] == "paused"))
+
+
+class FailedBuildLog(unittest.TestCase):
+    """Конец лога упавшей сборки для чинящей задачи (GH.failed_log)."""
+
+    LOG = "\n".join(f"backend\tRun dotnet test\t2026-11-21T15:52:{i:02d}.7085983Z {text}" for i, text in enumerate([
+        "Passed!  - Failed:     0, Passed:    29, Skipped:     0, Total:    29 - A.Tests.dll",
+        "[xUnit.net 00:00:21.03]     Api.Tests.RateLimitTests.Login_is_limited [FAIL]",
+        "  Failed Api.Tests.RateLimitTests.Login_is_limited [15 s]",
+        "  Error Message:",
+        "   Shouldly.ShouldAssertException : response.StatusCode",
+        "    should be",
+        "HttpStatusCode.TooManyRequests",
+        "Passed!  - Failed:     0, Passed:   277, Skipped:     0, Total:   277 - B.Tests.dll",
+        "Failed!  - Failed:     1, Passed:   585, Skipped:     0, Total:   586 - Api.Tests.dll",
+        "Passed!  - Failed:     0, Passed:   516, Skipped:     0, Total:   516 - C.Tests.dll",
+        "##[error]Process completed with exit code 1.",
+    ]))
+
+    def gh(self, stdout: str, code: int = 0):
+        gh = aiflow.GH.__new__(aiflow.GH)
+        gh.call = lambda *a, **k: mock.Mock(returncode=code, stdout=stdout, stderr="")
+        return gh
+
+    def test_the_failed_test_is_taken_not_the_summaries_of_the_passed(self):
+        log = self.gh(self.LOG).failed_log(7)
+        self.assertIn("Login_is_limited [FAIL]", log)
+        self.assertIn("HttpStatusCode.TooManyRequests", log)
+        self.assertIn("Failed:     1", log)
+        self.assertNotIn("A.Tests.dll", log)      # прошедшие сборки тестов место не занимают
+        self.assertNotIn("backend", log)          # как и имя задания с шагом в каждой строке
+        self.assertNotIn("2026-11-21T", log)
+
+    def test_log_without_known_marks_gives_its_end(self):
+        log = self.gh("job\tstep\t2026-11-21T15:52:21.1Z one\njob\tstep\t2026-11-21T15:52:22.1Z two").failed_log(7)
+        self.assertEqual(log, "one\ntwo")
+
+    def test_log_that_gh_did_not_give(self):
+        self.assertEqual(self.gh("", code=1).failed_log(7), "")

@@ -82,8 +82,7 @@ MANUAL_PAUSES = ("manual", "rate_limit", "trust")
 # Остальные причины «Продолжить очередь» не снимает: они уходят сами, когда исчезает их условие. Здесь — что
 # для этого сделать; текст идёт в панель, в событие и в ответ команды aiflow resume.
 PAUSE_LIFTS = {
-    "integration_red": "пауза снимется сама, когда сборка базовой ветки позеленеет: почините ветку или "
-                       "перезапустите упавшую сборку",
+    "integration_red": "пауза снимется сама, когда сборка базовой ветки позеленеет",
     "base_missing": "пауза снимется сама, когда базовая ветка появится на origin: создайте её или поправьте "
                     "base_branch в .aiflow/config.json",
 }
@@ -93,6 +92,15 @@ PAUSE_NAMES = {"integration_red": "базовая ветка красная", "b
 def kept_pauses(pauses: dict) -> list[str]:
     """Причины паузы, которые команда «продолжить» не снимает."""
     return sorted(r for r in pauses or {} if r not in MANUAL_PAUSES)
+
+
+def blocking_pauses(pauses: dict | None, task: dict | None = None) -> list[str]:
+    """Причины паузы, которые останавливают эту задачу. Задачу, которая чинит базовую ветку (base_fix),
+    пауза «ветка красная» не останавливает: иначе чинить ветку было бы некому."""
+    reasons = sorted(pauses or {})
+    if task and task.get("base_fix"):
+        reasons = [r for r in reasons if r != "integration_red"]
+    return reasons
 
 
 def kept_pause_text(reasons: list[str]) -> str:
@@ -349,6 +357,10 @@ DEFAULT_CONFIG = {
     "ci_timeout_minutes": 45,
     "rate_limit_pause_minutes": 30,
     "watch_integration": True,
+    # Базовая ветка покраснела после мержа. auto — aiflow чинит её сам: перезапускает упавшие задания сборки, а
+    # если они падают снова, ставит задачу на починку; эта задача идёт несмотря на паузу. off — только пауза.
+    "base_fix": "auto",
+    "base_fix_reruns": 1,  # сколько раз перезапустить упавшие задания, прежде чем ставить задачу; 0 — сразу задача
     "labels": {"approved": "plan-approved", "needs_human": "needs-human", "retry": "retry"},
     "protected_paths": [
         ".github/**", ".claude/**", ".opencode/**", ".aiflow/**",

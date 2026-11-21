@@ -1069,8 +1069,9 @@ def main(argv: list[str] | None = None) -> int:
             r.gh_run("label", "create", label, "--color", "D93F0B", "--force", check=False)
             r.gh_run("pr", "edit", str(args.pr), "--add-label", label, check=False)
 
-        # очередь на паузе (вручную, красная базовая ветка, лимит): ни ревью, ни мержа
-        reasons = sorted(store.queue().get("pauses") or {})
+        # очередь на паузе (вручную, красная базовая ветка, лимит): ни ревью, ни мержа. Задачу, которая чинит
+        # красную ветку, эта пауза не останавливает
+        reasons = aiflow.blocking_pauses(store.queue().get("pauses"), task)
         if reasons:
             finish("paused", reasons=reasons, message=pause_message(reasons))
 
@@ -1186,7 +1187,7 @@ def main(argv: list[str] | None = None) -> int:
         if not gate.acquire(wait_seconds=180):
             raise RuntimeError("мерж занят другим PR дольше 3 минут")
         try:
-            reasons = sorted(store.queue().get("pauses") or {})
+            reasons = aiflow.blocking_pauses(store.queue().get("pauses"), task)
             if reasons:
                 finish("paused", **result, reasons=reasons, message="approved, but " + pause_message(reasons))
             if behind_base(r, cfg["base_branch"], head) > 0:

@@ -388,6 +388,31 @@ def worker_prompt(store: Store, t: dict, cfg: dict, retry: bool = False) -> str:
     return with_search_rule(base, cfg)
 
 
+def base_fix_text(base: str, run: dict, log: str, recent: list[dict], reruns: int) -> str:
+    """Текст задачи, которую очередь ставит сама, когда базовая ветка покраснела после мержа."""
+    merged = "\n".join(f"- {t['id']}: {t.get('title', '')}" + (f", PR #{t['pr']}" if t.get("pr") else "") for t in recent)
+    run_id = run.get("databaseId") or "<run id>"
+    return "\n".join(x for x in (
+        f"The CI of the base branch {base} is red after a merge. The aiflow queue is stopped until it is green again. "
+        "Make it green.",
+        "",
+        f"Failed run: {run.get('url') or ''}",
+        f"Commit: {run.get('headSha') or ''}" + (f" ({run['displayTitle']})" if run.get("displayTitle") else ""),
+        "aiflow ran the failed jobs again, and they failed again." if reruns else None,
+        "",
+        ("The end of the log of the failed jobs:\n```\n" + log.strip() + "\n```\n") if log.strip() else None,
+        ("The tasks that were merged last (the cause is probably in one of them):\n" + merged + "\n") if merged else None,
+        "What to do:",
+        f"1. Read the full log: gh run view {run_id} --log-failed",
+        f"2. Find the cause in the code of {base} and correct it. Run the failed tests locally before the push.",
+        "3. If a test fails without a relation to the last changes (it is unstable), make it stable. Do not delete it, "
+        "do not skip it and do not weaken what it checks.",
+        "4. Change only what the correction needs.",
+        "If the cause is outside the repository (a service that does not respond, a secret, the runner), report "
+        "blocked and say what is necessary.",
+    ) if x is not None)
+
+
 def direct_prompt(store: Store, t: dict, cfg: dict) -> str:
     """Задача без плана: исполнитель делает её сразу — по указаниям планировщика, если они есть."""
     brief = (t.get("brief") or "").strip()

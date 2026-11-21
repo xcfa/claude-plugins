@@ -115,17 +115,39 @@ def plan_check_activity(t: dict, store: "Store | None" = None) -> str:
             }.get(pc.get("phase") or "", "план ждёт ревьюера, одобрение — после ревью")
 
 
-def paused_state(q: dict) -> dict | None:
+def base_fix_note(q: dict, cfg: dict | None, by_id: dict[str, dict] | None) -> str:
+    """Что aiflow делает с красной базовой веткой — или что сделать человеку, если сам он не чинит."""
+    by_hand = "почините ветку или перезапустите упавшую сборку"
+    if str((cfg or {}).get("base_fix") or "off").lower() == "off":
+        return by_hand
+    fix = q.get("base_fix") or {}
+    if fix.get("task"):
+        state = ((by_id or {}).get(fix["task"]) or {}).get("state")
+        if state in TERMINAL:
+            return f"задача {fix['task']} закончилась, а ветка всё ещё красная — {by_hand}"
+        if state == "needs_human":
+            return f"чинит задача {fix['task']}, и ей нужны вы"
+        return f"чинит задача {fix['task']}"
+    if fix.get("reruns"):
+        return "aiflow перезапустил упавшие задания сборки; упадут снова — поставит задачу на починку"
+    return "aiflow чинит сам: перезапускает упавшие задания сборки, а если они падают снова — ставит задачу на починку"
+
+
+def paused_state(q: dict, cfg: dict | None = None, by_id: dict[str, dict] | None = None) -> dict | None:
     """Пауза очереди для панели. kept — причины, которые кнопка «Продолжить очередь» не снимает: у каждой, что
-    сделать, и адрес (красная сборка), если он известен. Когда других причин нет, кнопка не работает совсем."""
+    её снимет, и адрес (красная сборка), если он известен. Когда других причин нет, кнопка не работает совсем."""
     paused = q.get("paused")
     if not paused:
         return None
     pauses = q.get("pauses") or {}
-    return {**paused, "kept": [{"reason": r, "lifts": PAUSE_LIFTS.get(r, "пауза снимется сама"),
-                                "url": str((pauses.get(r) or {}).get("note") or "")
-                                if str((pauses.get(r) or {}).get("note") or "").startswith("http") else ""}
-                               for r in kept_pauses(pauses)]}
+    kept = []
+    for r in kept_pauses(pauses):
+        note = str((pauses.get(r) or {}).get("note") or "")
+        lifts = PAUSE_LIFTS.get(r, "пауза снимется сама")
+        if r == "integration_red":
+            lifts += ": " + base_fix_note(q, cfg, by_id)
+        kept.append({"reason": r, "lifts": lifts, "url": note if note.startswith("http") else ""})
+    return {**paused, "kept": kept}
 
 
 def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url: str = "") -> dict:
@@ -211,7 +233,7 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
     total_usage, total_cost, unpriced = priced(project_usage, prices)
     return {
         "version": VERSION, "repo": store.root.name, "repo_url": repo_url, "base": cfg["base_branch"],
-        "paused": paused_state(q), "review_lock": q.get("review_lock"), "concurrency": cfg["concurrency"],
+        "paused": paused_state(q, cfg, by_id), "review_lock": q.get("review_lock"), "concurrency": cfg["concurrency"],
         "monitor_pid": FileLock(store.runs / "monitor.lock").owner(),
         "usage": total_usage, "cost": round(total_cost, 4), "unpriced": unpriced,
         "coordinator": coordinator,  # чаты «Дать задачу»: входят в итог проекта, но не относятся ни к одной задаче

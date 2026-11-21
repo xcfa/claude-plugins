@@ -24,7 +24,7 @@ from aiflow_core import (
     GH_NET_ANY, GH_NET_SAFE, GH_RETRY_DELAYS, HERE, HISTORY_KEEP, HUMAN_CODES, HUMAN_CODE_WORDS, HUMAN_MARKER,
     IMPLEMENTING, LIMIT_HITS_MAX, LIMIT_LOG_TAIL, LIMIT_RE, MANUAL_PAUSES, MARKERS, MODEL_FIELDS, MODEL_NAME_RE,
     NOTIFY_KINDS, NO_TOAST_KINDS, NO_WINDOW, PATH_ASK_RE, PAUSE_LIFTS, PAUSE_NAMES, PLANNER_PLAN_MD, PLANNER_TALK_MD,
-    PLUGIN_ROOT, kept_pause_text, kept_pauses,
+    PLUGIN_ROOT, blocking_pauses, kept_pause_text, kept_pauses,
     REVIEW_ACTIONS, SIDE_STATES, STAGES, STAGE_LABEL, STATION, TALK_KINDS, TASK_ID_RE, TEMPLATES, TERMINAL, TickBusy,
     VERSION, WHAT_TO_DO, WORKER_MD, WORKER_STAGES, _BOOT, _plugin_version, after, age_minutes, aiflow_home,
     boot_time, by_complexity, check_model_field, ci_summary, ci_text, context_choice, gh_is_read, gh_with_retry,
@@ -34,7 +34,8 @@ from aiflow_core import (
     write_json,
 )
 from aiflow_store import (
-    FileLock, LEGACY_STATE_DIR, STATE_DIR, Store, migrate_state_dir, stale_settings, state_dir, sync_queue,
+    FileLock, LEGACY_STATE_DIR, STATE_DIR, Store, migrate_state_dir, normalize_task, stale_settings, state_dir,
+    sync_queue,
     write_report,
 )
 from aiflow_tools import (
@@ -47,7 +48,7 @@ from aiflow_usage import (
     transcript_age_minutes, transcript_usage, usage_cost,
 )
 from aiflow_prompts import (
-    EXPLORERS, RESUME_FINISH, SEARCH_HEAD, STAGE_ROLE, amend_list, amend_prompt, ask_prompt, ci_fix_prompt, dep_task,
+    EXPLORERS, RESUME_FINISH, SEARCH_HEAD, STAGE_ROLE, amend_list, base_fix_text, amend_prompt, ask_prompt, ci_fix_prompt, dep_task,
     deps_note, direct_prompt, discuss_prompt, explorer_mode, launch_amendments, mark_delivered, merge_workflows,
     neighbours, neighbours_note, plan_check_prompt, planner_prompt, resume_prompt, review_prompt,
     review_result_prompt, revise_prompt, search_rule, set_after, split_dep, split_note, waiting_deps,
@@ -57,7 +58,7 @@ from aiflow_dispatcher import (
     Dispatcher, _BASE_SEEN, spawn_plan_check_process, spawn_review_process,
 )
 from aiflow_view import (
-    STATS_DAYS, STATS_STAGES, board_position, build_state, build_stats, paused_state, fmt_hours, fmt_tokens, fmt_when, human_code,
+    STATS_DAYS, STATS_STAGES, board_position, build_state, base_fix_note, build_stats, paused_state, fmt_hours, fmt_tokens, fmt_when, human_code,
     median, percentile, plan_check_activity, print_stats, print_status, review_activity, stage_hours, task_updated_at,
 )
 
@@ -281,40 +282,6 @@ def cmd_doctor(args, root: Path | None) -> int:
     for _, m in results:
         print(m)
     return 0 if all(ok for ok, _ in results) else 1
-
-
-def normalize_task(raw: dict) -> dict:
-    tid = str(raw.get("id", "")).strip().lower()
-    if not TASK_ID_RE.match(tid):
-        raise AiflowError(f"некорректный id задачи: {tid!r} (латиница, цифры, дефисы)")
-    kind = raw.get("kind") or "task"
-    if kind not in ("task",) + TALK_KINDS:
-        raise AiflowError(f"{tid}: kind должен быть task, discuss или ask")
-    cx = raw.get("complexity") or None  # обычно не задаётся: оценивает планировщик
-    if cx is not None and cx not in COMPLEXITIES:
-        raise AiflowError(f"{tid}: complexity должен быть одним из {', '.join(COMPLEXITIES)}")
-    text = str(raw.get("text") or "").strip()
-    if not text:
-        raise AiflowError(f"{tid}: пустой text")
-    try:
-        models = {f: check_model_field(f, raw.get(f)) for f in MODEL_FIELDS}
-    except AiflowError as e:
-        raise AiflowError(f"{tid}: {e}") from None
-    try:
-        items = max(1, int(raw.get("items") or 1))  # сколько независимых мелких пунктов в одной задаче
-    except (TypeError, ValueError):
-        raise AiflowError(f"{tid}: items должен быть числом пунктов задачи") from None
-    return {
-        "id": tid, "title": str(raw.get("title") or tid).strip(), "text": text, "complexity": cx, "kind": kind,
-        "items": items,
-        "depends_on": [str(d) for d in raw.get("depends_on") or []],
-        "ui": raw.get("ui") or None,
-        **models,
-        "allowed_protected_paths": [],
-        "state": "new", "pr": None, "sessions": {"planner": [], "worker": []},
-        "usage": {}, "created_at": iso(), "state_at": iso(),
-        "history": [{"at": iso(), "event": "created", "by": "intake"}],
-    }
 
 
 def dependency_cycle(tasks: list[dict]) -> list[str]:

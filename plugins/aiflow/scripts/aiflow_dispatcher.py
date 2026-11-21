@@ -15,15 +15,16 @@ from pathlib import Path
 from aiflow_core import (
     AMEND_MARKER, AiflowError, ENTRY, FINISHED, HISTORY_KEEP, HUMAN_CODES, HUMAN_MARKER, IMPLEMENTING, LIMIT_HITS_MAX,
     LIMIT_LOG_TAIL, LIMIT_RE, MANUAL_PAUSES, MARKERS, PATH_ASK_RE, PAUSE_LIFTS, REVIEW_ACTIONS, STAGE_LABEL, STATION,
-    TALK_KINDS, kept_pause_text, kept_pauses,
+    TALK_KINDS, blocking_pauses, kept_pause_text, kept_pauses,
     TERMINAL, WHAT_TO_DO, WORKER_STAGES, after, age_minutes, ci_summary, context_choice, inbox_dirs, is_direct,
     is_human_comment, iso, now, owner_alive, parse_iso, pid_alive, planner_choice, read_json, run, short_reason,
     visited_stations, worker_choice, write_json,
 )
-from aiflow_store import Store, sync_queue
+from aiflow_store import Store, normalize_task, sync_queue
 from aiflow_tools import Claude, GH
 from aiflow_usage import collect_coordinator_usage, last_words, reviewer_usage, transcript_age_minutes, transcript_usage
 from aiflow_prompts import (
+    base_fix_text,
     RESUME_FINISH, STAGE_ROLE, amend_prompt, ask_prompt, ci_fix_prompt, dep_task, direct_prompt, discuss_prompt,
     launch_amendments, mark_delivered, merge_workflows, plan_check_prompt, planner_prompt, resume_prompt,
     review_prompt, review_result_prompt, revise_prompt, split_dep, worker_prompt,
@@ -50,6 +51,7 @@ def spawn_review_process(store: "Store", t: dict, cwd: str, command: str = "revi
         return None
 
 
+BASE_RERUN_WAIT = 10  # минут: столько ждём, пока GitHub покажет перезапущенную сборку как идущую
 _BASE_SEEN: dict[tuple[str, str], tuple[float, bool]] = {}
 
 
@@ -69,6 +71,7 @@ class Dispatcher:
         self.q: dict = {}
         self.sessions: dict[str, dict] = {}
         self.by_id: dict[str, dict] = {}
+        self.tasks: list[dict] = []
 
     # -- helpers
     def emit(self, t: dict | None, kind: str, text: str, key: str | None = None) -> None:
@@ -392,7 +395,7 @@ class Dispatcher:
             self.emit(None, "error", f"не удалось прочитать состояние сессий: {e}")
             self.store.save_queue(self.q)
             return self.events
-        tasks = self.store.tasks()
+        tasks = self.tasks = self.store.tasks()
         by_id = self.by_id = {t["id"]: t for t in tasks}
         self.gh.prefetch(t.get("pr") for t in tasks if t.get("state") not in TERMINAL)
         self.process_commands(by_id)
@@ -411,8 +414,14 @@ class Dispatcher:
                 self.store.log(t["id"], {"error": str(e)})
                 self.emit(t, "error", f"{t['id']}: {e}", key=f"err:{str(e)[:60]}")
             self.store.save_task(t)
-        if not self.q.get("pauses"):
+        pauses = self.q.get("pauses") or {}
+        if not pauses:
             self.schedule(tasks)
+        else:
+            # пауза «базовая ветка красная» не останавливает задачу, которая эту ветку чинит
+            free = [t for t in tasks if not blocking_pauses(pauses, t)]
+            if free:
+                self.schedule(free, by_id)
         self.collect_usage(tasks)
         collect_coordinator_usage(self.store)
         self.check_batch_done(tasks)
@@ -497,11 +506,64 @@ class Dispatcher:
         if not r or r.get("status") != "completed":
             return
         if r.get("conclusion") in ("failure", "timed_out", "startup_failure"):
+            auto = str(self.cfg.get("base_fix") or "off").lower() != "off"
             # note — адрес красной сборки: панель ведёт на неё ссылкой
             self.pause("integration_red", None, f"ветка {self.cfg['base_branch']} покраснела после мержа: "
-                       f"{r.get('url', '')}. Очередь стоит: {PAUSE_LIFTS['integration_red']}", note=r.get("url") or "")
+                       f"{r.get('url', '')}. Очередь стоит: {PAUSE_LIFTS['integration_red']}"
+                       + (". Чиню сам: перезапускаю упавшие задания, а если упадут снова — ставлю задачу на починку"
+                          if auto else ""), note=r.get("url") or "")
+            if auto:
+                self.fix_base(r)
         else:
+            self.q.pop("base_fix", None)
             self.unpause("integration_red", f"ветка {self.cfg['base_branch']} снова зелёная")
+
+    def fix_base(self, r: dict) -> None:
+        """Красная базовая ветка чинится без человека. Сначала перезапускаются упавшие задания сборки:
+        нестабильный тест второй раз обычно проходит, и это не стоит ни токена. Упали снова — ставится задача
+        на починку. Что уже сделано для этой сборки, помнит queue.json (base_fix): sha, reruns, task."""
+        sha = str(r.get("headSha") or r.get("url") or "")
+        fix = self.q.get("base_fix") or {}
+        if fix.get("sha") != sha:
+            fix = {"sha": sha, "url": r.get("url") or "", "reruns": 0}  # покраснел другой коммит: всё заново
+        self.q["base_fix"] = fix
+        if fix.get("task"):
+            return
+        base, attempt = self.cfg["base_branch"], int(r.get("attempt") or 1)
+        if fix.get("rerun_attempt") == attempt and age_minutes(fix.get("rerun_at")) < BASE_RERUN_WAIT:
+            return  # перезапуск запрошен, но GitHub ещё показывает прежнюю, упавшую попытку
+        try:
+            limit = int(self.cfg.get("base_fix_reruns") or 0)
+        except (TypeError, ValueError):
+            limit = 0
+        if fix["reruns"] < limit and r.get("databaseId") and fix.get("rerun_attempt") != attempt \
+                and self.gh.rerun_failed(r["databaseId"]):
+            fix.update(reruns=fix["reruns"] + 1, rerun_at=iso(), rerun_attempt=attempt)
+            self.emit(None, "base_fix", f"ветка {base} красная: перезапустил упавшие задания сборки {fix['url']}. "
+                                        "Упадут снова — поставлю задачу на починку")
+            return
+        fix["task"] = self.enqueue_base_fix(r, fix)
+
+    def enqueue_base_fix(self, r: dict, fix: dict) -> str:
+        """Поставить задачу на починку базовой ветки. Плана у неё нет: исполнитель начинает сразу, а пауза
+        «ветка красная» её не останавливает (blocking_pauses)."""
+        base, sha = self.cfg["base_branch"], str(r.get("headSha") or "")
+        tid = "fix-base-" + (sha[:7].lower() if re.fullmatch(r"[0-9a-fA-F]{7,}", sha) else now().strftime("%m%d%H%M"))
+        if self.store.task(tid):
+            return tid  # задача для этого коммита уже есть (queue.json потерял запись о ней)
+        recent = sorted((t for t in self.by_id.values() if t.get("state") == "merged" and t.get("pr")),
+                        key=lambda t: t.get("state_at") or "", reverse=True)[:3]
+        log = self.gh.failed_log(r["databaseId"]) if r.get("databaseId") else ""
+        t = normalize_task({"id": tid, "title": f"Починить {base}: CI красный на {sha[:7] or 'последнем коммите'}",
+                            "text": base_fix_text(base, r, log, recent, fix.get("reruns") or 0)})
+        t.update(direct=True, complexity="complex", base_fix=True)
+        self.store.save_task(t)
+        self.store.log(tid, {"created": "base_fix", "run": r.get("url")})
+        self.by_id[tid] = t
+        self.tasks.append(t)
+        self.emit(t, "base_fix", f"{tid}: ветка {base} красная" + (" и после перезапуска сборки" if fix.get("reruns") else "")
+                  + f" — поставил задачу на починку. Сборка: {r.get('url', '')}")
+        return tid
 
     def advance(self, t: dict) -> None:
         st = t.get("state", "new")
@@ -1278,8 +1340,9 @@ class Dispatcher:
     def deps_ok(self, t: dict, by_id: dict[str, dict]) -> bool:
         return all(self.dep_status(t, d, by_id)[0] == "ok" for d in t.get("depends_on") or [])
 
-    def schedule(self, tasks: list[dict]) -> None:
-        by_id = {t["id"]: t for t in tasks}
+    def schedule(self, tasks: list[dict], by_id: dict[str, dict] | None = None) -> None:
+        """tasks — кого можно запускать; by_id — все задачи проекта, если tasks — только их часть."""
+        by_id = by_id or {t["id"]: t for t in tasks}
         conc = int(self.cfg["concurrency"])
         active = sum(1 for t in tasks if t.get("state") in IMPLEMENTING or t.get("launching"))
         for t in tasks:

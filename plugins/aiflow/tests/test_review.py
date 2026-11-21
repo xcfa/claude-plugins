@@ -144,6 +144,20 @@ class ReviewMain(ProjectCase):
         self.assertEqual(self.r.merges, [])
         self.assertEqual(self.last_report()["status"], "paused")
 
+    def test_red_base_branch_does_not_stop_the_task_that_fixes_it(self):
+        t = self.store.task("a")
+        t["base_fix"] = True
+        self.store.save_task(t)
+        q = self.store.queue()
+        q["pauses"]["integration_red"] = {"at": aiflow.iso(), "until": None}
+        self.store.save_queue(q)
+        res = self.run_review()
+        self.assertEqual(res["status"], "approved")
+        self.assertEqual(len(self.r.merges), 1)
+        q["pauses"]["manual"] = {"at": aiflow.iso(), "until": None}  # а ручная пауза останавливает и её
+        self.store.save_queue(q)
+        self.assertEqual(self.run_review()["status"], "paused")
+
     def test_pause_that_arrives_during_review_blocks_the_merge(self):
         def reviewer(r, pr, rnd, max_rounds, model, brief, tmp, *rest):
             q = self.store.queue()

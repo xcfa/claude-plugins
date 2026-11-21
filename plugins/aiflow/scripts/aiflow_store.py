@@ -8,7 +8,10 @@ import time
 import uuid
 from pathlib import Path
 
-from aiflow_core import AiflowError, DEFAULT_CONFIG, TERMINAL, iso, owner_alive, read_json, write_json
+from aiflow_core import (
+    AiflowError, COMPLEXITIES, DEFAULT_CONFIG, MODEL_FIELDS, TALK_KINDS, TASK_ID_RE, TERMINAL, check_model_field, iso,
+    owner_alive, read_json, write_json,
+)
 
 # ---------------------------------------------------------------- storage
 
@@ -320,3 +323,37 @@ class FileLock:
         """Содержимое lock-файла, если его владелец жив."""
         info = read_json(self.path, {}) or {}
         return info if owner_alive(info) else None
+
+
+def normalize_task(raw: dict) -> dict:
+    tid = str(raw.get("id", "")).strip().lower()
+    if not TASK_ID_RE.match(tid):
+        raise AiflowError(f"некорректный id задачи: {tid!r} (латиница, цифры, дефисы)")
+    kind = raw.get("kind") or "task"
+    if kind not in ("task",) + TALK_KINDS:
+        raise AiflowError(f"{tid}: kind должен быть task, discuss или ask")
+    cx = raw.get("complexity") or None  # обычно не задаётся: оценивает планировщик
+    if cx is not None and cx not in COMPLEXITIES:
+        raise AiflowError(f"{tid}: complexity должен быть одним из {', '.join(COMPLEXITIES)}")
+    text = str(raw.get("text") or "").strip()
+    if not text:
+        raise AiflowError(f"{tid}: пустой text")
+    try:
+        models = {f: check_model_field(f, raw.get(f)) for f in MODEL_FIELDS}
+    except AiflowError as e:
+        raise AiflowError(f"{tid}: {e}") from None
+    try:
+        items = max(1, int(raw.get("items") or 1))  # сколько независимых мелких пунктов в одной задаче
+    except (TypeError, ValueError):
+        raise AiflowError(f"{tid}: items должен быть числом пунктов задачи") from None
+    return {
+        "id": tid, "title": str(raw.get("title") or tid).strip(), "text": text, "complexity": cx, "kind": kind,
+        "items": items,
+        "depends_on": [str(d) for d in raw.get("depends_on") or []],
+        "ui": raw.get("ui") or None,
+        **models,
+        "allowed_protected_paths": [],
+        "state": "new", "pr": None, "sessions": {"planner": [], "worker": []},
+        "usage": {}, "created_at": iso(), "state_at": iso(),
+        "history": [{"at": iso(), "event": "created", "by": "intake"}],
+    }
