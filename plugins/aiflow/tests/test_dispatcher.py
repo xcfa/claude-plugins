@@ -939,6 +939,7 @@ class Pauses(ProjectCase):
         self.store.command({"cmd": "resume"})
         self.tick()
         self.assertEqual(self.pauses(), ["integration_red"])  # ручное «продолжить» красную ветку не снимает
+        self.assertEqual(self.store.queue()["pauses"]["integration_red"]["note"], "u")  # адрес сборки — для панели
         self.gh.push_run = {"status": "completed", "conclusion": "success"}
         events = self.tick()
         self.assertEqual(self.pauses(), [])
@@ -2523,3 +2524,55 @@ class TaskSchema(unittest.TestCase):
         import aiflow_task
         t = aiflow.normalize_task({"id": "a", "text": "x"})
         self.assertLessEqual(set(t), set(aiflow_task.Task.__annotations__))
+
+
+class PauseTheButtonCannotLift(ProjectCase):
+    """Красная базовая ветка: «Продолжить очередь» её не снимает, и об этом сказано прямо, а не «продолжает»."""
+
+    def red(self) -> None:
+        self.gh.push_run = {"status": "completed", "conclusion": "failure", "url": "https://example.test/runs/1"}
+        self.tick()
+
+    def test_panel_knows_the_button_is_useless_and_what_to_do(self):
+        self.red()
+        paused = aiflow.build_state(self.store)["paused"]
+        self.assertEqual(paused["reasons"], ["integration_red"])
+        self.assertEqual([k["reason"] for k in paused["kept"]], ["integration_red"])
+        self.assertEqual(paused["kept"][0]["url"], "https://example.test/runs/1")
+        self.assertIn("перезапустите упавшую сборку", paused["kept"][0]["lifts"])
+
+    def test_manual_pause_is_not_kept(self):
+        self.store.command({"cmd": "pause"})
+        self.tick()
+        self.assertEqual(aiflow.build_state(self.store)["paused"]["kept"], [])
+        self.assertIsNone(aiflow.paused_state({"paused": None}))
+
+    def test_resume_says_why_the_queue_still_stands(self):
+        self.red()
+        self.store.command({"cmd": "resume"})
+        events = self.tick()
+        kept = [e for e in events if e["kind"] == "pause_kept"]
+        self.assertEqual(len(kept), 1)
+        self.assertIn("эту паузу не снимает", kept[0]["text"])
+        self.assertIn("базовая ветка красная", kept[0]["text"])
+        self.assertEqual(self.kinds(self.tick()).count("pause_kept"), 0)  # одно нажатие — одно сообщение
+
+    def test_pause_event_says_how_it_is_lifted(self):
+        self.gh.push_run = {"status": "completed", "conclusion": "failure", "url": "https://example.test/runs/1"}
+        text = next(e["text"] for e in self.tick() if e["kind"] == "paused")
+        self.assertIn("https://example.test/runs/1", text)
+        self.assertIn("снимется сама", text)
+
+    def test_command_does_not_claim_the_queue_resumed(self):
+        self.red()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), mock.patch.object(aiflow, "queue_or_apply"):
+            aiflow.cmd_resume(argparse.Namespace(), self.root)
+        self.assertIn("всё ещё на паузе", out.getvalue())
+        self.assertNotIn("Очередь возобновлена", out.getvalue())
+        self.gh.push_run = {"status": "completed", "conclusion": "success"}
+        self.tick()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), mock.patch.object(aiflow, "queue_or_apply"):
+            aiflow.cmd_resume(argparse.Namespace(), self.root)
+        self.assertIn("Очередь возобновлена", out.getvalue())

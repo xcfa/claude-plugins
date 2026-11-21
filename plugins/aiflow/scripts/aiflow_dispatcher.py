@@ -14,7 +14,8 @@ from pathlib import Path
 
 from aiflow_core import (
     AMEND_MARKER, AiflowError, ENTRY, FINISHED, HISTORY_KEEP, HUMAN_CODES, HUMAN_MARKER, IMPLEMENTING, LIMIT_HITS_MAX,
-    LIMIT_LOG_TAIL, LIMIT_RE, MANUAL_PAUSES, MARKERS, PATH_ASK_RE, REVIEW_ACTIONS, STAGE_LABEL, STATION, TALK_KINDS,
+    LIMIT_LOG_TAIL, LIMIT_RE, MANUAL_PAUSES, MARKERS, PATH_ASK_RE, PAUSE_LIFTS, REVIEW_ACTIONS, STAGE_LABEL, STATION,
+    TALK_KINDS, kept_pause_text, kept_pauses,
     TERMINAL, WHAT_TO_DO, WORKER_STAGES, after, age_minutes, ci_summary, context_choice, inbox_dirs, is_direct,
     is_human_comment, iso, now, owner_alive, parse_iso, pid_alive, planner_choice, read_json, run, short_reason,
     visited_stations, worker_choice, write_json,
@@ -434,6 +435,10 @@ class Dispatcher:
                 self.pause("manual", None, "очередь поставлена на паузу вручную", note=c.get("reason", ""))
             elif kind == "resume":
                 # паузы «нет базовой ветки» и «красная ветка» снимает только их условие
+                kept = kept_pauses(self.q.get("pauses"))
+                if kept and not any(r in MANUAL_PAUSES for r in self.q.get("pauses") or {}):
+                    # снимать нечего, а очередь стоит: молча проглоченное «продолжить» выглядит как сбой
+                    self.emit(None, "pause_kept", "«Продолжить очередь» эту паузу не снимает: " + kept_pause_text(kept))
                 self.unpause(MANUAL_PAUSES, "очередь возобновлена")
             elif kind == "amend" and c.get("id") in by_id:
                 t = by_id[c["id"]]
@@ -492,7 +497,9 @@ class Dispatcher:
         if not r or r.get("status") != "completed":
             return
         if r.get("conclusion") in ("failure", "timed_out", "startup_failure"):
-            self.pause("integration_red", None, f"ветка {self.cfg['base_branch']} покраснела после мержа: {r.get('url', '')}")
+            # note — адрес красной сборки: панель ведёт на неё ссылкой
+            self.pause("integration_red", None, f"ветка {self.cfg['base_branch']} покраснела после мержа: "
+                       f"{r.get('url', '')}. Очередь стоит: {PAUSE_LIFTS['integration_red']}", note=r.get("url") or "")
         else:
             self.unpause("integration_red", f"ветка {self.cfg['base_branch']} снова зелёная")
 

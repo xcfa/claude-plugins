@@ -48,6 +48,7 @@ header .sub b { font-weight: 600; color: var(--ink); }
 .queue { display: flex; align-items: center; gap: 12px; }
 .queue .state { color: var(--muted); }
 .queue .state.paused { color: var(--wait); font-weight: 600; }
+.phead .sub.pausenote { color: var(--wait); max-width: 760px; }
 
 #waiting { margin-bottom: 32px; }
 #waiting h2, #usage h2, #stats h2, #events h2 { font-size: 15px; font-weight: 650; margin: 0 0 10px; }
@@ -385,6 +386,13 @@ function isBusy(key, id) {
 }
 function dis(key, id) { return isBusy(key, id) ? " disabled" : ""; }
 
+// «Продолжить очередь» снимает не всякую паузу: если причина остаётся, говорим об этом, а не «продолжает»
+function resumeToast(key) {
+  const pz = (project(key) || {}).paused;
+  const kept = (pz && pz.kept) || [];
+  return kept.length ? "Очередь всё ещё стоит: " + kept.map(x => x.lifts).join("; ") : "Очередь продолжает";
+}
+
 async function act(action, key, id, value) {
   const queued = QUEUED.has(action);
   const bk = busyKey(key, ["pause", "resume"].includes(action) ? null : id);
@@ -401,7 +409,7 @@ async function act(action, key, id, value) {
       : (d.started ? "Запустил координатора и открыл чат" : "Открыл чат с координатором") + ": напишите в нём, что сделать");
     if (action === "open_session" || action === "open_reviewer") return toast(/уже открыт/.test(d.where || "") ? "Вкладка сессии уже открыта — вывел её на передний план" : `Сессия открыта: ${d.where}`);
     if (action === "cancel" && d.warnings && d.warnings.length) { toast("Снята, но: " + d.warnings.join("; ")); setTimeout(load, 600); return; }
-    toast({ after: "Порядок задач изменён", amend: "Дополнение принято — его получит сессия задачи", allow_paths: "Пути разрешены, задача продолжит работу", cancel: "Задача снята", approve: "План одобрен", retry: "Повтор поставлен", pause: "Очередь на паузе", resume: "Очередь продолжает", forget: "Проект убран из службы" }[action] || "Готово");
+    toast({ after: "Порядок задач изменён", amend: "Дополнение принято — его получит сессия задачи", allow_paths: "Пути разрешены, задача продолжит работу", cancel: "Задача снята", approve: "План одобрен", retry: "Повтор поставлен", pause: "Очередь на паузе", resume: resumeToast(key), forget: "Проект убран из службы" }[action] || "Готово");
     setTimeout(load, 600);
   } catch (e) {
     if (queued) { busy.delete(bk); if (last) render(last); }
@@ -678,13 +686,25 @@ function renderProject(p) {
   const pz = p.paused;
   const why = r => r === "integration_red" ? "ветка " + p.base + " красная" : REASONS[r] || r;
   const reason = pz ? (pz.reasons || [pz.reason]).map(why).join(", ") : "";
-  const qstate = pz ? `<span class="state paused">Пауза: ${esc(reason)}${pz.until ? ", до " + time(pz.until) : ""}</span>` : `<span class="state">${queueLabel(p)}</span>`;
+  // kept — причины, которые кнопка не снимает (красная базовая ветка, нет базовой ветки): они уходят сами
+  const kept = (pz && pz.kept) || [];
+  const stuck = pz && kept.length === (pz.reasons || [pz.reason]).length;  // других причин нет: кнопка бессильна
+  const keptHint = kept.map(x => why(x.reason) + " — " + x.lifts).join("; ");
+  // у паузы, поставленной до 0.2.108, адреса сборки нет: тогда ведём на сборки базовой ветки
+  const redUrl = (kept.find(x => /^https?:\/\//.test(x.url || "")) || {}).url
+    || (kept.some(x => x.reason === "integration_red") && /^https?:\/\//.test(p.repo_url || "")
+      ? `${p.repo_url}/actions?query=${encodeURIComponent("branch:" + p.base)}` : "");
+  const qstate = pz ? `<span class="state paused"${kept.length ? ` title="${esc(keptHint)}"` : ""}>Пауза: ${esc(reason)}${pz.until ? ", до " + time(pz.until) : ""}${
+    redUrl ? ` · <a href="${esc(redUrl)}" target="_blank" rel="noopener">упавшая сборка</a>` : ""}</span>` : `<span class="state">${queueLabel(p)}</span>`;
   const give = `<button class="primary" data-act="open_orchestrator" data-project="${k}" title="Открыть чат с координатором проекта: просто напишите там, что сделать">Дать задачу</button> `;
-  const qbtn = give + `<button data-act="${pz ? "resume" : "pause"}" data-project="${k}"${dis(p.key, null)}>${pz ? "Продолжить очередь" : "Поставить на паузу"}</button>`;
+  const qbtn = give + (stuck
+    ? `<button disabled title="${esc("Кнопка эту паузу не снимает: " + keptHint)}">Продолжить очередь</button>`
+    : `<button data-act="${pz ? "resume" : "pause"}" data-project="${k}"${dis(p.key, null)}>${pz ? "Продолжить очередь" : "Поставить на паузу"}</button>`);
+  const pauseNote = kept.length ? `<div class="sub pausenote">Очередь стоит: ${esc(keptHint)}.${stuck ? " Кнопка «Продолжить очередь» эту паузу не снимает." : ""}</div>` : "";
   return `<section class="project">
     <div class="phead">
       <div><h2>${/^https?:\/\//.test(p.repo_url || "") ? `<a href="${esc(p.repo_url)}" target="_blank" rel="noopener" title="Открыть репозиторий">${esc(p.name)}</a>` : esc(p.name)}</h2>
-        <div class="sub">база <b>${esc(p.base)}</b>, до ${esc(p.concurrency)} сессий параллельно${mon}</div></div>
+        <div class="sub">база <b>${esc(p.base)}</b>, до ${esc(p.concurrency)} сессий параллельно${mon}</div>${pauseNote}</div>
       <div class="queue">${qstate}${qbtn}${forget}</div>
     </div>
     ${renderBoard(p)}

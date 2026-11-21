@@ -23,7 +23,8 @@ from aiflow_core import (
     AMEND_MARKER, AiflowError, BOT_LOGINS, CI_FAIL, CI_PASS, COMPLEXITIES, DEFAULT_CONFIG, EFFORTS, ENTRY, FINISHED,
     GH_NET_ANY, GH_NET_SAFE, GH_RETRY_DELAYS, HERE, HISTORY_KEEP, HUMAN_CODES, HUMAN_CODE_WORDS, HUMAN_MARKER,
     IMPLEMENTING, LIMIT_HITS_MAX, LIMIT_LOG_TAIL, LIMIT_RE, MANUAL_PAUSES, MARKERS, MODEL_FIELDS, MODEL_NAME_RE,
-    NOTIFY_KINDS, NO_TOAST_KINDS, NO_WINDOW, PATH_ASK_RE, PLANNER_PLAN_MD, PLANNER_TALK_MD, PLUGIN_ROOT,
+    NOTIFY_KINDS, NO_TOAST_KINDS, NO_WINDOW, PATH_ASK_RE, PAUSE_LIFTS, PAUSE_NAMES, PLANNER_PLAN_MD, PLANNER_TALK_MD,
+    PLUGIN_ROOT, kept_pause_text, kept_pauses,
     REVIEW_ACTIONS, SIDE_STATES, STAGES, STAGE_LABEL, STATION, TALK_KINDS, TASK_ID_RE, TEMPLATES, TERMINAL, TickBusy,
     VERSION, WHAT_TO_DO, WORKER_MD, WORKER_STAGES, _BOOT, _plugin_version, after, age_minutes, aiflow_home,
     boot_time, by_complexity, check_model_field, ci_summary, ci_text, context_choice, gh_is_read, gh_with_retry,
@@ -56,7 +57,7 @@ from aiflow_dispatcher import (
     Dispatcher, _BASE_SEEN, spawn_plan_check_process, spawn_review_process,
 )
 from aiflow_view import (
-    STATS_DAYS, STATS_STAGES, board_position, build_state, build_stats, fmt_hours, fmt_tokens, fmt_when, human_code,
+    STATS_DAYS, STATS_STAGES, board_position, build_state, build_stats, paused_state, fmt_hours, fmt_tokens, fmt_when, human_code,
     median, percentile, plan_check_activity, print_stats, print_status, review_activity, stage_hours, task_updated_at,
 )
 
@@ -498,8 +499,13 @@ def cmd_pause(args, root: Path) -> int:
 
 
 def cmd_resume(args, root: Path) -> int:
-    queue_or_apply(Store(root), {"cmd": "resume"})
-    print("Очередь возобновлена.")
+    store = Store(root)
+    kept = kept_pauses(store.queue().get("pauses"))
+    queue_or_apply(store, {"cmd": "resume"})
+    if kept:
+        print("Очередь всё ещё на паузе, эта команда её не снимает: " + kept_pause_text(kept) + ".")
+    else:
+        print("Очередь возобновлена.")
     return 0
 
 

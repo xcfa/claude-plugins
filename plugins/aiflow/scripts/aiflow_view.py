@@ -6,7 +6,8 @@ import datetime as dt
 import math
 
 from aiflow_core import (
-    FINISHED, HUMAN_CODES, HUMAN_CODE_WORDS, MODEL_FIELDS, PATH_ASK_RE, STAGE_LABEL, STATION, TALK_KINDS, TERMINAL,
+    FINISHED, HUMAN_CODES, HUMAN_CODE_WORDS, MODEL_FIELDS, PATH_ASK_RE, PAUSE_LIFTS, STAGE_LABEL, STATION, TALK_KINDS,
+    TERMINAL, kept_pauses,
     VERSION, age_minutes, ci_text, iso, now, owner_alive, parse_iso, read_json, short_reason, visited_stations,
     wanted_paths,
 )
@@ -114,6 +115,19 @@ def plan_check_activity(t: dict, store: "Store | None" = None) -> str:
             }.get(pc.get("phase") or "", "план ждёт ревьюера, одобрение — после ревью")
 
 
+def paused_state(q: dict) -> dict | None:
+    """Пауза очереди для панели. kept — причины, которые кнопка «Продолжить очередь» не снимает: у каждой, что
+    сделать, и адрес (красная сборка), если он известен. Когда других причин нет, кнопка не работает совсем."""
+    paused = q.get("paused")
+    if not paused:
+        return None
+    pauses = q.get("pauses") or {}
+    return {**paused, "kept": [{"reason": r, "lifts": PAUSE_LIFTS.get(r, "пауза снимется сама"),
+                                "url": str((pauses.get(r) or {}).get("note") or "")
+                                if str((pauses.get(r) or {}).get("note") or "").startswith("http") else ""}
+                               for r in kept_pauses(pauses)]}
+
+
 def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url: str = "") -> dict:
     cfg = store.config()
     q = store.queue()
@@ -197,7 +211,7 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
     total_usage, total_cost, unpriced = priced(project_usage, prices)
     return {
         "version": VERSION, "repo": store.root.name, "repo_url": repo_url, "base": cfg["base_branch"],
-        "paused": q.get("paused"), "review_lock": q.get("review_lock"), "concurrency": cfg["concurrency"],
+        "paused": paused_state(q), "review_lock": q.get("review_lock"), "concurrency": cfg["concurrency"],
         "monitor_pid": FileLock(store.runs / "monitor.lock").owner(),
         "usage": total_usage, "cost": round(total_cost, 4), "unpriced": unpriced,
         "coordinator": coordinator,  # чаты «Дать задачу»: входят в итог проекта, но не относятся ни к одной задаче
