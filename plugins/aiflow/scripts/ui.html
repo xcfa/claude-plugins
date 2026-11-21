@@ -684,23 +684,26 @@ function renderProject(p) {
   }
   const mon = p.monitor_pid ? "" : `, <span class="offline">очередь не обрабатывается — выполните aiflow up</span>`;
   const pz = p.paused;
-  const why = r => r === "integration_red" ? "ветка " + p.base + " красная" : REASONS[r] || r;
-  const reason = pz ? (pz.reasons || [pz.reason]).map(why).join(", ") : "";
-  // kept — причины, которые кнопка не снимает (красная базовая ветка, нет базовой ветки): они уходят сами
+  const reason = pz ? (pz.reasons || [pz.reason]).map(r => REASONS[r] || r).join(", ") : "";
+  // kept — причины паузы, которые кнопка не снимает (нет базовой ветки): они уходят сами
   const kept = (pz && pz.kept) || [];
   const stuck = pz && kept.length === (pz.reasons || [pz.reason]).length;  // других причин нет: кнопка бессильна
-  const keptHint = kept.map(x => why(x.reason) + " — " + x.lifts).join("; ");
-  // у паузы, поставленной до 0.2.108, адреса сборки нет: тогда ведём на сборки базовой ветки
-  const redUrl = (kept.find(x => /^https?:\/\//.test(x.url || "")) || {}).url
-    || (kept.some(x => x.reason === "integration_red") && /^https?:\/\//.test(p.repo_url || "")
-      ? `${p.repo_url}/actions?query=${encodeURIComponent("branch:" + p.base)}` : "");
-  const qstate = pz ? `<span class="state paused"${kept.length ? ` title="${esc(keptHint)}"` : ""}>Пауза: ${esc(reason)}${pz.until ? ", до " + time(pz.until) : ""}${
-    redUrl ? ` · <a href="${esc(redUrl)}" target="_blank" rel="noopener">упавшая сборка</a>` : ""}</span>` : `<span class="state">${queueLabel(p)}</span>`;
+  const keptHint = kept.map(x => (REASONS[x.reason] || x.reason) + " — " + x.lifts).join("; ");
+  // hold — красная базовая ветка: очередь работает, ждут только ревью и мерж
+  const hold = p.review_hold;
+  // у записи, сделанной до 0.2.108, адреса сборки нет: тогда ведём на сборки базовой ветки
+  const redUrl = hold && (/^https?:\/\//.test(hold.url || "") ? hold.url
+    : /^https?:\/\//.test(p.repo_url || "") ? `${p.repo_url}/actions?query=${encodeURIComponent("branch:" + p.base)}` : "");
+  const holdState = hold ? `<span class="state paused" title="${esc(hold.lifts)}">Ревью и мерж ждут: ветка ${esc(p.base)} красная${
+    redUrl ? ` · <a href="${esc(redUrl)}" target="_blank" rel="noopener">упавшая сборка</a>` : ""}</span>` : "";
+  const qstate = pz ? `<span class="state paused"${kept.length ? ` title="${esc(keptHint)}"` : ""}>Пауза: ${esc(reason)}${pz.until ? ", до " + time(pz.until) : ""}</span>`
+    : holdState || `<span class="state">${queueLabel(p)}</span>`;
   const give = `<button class="primary" data-act="open_orchestrator" data-project="${k}" title="Открыть чат с координатором проекта: просто напишите там, что сделать">Дать задачу</button> `;
   const qbtn = give + (stuck
     ? `<button disabled title="${esc("Кнопка эту паузу не снимает: " + keptHint)}">Продолжить очередь</button>`
     : `<button data-act="${pz ? "resume" : "pause"}" data-project="${k}"${dis(p.key, null)}>${pz ? "Продолжить очередь" : "Поставить на паузу"}</button>`);
-  const pauseNote = kept.length ? `<div class="sub pausenote">Очередь стоит: ${esc(keptHint)}.${stuck ? " Кнопка «Продолжить очередь» эту паузу не снимает." : ""}</div>` : "";
+  const pauseNote = (kept.length ? `<div class="sub pausenote">Очередь стоит: ${esc(keptHint)}.${stuck ? " Кнопка «Продолжить очередь» эту паузу не снимает." : ""}</div>` : "")
+    + (hold ? `<div class="sub pausenote">Ветка ${esc(p.base)} красная: задачи планируются и пишутся как обычно, ${esc(hold.lifts)}.</div>` : "");
   return `<section class="project">
     <div class="phead">
       <div><h2>${/^https?:\/\//.test(p.repo_url || "") ? `<a href="${esc(p.repo_url)}" target="_blank" rel="noopener" title="Открыть репозиторий">${esc(p.name)}</a>` : esc(p.name)}</h2>

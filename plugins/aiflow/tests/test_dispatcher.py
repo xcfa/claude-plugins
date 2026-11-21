@@ -5,6 +5,7 @@ import argparse
 import contextlib
 import io
 import json
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -928,13 +929,13 @@ class Pauses(ProjectCase):
         self.assertNotIn("unpaused", self.kinds(events))
         self.assertEqual(self.state("a"), "new")
 
-    def test_red_base_branch_pauses_and_green_resumes(self):
+    def test_red_base_branch_holds_reviews_and_green_releases_them(self):
         self.gh.push_run = {"status": "completed", "conclusion": "failure", "url": "u"}
         self.add("a")
         events = self.tick()
         self.assertEqual(self.pauses(), ["integration_red"])
         self.assertIn("paused", self.kinds(events))
-        self.assertEqual(self.state("a"), "new")
+        self.assertEqual(self.state("a"), "planning")  # планировать красная ветка не мешает
         self.assertEqual(self.kinds(self.tick()).count("paused"), 0)  # не повторяем каждый проход
         self.store.command({"cmd": "resume"})
         self.tick()
@@ -944,17 +945,20 @@ class Pauses(ProjectCase):
         events = self.tick()
         self.assertEqual(self.pauses(), [])
         self.assertIn("unpaused", self.kinds(events))
-        self.assertEqual(self.state("a"), "planning")
 
-    def test_manual_resume_with_another_reason_left(self):
+    def test_manual_resume_with_the_red_branch_left(self):
         self.gh.push_run = {"status": "completed", "conclusion": "failure"}
         self.store.command({"cmd": "pause"})
+        self.add("a")
         self.tick()
         self.assertEqual(self.pauses(), ["integration_red", "manual"])
+        self.assertEqual(self.state("a"), "new")  # ручная пауза держит всё
         self.store.command({"cmd": "resume"})
         events = self.tick()
         self.assertEqual(self.pauses(), ["integration_red"])
-        self.assertIn("pause_kept", self.kinds(events))
+        text = next(e["text"] for e in events if e["kind"] == "unpaused")  # очередь пошла: это не «пауза осталась»
+        self.assertIn("ревью и мерж ждут", text)
+        self.assertEqual(self.state("a"), "planning")
 
     def test_queue_file_of_the_old_version(self):
         aiflow.write_json(self.root / ".aiflow" / "queue.json",
@@ -2527,19 +2531,18 @@ class TaskSchema(unittest.TestCase):
 
 
 class PauseTheButtonCannotLift(ProjectCase):
-    """Красная базовая ветка: «Продолжить очередь» её не снимает, и об этом сказано прямо, а не «продолжает»."""
+    """Нет базовой ветки: «Продолжить очередь» эту паузу не снимает, и об этом сказано прямо, а не «продолжает»."""
 
-    def red(self) -> None:
-        self.gh.push_run = {"status": "completed", "conclusion": "failure", "url": "https://example.test/runs/1"}
+    def no_base(self, missing: bool = True) -> None:
+        aiflow._BASE_SEEN[(str(self.root), "master")] = (time.time(), not missing)
         self.tick()
 
     def test_panel_knows_the_button_is_useless_and_what_to_do(self):
-        self.red()
+        self.no_base()
         paused = aiflow.build_state(self.store)["paused"]
-        self.assertEqual(paused["reasons"], ["integration_red"])
-        self.assertEqual([k["reason"] for k in paused["kept"]], ["integration_red"])
-        self.assertEqual(paused["kept"][0]["url"], "https://example.test/runs/1")
-        self.assertIn("перезапустите упавшую сборку", paused["kept"][0]["lifts"])
+        self.assertEqual(paused["reasons"], ["base_missing"])
+        self.assertEqual([k["reason"] for k in paused["kept"]], ["base_missing"])
+        self.assertIn("появится на origin", paused["kept"][0]["lifts"])
 
     def test_manual_pause_is_not_kept(self):
         self.store.command({"cmd": "pause"})
@@ -2548,34 +2551,103 @@ class PauseTheButtonCannotLift(ProjectCase):
         self.assertIsNone(aiflow.paused_state({"paused": None}))
 
     def test_resume_says_why_the_queue_still_stands(self):
-        self.red()
+        self.no_base()
         self.store.command({"cmd": "resume"})
         events = self.tick()
         kept = [e for e in events if e["kind"] == "pause_kept"]
         self.assertEqual(len(kept), 1)
         self.assertIn("эту паузу не снимает", kept[0]["text"])
-        self.assertIn("базовая ветка красная", kept[0]["text"])
+        self.assertIn("нет базовой ветки", kept[0]["text"])
         self.assertEqual(self.kinds(self.tick()).count("pause_kept"), 0)  # одно нажатие — одно сообщение
 
-    def test_pause_event_says_how_it_is_lifted(self):
-        self.gh.push_run = {"status": "completed", "conclusion": "failure", "url": "https://example.test/runs/1"}
-        text = next(e["text"] for e in self.tick() if e["kind"] == "paused")
-        self.assertIn("https://example.test/runs/1", text)
-        self.assertIn("снимется сама", text)
-
     def test_command_does_not_claim_the_queue_resumed(self):
-        self.red()
+        self.no_base()
         out = io.StringIO()
         with contextlib.redirect_stdout(out), mock.patch.object(aiflow, "queue_or_apply"):
             aiflow.cmd_resume(argparse.Namespace(), self.root)
         self.assertIn("всё ещё на паузе", out.getvalue())
         self.assertNotIn("Очередь возобновлена", out.getvalue())
-        self.gh.push_run = {"status": "completed", "conclusion": "success"}
-        self.tick()
+        self.no_base(missing=False)
         out = io.StringIO()
         with contextlib.redirect_stdout(out), mock.patch.object(aiflow, "queue_or_apply"):
             aiflow.cmd_resume(argparse.Namespace(), self.root)
         self.assertIn("Очередь возобновлена", out.getvalue())
+
+
+class RedBaseHoldsOnlyReviews(ProjectCase):
+    """Красная базовая ветка: задачи планируются и пишутся, ждут только ревью и мерж."""
+
+    URL = "https://example.test/runs/1"
+
+    def red(self) -> list[dict]:
+        self.gh.push_run = {"status": "completed", "conclusion": "failure", "url": self.URL}
+        return self.tick()
+
+    def green(self) -> list[dict]:
+        self.gh.push_run = {"status": "completed", "conclusion": "success"}
+        return self.tick()
+
+    def test_planning_and_implementation_go_on(self):
+        self.add("a")
+        self.to_plan_review("p", 3)
+        self.gh.add_label(3, "plan-approved")
+        self.red()
+        self.tick()
+        self.assertEqual(self.state("a"), "planning")
+        self.assertEqual(self.state("p"), "in_progress")
+        worker = next(x for x in self.claude.launched if x["agent"] == "aiflow:worker")
+        self.assertIn("The CI of the base branch master is red now", worker["prompt"])  # чужую поломку не чинить
+        self.assertIn(self.URL, worker["prompt"])
+        planner = next(x for x in self.claude.launched if x["name"] == "planner: a")
+        self.assertNotIn("is red now", planner["prompt"])
+
+    def test_ready_pr_waits_for_the_green_branch(self):
+        self.to_ready("a", 5)
+        self.red()
+        self.tick()
+        self.assertEqual(self.state("a"), "ready")
+        self.assertEqual(self.spawned, [])
+        row = aiflow.build_state(self.store)["tasks"][0]
+        self.assertEqual(row["activity"], "ревью начнётся, когда базовая ветка позеленеет")
+        self.green()
+        self.assertEqual(self.state("a"), "in_review")
+
+    def test_queue_is_not_called_paused(self):
+        events = self.red()
+        text = next(e["text"] for e in events if e["kind"] == "paused")
+        self.assertIn(self.URL, text)
+        self.assertIn("Задачи планируются и пишутся как обычно", text)
+        self.assertIn("продолжатся сами", text)
+        state = aiflow.build_state(self.store)
+        self.assertIsNone(state["paused"])  # значок, строка состояния и чат по нему говорят «пауза»
+        hold = state["review_hold"]
+        self.assertEqual((hold["reasons"], hold["url"]), (["integration_red"], self.URL))
+        self.assertIn("почините ветку", hold["lifts"])  # в этих тестах aiflow сам не чинит (base_fix: off)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            aiflow.print_status(state)
+        self.assertIn("базовая ветка красная: ревью и мерж ждут", out.getvalue())
+        self.assertNotIn("ПАУЗА", out.getvalue())
+        self.assertIsNone(aiflow.build_state(self.store, {})["paused"])
+        self.green()
+        self.assertIsNone(aiflow.build_state(self.store)["review_hold"])
+
+    def test_manual_pause_on_top_is_a_pause(self):
+        self.red()
+        self.store.command({"cmd": "pause"})
+        self.tick()
+        state = aiflow.build_state(self.store)
+        self.assertEqual(state["paused"]["reasons"], ["manual"])
+        self.assertEqual(state["review_hold"]["reasons"], ["integration_red"])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), mock.patch.object(aiflow, "queue_or_apply"):
+            aiflow.cmd_resume(argparse.Namespace(), self.root)
+        self.assertIn("Очередь возобновлена. Ревью и мерж ждут: базовая ветка красная", out.getvalue())
+
+    def test_resume_pressed_with_only_the_red_branch_says_nothing_false(self):
+        self.red()
+        self.store.command({"cmd": "resume"})
+        self.assertEqual(self.kinds(self.tick()).count("pause_kept"), 0)  # очередь и так работает
 
 
 class BaseFix(ProjectCase):
@@ -2621,7 +2693,7 @@ class BaseFix(ProjectCase):
         self.assertEqual([t["id"] for t in self.store.tasks()], ["a"])
         self.assertEqual(self.state("a"), "planning")
 
-    def test_second_failure_gives_a_task_that_runs_through_the_pause(self):
+    def test_second_failure_gives_a_task_that_the_red_branch_does_not_hold(self):
         self.add("m1", state="merged", pr=11, title="UI kit", state_at=ago(20), cleaned=True)
         self.add("a")
         self.red()
@@ -2637,11 +2709,12 @@ class BaseFix(ProjectCase):
                      "gh run view 7 --log-failed", "failed again"):
             self.assertIn(part, t["text"])
         self.assertIn(tid, " ".join(e["text"] for e in events if e["kind"] == "base_fix"))
-        # исполнитель запущен сразу, без плана, хотя очередь на паузе; обычная задача ждёт
+        # исполнитель запущен сразу, без плана; обычная задача тоже идёт: красная ветка держит только ревью
         self.assertEqual(self.pauses(), ["integration_red"])
         self.assertEqual(t["state"], "in_progress")
-        self.assertEqual(self.claude.launched[-1]["agent"], "aiflow:worker")
-        self.assertEqual(self.state("a"), "new")
+        fixer = next(x for x in self.claude.launched if x["name"] == f"worker: {tid}")
+        self.assertNotIn("Another task corrects it", fixer["prompt"])  # это и есть та задача
+        self.assertEqual(self.state("a"), "planning")
         self.tick()
         self.assertEqual(len([x for x in self.store.tasks() if x.get("base_fix")]), 1)  # одна сборка — одна задача
         self.assertEqual(self.gh.reruns, [7])
@@ -2708,7 +2781,7 @@ class BaseFix(ProjectCase):
 
     def test_panel_says_what_aiflow_does(self):
         def note() -> str:
-            return aiflow.build_state(self.store)["paused"]["kept"][0]["lifts"]
+            return aiflow.build_state(self.store)["review_hold"]["lifts"]
 
         self.red()
         self.tick()

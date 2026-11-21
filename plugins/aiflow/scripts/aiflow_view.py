@@ -7,7 +7,7 @@ import math
 
 from aiflow_core import (
     FINISHED, HUMAN_CODES, HUMAN_CODE_WORDS, MODEL_FIELDS, PATH_ASK_RE, PAUSE_LIFTS, STAGE_LABEL, STATION, TALK_KINDS,
-    TERMINAL, kept_pauses,
+    TERMINAL, blocking_pauses, kept_pauses, queue_pauses,
     VERSION, age_minutes, ci_text, iso, now, owner_alive, parse_iso, read_json, short_reason, visited_stations,
     wanted_paths,
 )
@@ -133,21 +133,27 @@ def base_fix_note(q: dict, cfg: dict | None, by_id: dict[str, dict] | None) -> s
     return "aiflow чинит сам: перезапускает упавшие задания сборки, а если они падают снова — ставит задачу на починку"
 
 
-def paused_state(q: dict, cfg: dict | None = None, by_id: dict[str, dict] | None = None) -> dict | None:
-    """Пауза очереди для панели. kept — причины, которые кнопка «Продолжить очередь» не снимает: у каждой, что
-    её снимет, и адрес (красная сборка), если он известен. Когда других причин нет, кнопка не работает совсем."""
+def paused_state(q: dict) -> dict | None:
+    """Пауза очереди для панели. kept — причины, которые кнопка «Продолжить очередь» не снимает (нет базовой
+    ветки): у каждой, что её снимет. Когда других причин нет, кнопка не работает совсем."""
     paused = q.get("paused")
     if not paused:
         return None
     pauses = q.get("pauses") or {}
-    kept = []
-    for r in kept_pauses(pauses):
-        note = str((pauses.get(r) or {}).get("note") or "")
-        lifts = PAUSE_LIFTS.get(r, "пауза снимется сама")
-        if r == "integration_red":
-            lifts += ": " + base_fix_note(q, cfg, by_id)
-        kept.append({"reason": r, "lifts": lifts, "url": note if note.startswith("http") else ""})
-    return {**paused, "kept": kept}
+    return {**paused, "kept": [{"reason": r, "lifts": PAUSE_LIFTS.get(r, "пауза снимется сама")}
+                               for r in kept_pauses(pauses) if r in queue_pauses(pauses)]}
+
+
+def review_hold_state(q: dict, cfg: dict | None = None, by_id: dict[str, dict] | None = None) -> dict | None:
+    """Ревью и мерж ждут, а очередь работает (красная базовая ветка): что их отпустит, что aiflow уже
+    делает и адрес упавшей сборки, если он известен."""
+    hold = q.get("review_hold")
+    if not hold:
+        return None
+    note = str(hold.get("note") or "")
+    return {"reasons": hold.get("reasons") or [], "at": hold.get("at"),
+            "lifts": PAUSE_LIFTS["integration_red"] + ": " + base_fix_note(q, cfg, by_id),
+            "url": note if note.startswith("http") else ""}
 
 
 def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url: str = "") -> dict:
@@ -212,6 +218,8 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
                          + (f". Что делает: {t['route_note']}" if t.get("route_note") else "")) if doing_self
                         else ("ждёт задачу: " + ", ".join(waits_for)) if waits_for
                         else plan_check_activity(t, store) if st == "plan_check"
+                        else "ревью начнётся, когда базовая ветка позеленеет" if st == "ready" and q.get("review_hold")
+                        and not q.get("paused") and blocking_pauses(q.get("pauses"), t)
                         else review_activity(store, t, cur.get("state"), int(cfg["max_rounds"])),
             "waits_for": waits_for,
             "ci": t.get("ci") if st in ("ready", "in_review") else None,
@@ -233,7 +241,7 @@ def build_state(store: Store, sessions: dict[str, dict] | None = None, repo_url:
     total_usage, total_cost, unpriced = priced(project_usage, prices)
     return {
         "version": VERSION, "repo": store.root.name, "repo_url": repo_url, "base": cfg["base_branch"],
-        "paused": paused_state(q, cfg, by_id), "review_lock": q.get("review_lock"), "concurrency": cfg["concurrency"],
+        "paused": paused_state(q), "review_hold": review_hold_state(q, cfg, by_id), "review_lock": q.get("review_lock"), "concurrency": cfg["concurrency"],
         "monitor_pid": FileLock(store.runs / "monitor.lock").owner(),
         "usage": total_usage, "cost": round(total_cost, 4), "unpriced": unpriced,
         "coordinator": coordinator,  # чаты «Дать задачу»: входят в итог проекта, но не относятся ни к одной задаче
@@ -270,6 +278,7 @@ def print_status(state: dict) -> None:
     p = state["paused"]
     head = f"aiflow · {state['repo']} · база {state['base']}"
     head += f" · ПАУЗА ({', '.join(p.get('reasons') or [p.get('reason')])})" if p else ""
+    head += " · базовая ветка красная: ревью и мерж ждут" if state.get("review_hold") else ""
     head += "" if state["monitor_pid"] else " · монитор не запущен"
     print(head)
     if not state["tasks"]:

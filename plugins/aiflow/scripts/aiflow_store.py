@@ -9,21 +9,26 @@ import uuid
 from pathlib import Path
 
 from aiflow_core import (
-    AiflowError, COMPLEXITIES, DEFAULT_CONFIG, MODEL_FIELDS, TALK_KINDS, TASK_ID_RE, TERMINAL, check_model_field, iso,
+    AiflowError, COMPLEXITIES, DEFAULT_CONFIG, MODEL_FIELDS, REVIEW_PAUSES, TALK_KINDS, TASK_ID_RE, TERMINAL,
+    check_model_field, iso,
     owner_alive, read_json, write_json,
 )
 
 # ---------------------------------------------------------------- storage
 
 def sync_queue(q: dict) -> dict:
-    """Пересчитать производные поля очереди: paused — главная из причин паузы (сначала бессрочные),
+    """Пересчитать производные поля очереди: paused — главная из причин, по которым очередь стоит целиком
+    (сначала бессрочные); review_hold — причины, которые держат только ревью и мерж (красная базовая ветка);
     review_lock — первый PR на ревью."""
-    pauses = q.get("pauses") or {}
+    every = q.get("pauses") or {}
+    pauses = {r: p for r, p in every.items() if r not in REVIEW_PAUSES}
     if pauses:
         reason = sorted(pauses, key=lambda r: (bool(pauses[r].get("until")), pauses[r].get("at") or ""))[0]
         q["paused"] = {**pauses[reason], "reason": reason, "reasons": sorted(pauses)}
     else:
         q["paused"] = None
+    hold = sorted(r for r in every if r in REVIEW_PAUSES)
+    q["review_hold"] = {**every[hold[0]], "reasons": hold} if hold else None
     locks = q.get("review_locks") or []
     q["review_lock"] = locks[0] if locks else None
     return q

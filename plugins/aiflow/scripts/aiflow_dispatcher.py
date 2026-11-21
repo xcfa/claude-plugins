@@ -15,7 +15,7 @@ from pathlib import Path
 from aiflow_core import (
     AMEND_MARKER, AiflowError, ENTRY, FINISHED, HISTORY_KEEP, HUMAN_CODES, HUMAN_MARKER, IMPLEMENTING, LIMIT_HITS_MAX,
     LIMIT_LOG_TAIL, LIMIT_RE, MANUAL_PAUSES, MARKERS, PATH_ASK_RE, PAUSE_LIFTS, REVIEW_ACTIONS, STAGE_LABEL, STATION,
-    TALK_KINDS, blocking_pauses, kept_pause_text, kept_pauses,
+    TALK_KINDS, blocking_pauses, kept_pause_text, kept_pauses, queue_pauses,
     TERMINAL, WHAT_TO_DO, WORKER_STAGES, after, age_minutes, ci_summary, context_choice, inbox_dirs, is_direct,
     is_human_comment, iso, now, owner_alive, parse_iso, pid_alive, planner_choice, read_json, run, short_reason,
     visited_stations, worker_choice, write_json,
@@ -254,16 +254,16 @@ class Dispatcher:
         self.emit(None, "paused", text)
 
     def unpause(self, reasons, text: str) -> None:
-        """Снять причины паузы. Очередь продолжает, только когда причин не осталось."""
+        """Снять причины паузы. Очередь продолжает, когда не осталось причин, которые держат её целиком."""
         pauses = self.q.setdefault("pauses", {})
         gone = [r for r in ([reasons] if isinstance(reasons, str) else reasons) if pauses.pop(r, None) is not None]
         if not gone:
             return
         sync_queue(self.q)
-        if pauses:
-            self.emit(None, "pause_kept", f"{text}; очередь всё ещё на паузе: {', '.join(sorted(pauses))}")
+        if queue_pauses(pauses):
+            self.emit(None, "pause_kept", f"{text}; очередь всё ещё на паузе: {', '.join(queue_pauses(pauses))}")
         else:
-            self.emit(None, "unpaused", text)
+            self.emit(None, "unpaused", text + ("; ревью и мерж ждут: базовая ветка красная" if pauses else ""))
 
     def check_limit(self, entry: dict | None, t: dict | None = None) -> bool:
         """Сессия упёрлась в лимит использования? Тогда пауза очереди. Признак — текст в конце лога,
@@ -308,6 +308,13 @@ class Dispatcher:
 
     # -- launching
     def launch(self, t: dict, role: str, prompt: str, model=None, effort=None) -> bool:
+        red = (self.q.get("pauses") or {}).get("integration_red")
+        if red and role == "worker" and not t.get("base_fix"):
+            # иначе исполнитель, увидев упавшие тесты базовой ветки, чинит их у себя: вторая починка того же
+            prompt += (f"\nThe CI of the base branch {self.cfg['base_branch']} is red now"
+                       + (f" ({red['note']})" if str(red.get("note") or "").startswith("http") else "")
+                       + ". Another task corrects it: do not correct that failure in your PR. Tests that fail on "
+                         "the base branch for the same cause are not your regression.")
         name = f"{role}: {t['id']}"
         t["launching"] = {"role": role, "name": name, "at": iso()}
         self.store.save_task(t)
@@ -415,13 +422,10 @@ class Dispatcher:
                 self.emit(t, "error", f"{t['id']}: {e}", key=f"err:{str(e)[:60]}")
             self.store.save_task(t)
         pauses = self.q.get("pauses") or {}
-        if not pauses:
-            self.schedule(tasks)
-        else:
-            # пауза «базовая ветка красная» не останавливает задачу, которая эту ветку чинит
-            free = [t for t in tasks if not blocking_pauses(pauses, t)]
-            if free:
-                self.schedule(free, by_id)
+        if not queue_pauses(pauses):
+            # Красная базовая ветка держит только ревью и мерж: планирование и реализация идут. Задачу,
+            # которая чинит ветку, не держит и она.
+            self.schedule(tasks, reviewable=[t for t in tasks if not blocking_pauses(pauses, t)])
         self.collect_usage(tasks)
         collect_coordinator_usage(self.store)
         self.check_batch_done(tasks)
@@ -444,7 +448,7 @@ class Dispatcher:
                 self.pause("manual", None, "очередь поставлена на паузу вручную", note=c.get("reason", ""))
             elif kind == "resume":
                 # паузы «нет базовой ветки» и «красная ветка» снимает только их условие
-                kept = kept_pauses(self.q.get("pauses"))
+                kept = [r for r in kept_pauses(self.q.get("pauses")) if r in queue_pauses(self.q.get("pauses"))]
                 if kept and not any(r in MANUAL_PAUSES for r in self.q.get("pauses") or {}):
                     # снимать нечего, а очередь стоит: молча проглоченное «продолжить» выглядит как сбой
                     self.emit(None, "pause_kept", "«Продолжить очередь» эту паузу не снимает: " + kept_pause_text(kept))
@@ -509,14 +513,14 @@ class Dispatcher:
             auto = str(self.cfg.get("base_fix") or "off").lower() != "off"
             # note — адрес красной сборки: панель ведёт на неё ссылкой
             self.pause("integration_red", None, f"ветка {self.cfg['base_branch']} покраснела после мержа: "
-                       f"{r.get('url', '')}. Очередь стоит: {PAUSE_LIFTS['integration_red']}"
+                       f"{r.get('url', '')}. Задачи планируются и пишутся как обычно; {PAUSE_LIFTS['integration_red']}"
                        + (". Чиню сам: перезапускаю упавшие задания, а если упадут снова — ставлю задачу на починку"
                           if auto else ""), note=r.get("url") or "")
             if auto:
                 self.fix_base(r)
         else:
             self.q.pop("base_fix", None)
-            self.unpause("integration_red", f"ветка {self.cfg['base_branch']} снова зелёная")
+            self.unpause("integration_red", f"ветка {self.cfg['base_branch']} снова зелёная: ревью и мерж продолжают")
 
     def fix_base(self, r: dict) -> None:
         """Красная базовая ветка чинится без человека. Сначала перезапускаются упавшие задания сборки:
@@ -1340,9 +1344,10 @@ class Dispatcher:
     def deps_ok(self, t: dict, by_id: dict[str, dict]) -> bool:
         return all(self.dep_status(t, d, by_id)[0] == "ok" for d in t.get("depends_on") or [])
 
-    def schedule(self, tasks: list[dict], by_id: dict[str, dict] | None = None) -> None:
-        """tasks — кого можно запускать; by_id — все задачи проекта, если tasks — только их часть."""
-        by_id = by_id or {t["id"]: t for t in tasks}
+    def schedule(self, tasks: list[dict], reviewable: list[dict] | None = None) -> None:
+        """Запустить сессии задач, которым пора, и начать ревью готовых PR. reviewable — чьи PR можно
+        ревьюить сейчас; None — всех."""
+        by_id = {t["id"]: t for t in tasks}
         conc = int(self.cfg["concurrency"])
         active = sum(1 for t in tasks if t.get("state") in IMPLEMENTING or t.get("launching"))
         for t in tasks:
@@ -1397,7 +1402,7 @@ class Dispatcher:
                 elif retry:
                     t["retry_pending"] = True
                 self.store.save_task(t)
-        self.schedule_reviews(tasks, by_id)
+        self.schedule_reviews(tasks if reviewable is None else reviewable, by_id)
 
     def changed_files(self, t: dict) -> set[str] | None:
         """Файлы PR задачи (с кэшем по коммиту); None — узнать не удалось."""
